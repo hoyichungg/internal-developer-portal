@@ -7,6 +7,7 @@ async fn main() {
         .mount(
             "/",
             rocket::routes![
+                rust_webServer::rocket_routes::authorization::login,
                 rust_webServer::rocket_routes::rustaceans::get_rustaceans,
                 rust_webServer::rocket_routes::rustaceans::view_rustacean,
                 rust_webServer::rocket_routes::rustaceans::create_rustacean,
