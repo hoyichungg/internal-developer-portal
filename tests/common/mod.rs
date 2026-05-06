@@ -1,50 +1,102 @@
 use reqwest::{blocking::Client, StatusCode};
 use serde_json::{json, Value};
+use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
-pub static APP_HOST: &'static str = "http://127.0.0.1:8000";
+pub static APP_HOST: &str = "http://127.0.0.1:8000";
+pub static DATABASE_URL: &str = "postgres://postgres:postgres@localhost:5432/app_db";
+static UNIQUE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-pub fn create_test_rustacean(client: &Client) -> Value {
+pub fn unique_name(prefix: &str) -> String {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let counter = UNIQUE_COUNTER.fetch_add(1, Ordering::Relaxed);
+
+    format!(
+        "{}_{}_{}_{}",
+        prefix,
+        std::process::id(),
+        timestamp,
+        counter
+    )
+}
+
+pub fn create_test_user(username: &str, password: &str, roles: &str) {
+    let output = Command::new(env!("CARGO_BIN_EXE_cli"))
+        .args(["users", "create", username, password, roles])
+        .env("DATABASE_URL", DATABASE_URL)
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+pub fn delete_test_user(id: i32) {
+    let output = Command::new(env!("CARGO_BIN_EXE_cli"))
+        .args(["users", "delete", &id.to_string()])
+        .env("DATABASE_URL", DATABASE_URL)
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+pub fn create_test_maintainer(client: &Client) -> Value {
     let response = client
-        .post(format!("{}/rustaceans", APP_HOST))
+        .post(format!("{}/maintainers", APP_HOST))
         .json(&json!({
-          "name":"Luke ho",
+          "display_name":"Luke Ho",
           "email": "luke@ho.com"
         }))
         .send()
         .unwrap();
     assert_eq!(response.status(), StatusCode::CREATED);
 
-    response.json().unwrap()
+    response.json::<Value>().unwrap()["data"].clone()
 }
 
-pub fn create_test_crate(client: &Client, rustacean: &Value) -> Value {
+pub fn create_test_package(client: &Client, maintainer: &Value) -> Value {
     let response = client
-        .post(format!("{}/crates", APP_HOST))
+        .post(format!("{}/packages", APP_HOST))
         .json(&json!({
-          "rustacean_id": rustacean["id"],
-          "code": "luke",
-          "name":"Luke ho",
+          "maintainer_id": maintainer["id"],
+          "slug": "catalog-api",
+          "name":"Catalog API",
           "version":"0.1",
-          "description": "luke crate description",
+          "status": "active",
+          "description": "Internal software catalog service",
+          "repository_url": "https://github.com/acme/catalog-api",
+          "documentation_url": "https://docs.acme.test/catalog-api",
         }))
         .send()
         .unwrap();
     assert_eq!(response.status(), StatusCode::CREATED);
 
-    response.json().unwrap()
+    response.json::<Value>().unwrap()["data"].clone()
 }
 
-pub fn delete_test_rustacean(client: &Client, rustacean: Value) {
+pub fn delete_test_maintainer(client: &Client, maintainer: Value) {
     let response = client
-        .delete(format!("{}/rustaceans/{}", APP_HOST, rustacean["id"]))
+        .delete(format!("{}/maintainers/{}", APP_HOST, maintainer["id"]))
         .send()
         .unwrap();
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
 }
 
-pub fn delete_test_crate(client: &Client, a_crate: Value) {
+pub fn delete_test_package(client: &Client, package: Value) {
     let response = client
-        .delete(format!("{}/crates/{}", APP_HOST, a_crate["id"]))
+        .delete(format!("{}/packages/{}", APP_HOST, package["id"]))
         .send()
         .unwrap();
     assert_eq!(response.status(), StatusCode::NO_CONTENT);

@@ -1,11 +1,13 @@
 use clap::{value_parser, Arg, Command};
 
-extern crate rust_webServer;
+extern crate rust_web_server;
 
 #[tokio::main]
 async fn main() {
-    let matches = Command::new("rust_webServer")
-        .about("rust_webServer commands")
+    dotenvy::dotenv().ok();
+
+    let matches = Command::new("rust_web_server")
+        .about("rust_web_server commands")
         .arg_required_else_help(true)
         .subcommand(
             Command::new("users")
@@ -38,10 +40,10 @@ async fn main() {
         )
         .get_matches();
 
-    match matches.subcommand() {
-        Some(("users", sub_matches)) => match sub_matches.subcommand() {
+    if let Some(("users", sub_matches)) = matches.subcommand() {
+        match sub_matches.subcommand() {
             Some(("create", sub_matches)) => {
-                rust_webServer::commands::create_user(
+                rust_web_server::commands::create_user(
                     sub_matches
                         .get_one::<String>("username")
                         .unwrap()
@@ -58,15 +60,14 @@ async fn main() {
                 )
                 .await
             }
-            Some(("list", _)) => rust_webServer::commands::list_users().await,
+            Some(("list", _)) => rust_web_server::commands::list_users().await,
             Some(("delete", sub_matches)) => {
-                rust_webServer::commands::delete_user(
+                rust_web_server::commands::delete_user(
                     sub_matches.get_one::<i32>("id").unwrap().to_owned(),
                 )
                 .await
             }
             _ => {}
-        },
-        _ => {}
+        }
     }
 }
