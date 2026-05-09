@@ -75,6 +75,9 @@ jobs:
       - name: Run Clippy
         run: cargo clippy --all-targets -- -D warnings
 
+      - name: Build runtime binaries
+        run: cargo build --bin server --bin worker
+
       - name: Install Diesel CLI
         run: cargo install diesel_cli --version 2.1.1 --locked --no-default-features --features postgres
 
@@ -83,9 +86,13 @@ jobs:
 
       - name: Start server
         run: |
-          cargo run --bin server > server.log 2>&1 &
+          ./target/debug/server > server.log 2>&1 &
           echo $! > server.pid
-          for i in {1..60}; do
+          for i in {1..120}; do
+            if ! kill -0 "$(cat server.pid)" 2>/dev/null; then
+              cat server.log
+              exit 1
+            fi
             if curl -fsS http://127.0.0.1:8000/health > /dev/null; then
               exit 0
             fi
@@ -96,7 +103,7 @@ jobs:
 
       - name: Start connector worker
         run: |
-          cargo run --bin worker > worker.log 2>&1 &
+          ./target/debug/worker > worker.log 2>&1 &
           echo $! > worker.pid
           sleep 2
           if ! kill -0 "$(cat worker.pid)" 2>/dev/null; then
