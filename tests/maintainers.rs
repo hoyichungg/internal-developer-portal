@@ -6,11 +6,13 @@ pub mod common;
 #[test]
 fn test_get_maintainers() {
     let client = Client::new();
+    let auth = common::create_admin_auth(&client);
     let maintainer1: Value = common::create_test_maintainer(&client);
     let maintainer2: Value = common::create_test_maintainer(&client);
 
     let response = client
         .get(format!("{}/maintainers", common::APP_HOST))
+        .bearer_auth(&auth.token)
         .send()
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
@@ -27,8 +29,10 @@ fn test_get_maintainers() {
 #[test]
 fn test_create_maintainer() {
     let client = Client::new();
+    let auth = common::create_admin_auth(&client);
     let response = client
         .post(format!("{}/maintainers", common::APP_HOST))
+        .bearer_auth(&auth.token)
         .json(&json!({
           "display_name":"Luke Ho",
           "email": "luke@ho.com"
@@ -54,8 +58,10 @@ fn test_create_maintainer() {
 #[test]
 fn test_create_maintainer_validates_request() {
     let client = Client::new();
+    let auth = common::create_admin_auth(&client);
     let response = client
         .post(format!("{}/maintainers", common::APP_HOST))
+        .bearer_auth(&auth.token)
         .json(&json!({
           "display_name":"",
           "email": "not-an-email"
@@ -72,6 +78,7 @@ fn test_create_maintainer_validates_request() {
 #[test]
 fn test_view_maintainer() {
     let client = Client::new();
+    let auth = common::create_admin_auth(&client);
     let maintainer: Value = common::create_test_maintainer(&client);
 
     let response = client
@@ -80,6 +87,7 @@ fn test_view_maintainer() {
             common::APP_HOST,
             maintainer["id"]
         ))
+        .bearer_auth(&auth.token)
         .send()
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
@@ -101,6 +109,7 @@ fn test_view_maintainer() {
 #[test]
 fn test_update_maintainer() {
     let client = Client::new();
+    let auth = common::create_admin_auth(&client);
     let maintainer: Value = common::create_test_maintainer(&client);
 
     let response = client
@@ -109,6 +118,7 @@ fn test_update_maintainer() {
             common::APP_HOST,
             maintainer["id"]
         ))
+        .bearer_auth(&auth.token)
         .json(&json!({
           "display_name":"Platform Team",
           "email": "platform@example.com"
@@ -134,6 +144,7 @@ fn test_update_maintainer() {
 #[test]
 fn test_delete_maintainer() {
     let client = Client::new();
+    let auth = common::create_admin_auth(&client);
     let maintainer: Value = common::create_test_maintainer(&client);
 
     let response = client
@@ -142,6 +153,7 @@ fn test_delete_maintainer() {
             common::APP_HOST,
             maintainer["id"]
         ))
+        .bearer_auth(&auth.token)
         .send()
         .unwrap();
     assert_eq!(response.status(), StatusCode::NO_CONTENT);

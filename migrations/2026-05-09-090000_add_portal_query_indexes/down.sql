@@ -1,0 +1,7 @@
+DROP INDEX maintainer_members_user_maintainer_idx;
+DROP INDEX connector_runs_source_target_started_at_idx;
+DROP INDEX notifications_source_is_read_updated_at_idx;
+DROP INDEX work_cards_source_status_updated_at_idx;
+DROP INDEX packages_maintainer_updated_at_idx;
+DROP INDEX services_source_updated_at_idx;
+DROP INDEX services_maintainer_updated_at_idx;

@@ -6,12 +6,14 @@ pub mod common;
 #[test]
 fn test_get_packages() {
     let client = Client::new();
+    let auth = common::create_admin_auth(&client);
     let maintainer: Value = common::create_test_maintainer(&client);
     let package1 = common::create_test_package(&client, &maintainer);
     let package2 = common::create_test_package(&client, &maintainer);
 
     let response = client
         .get(format!("{}/packages", common::APP_HOST))
+        .bearer_auth(&auth.token)
         .send()
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
@@ -29,10 +31,12 @@ fn test_get_packages() {
 #[test]
 fn test_create_package() {
     let client = Client::new();
+    let auth = common::create_admin_auth(&client);
     let maintainer = common::create_test_maintainer(&client);
 
     let response = client
         .post(format!("{}/packages", common::APP_HOST))
+        .bearer_auth(&auth.token)
         .json(&json!({
           "maintainer_id": maintainer["id"],
           "slug": "catalog-api",
@@ -72,11 +76,13 @@ fn test_create_package() {
 #[test]
 fn test_view_package() {
     let client = Client::new();
+    let auth = common::create_admin_auth(&client);
     let maintainer = common::create_test_maintainer(&client);
     let package = common::create_test_package(&client, &maintainer);
 
     let response = client
         .get(format!("{}/packages/{}", common::APP_HOST, package["id"]))
+        .bearer_auth(&auth.token)
         .send()
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
@@ -106,11 +112,13 @@ fn test_view_package() {
 #[test]
 fn test_update_package() {
     let client = Client::new();
+    let auth = common::create_admin_auth(&client);
     let maintainer = common::create_test_maintainer(&client);
     let package = common::create_test_package(&client, &maintainer);
 
     let response = client
         .put(format!("{}/packages/{}", common::APP_HOST, package["id"]))
+        .bearer_auth(&auth.token)
         .json(&json!({
             "slug": "catalog-api",
             "name":"Catalog API",
@@ -146,6 +154,7 @@ fn test_update_package() {
     let maintainer2 = common::create_test_maintainer(&client);
     let response = client
         .put(format!("{}/packages/{}", common::APP_HOST, package["id"]))
+        .bearer_auth(&auth.token)
         .json(&json!({
             "slug": "catalog-api",
             "name":"Catalog API",
@@ -186,11 +195,13 @@ fn test_update_package() {
 #[test]
 fn test_delete_package() {
     let client = Client::new();
+    let auth = common::create_admin_auth(&client);
     let maintainer = common::create_test_maintainer(&client);
     let package = common::create_test_package(&client, &maintainer);
 
     let response = client
         .delete(format!("{}/packages/{}", common::APP_HOST, package["id"]))
+        .bearer_auth(&auth.token)
         .send()
         .unwrap();
     assert_eq!(response.status(), StatusCode::NO_CONTENT);

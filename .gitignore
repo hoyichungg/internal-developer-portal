@@ -1,3 +1,25 @@
-/target
-.vscode
+/target/
+/.vscode/
+
+# Local environment
 .env
+.env.*
+!.env.example
+
+# Frontend dependencies and build output
+/frontend/node_modules/
+/frontend/dist/
+/frontend/.vite/
+/frontend/tsconfig.tsbuildinfo
+/frontend/.env
+/frontend/.env.*
+!/frontend/.env.example
+
+# Logs and OS/editor noise
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.DS_Store
+Thumbs.db
