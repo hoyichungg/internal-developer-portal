@@ -5,13 +5,70 @@ use rocket_db_pools::Connection;
 
 use crate::api::ApiError;
 use crate::models::{Role, Session, User};
-use crate::repositories::{RoleRepository, SessionRepository, UserRepository};
+use crate::repositories::{
+    MaintainerMemberRepository, RoleRepository, SessionRepository, UserRepository,
+};
 use crate::rocket_routes::DbConn;
 
 pub struct AuthenticatedUser {
     pub user: User,
     pub session: Session,
     pub roles: Vec<Role>,
+}
+
+impl AuthenticatedUser {
+    pub fn has_role(&self, role_code: &str) -> bool {
+        self.roles.iter().any(|role| role.code == role_code)
+    }
+
+    pub fn is_admin(&self) -> bool {
+        self.has_role("admin")
+    }
+}
+
+pub fn require_admin(auth: &AuthenticatedUser) -> Result<(), ApiError> {
+    if auth.is_admin() {
+        Ok(())
+    } else {
+        Err(ApiError::Forbidden)
+    }
+}
+
+pub async fn require_maintainer_write_access(
+    db: &mut Connection<DbConn>,
+    auth: &AuthenticatedUser,
+    maintainer_id: i32,
+) -> Result<(), ApiError> {
+    require_maintainer_member_role(db, auth, maintainer_id, &["owner", "maintainer"]).await
+}
+
+pub async fn require_maintainer_owner_access(
+    db: &mut Connection<DbConn>,
+    auth: &AuthenticatedUser,
+    maintainer_id: i32,
+) -> Result<(), ApiError> {
+    require_maintainer_member_role(db, auth, maintainer_id, &["owner"]).await
+}
+
+async fn require_maintainer_member_role(
+    db: &mut Connection<DbConn>,
+    auth: &AuthenticatedUser,
+    maintainer_id: i32,
+    allowed_roles: &[&str],
+) -> Result<(), ApiError> {
+    if auth.is_admin() {
+        return Ok(());
+    }
+
+    let membership =
+        MaintainerMemberRepository::find_by_maintainer_and_user(db, maintainer_id, auth.user.id)
+            .await;
+
+    match membership {
+        Ok(member) if allowed_roles.iter().any(|role| *role == member.role) => Ok(()),
+        Ok(_) | Err(diesel::result::Error::NotFound) => Err(ApiError::Forbidden),
+        Err(error) => Err(error.into()),
+    }
 }
 
 #[rocket::async_trait]

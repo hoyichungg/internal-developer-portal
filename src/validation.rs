@@ -5,7 +5,16 @@ use crate::api::ApiError;
 #[derive(Clone, Debug, Serialize)]
 pub struct FieldViolation {
     pub field: &'static str,
-    pub message: &'static str,
+    pub message: String,
+}
+
+impl FieldViolation {
+    pub fn new(field: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            field,
+            message: message.into(),
+        }
+    }
 }
 
 pub trait Validate {
@@ -24,19 +33,13 @@ pub fn validate_request<T: Validate>(request: T) -> Result<T, ApiError> {
 
 pub fn required(errors: &mut Vec<FieldViolation>, field: &'static str, value: &str) {
     if value.trim().is_empty() {
-        errors.push(FieldViolation {
-            field,
-            message: "is required",
-        });
+        errors.push(FieldViolation::new(field, "is required"));
     }
 }
 
 pub fn max_len(errors: &mut Vec<FieldViolation>, field: &'static str, value: &str, max: usize) {
     if value.len() > max {
-        errors.push(FieldViolation {
-            field,
-            message: "is too long",
-        });
+        errors.push(FieldViolation::new(field, "is too long"));
     }
 }
 
@@ -53,10 +56,7 @@ pub fn max_optional_len(
 
 pub fn positive(errors: &mut Vec<FieldViolation>, field: &'static str, value: i32) {
     if value <= 0 {
-        errors.push(FieldViolation {
-            field,
-            message: "must be positive",
-        });
+        errors.push(FieldViolation::new(field, "must be positive"));
     }
 }
 
@@ -67,29 +67,20 @@ pub fn one_of(
     allowed: &[&str],
 ) {
     if !allowed.contains(&value) {
-        errors.push(FieldViolation {
-            field,
-            message: "is not supported",
-        });
+        errors.push(FieldViolation::new(field, "is not supported"));
     }
 }
 
 pub fn optional_url(errors: &mut Vec<FieldViolation>, field: &'static str, value: &Option<String>) {
     if let Some(value) = value {
         if !(value.starts_with("http://") || value.starts_with("https://")) {
-            errors.push(FieldViolation {
-                field,
-                message: "must be a valid URL",
-            });
+            errors.push(FieldViolation::new(field, "must be a valid URL"));
         }
     }
 }
 
 pub fn email(errors: &mut Vec<FieldViolation>, field: &'static str, value: &str) {
     if !value.contains('@') || !value.contains('.') {
-        errors.push(FieldViolation {
-            field,
-            message: "must be a valid email address",
-        });
+        errors.push(FieldViolation::new(field, "must be a valid email address"));
     }
 }

@@ -1,4 +1,4 @@
-use clap::{value_parser, Arg, Command};
+use clap::{value_parser, Arg, ArgAction, Command};
 
 extern crate rust_web_server;
 
@@ -24,6 +24,23 @@ async fn main() {
                                 .required(true)
                                 .num_args(1..)
                                 .value_delimiter(','),
+                        ),
+                )
+                .subcommand(
+                    Command::new("ensure-admin")
+                        .about("Ensure a seed admin user exists")
+                        .arg(Arg::new("username").long("username"))
+                        .arg(Arg::new("password").long("password"))
+                        .arg(
+                            Arg::new("roles")
+                                .long("roles")
+                                .num_args(1..)
+                                .value_delimiter(','),
+                        )
+                        .arg(
+                            Arg::new("reset-password")
+                                .long("reset-password")
+                                .action(ArgAction::SetTrue),
                         ),
                 )
                 .subcommand(Command::new("list").about("List existing users"))
@@ -57,6 +74,37 @@ async fn main() {
                         .unwrap()
                         .map(|v| v.to_owned())
                         .collect(),
+                )
+                .await
+            }
+            Some(("ensure-admin", sub_matches)) => {
+                let username = sub_matches
+                    .get_one::<String>("username")
+                    .cloned()
+                    .or_else(|| std::env::var("SEED_ADMIN_USERNAME").ok())
+                    .unwrap_or_else(|| "admin".to_owned());
+                let password = sub_matches
+                    .get_one::<String>("password")
+                    .cloned()
+                    .or_else(|| std::env::var("SEED_ADMIN_PASSWORD").ok())
+                    .unwrap_or_else(|| "admin123".to_owned());
+                let roles = sub_matches
+                    .get_many::<String>("roles")
+                    .map(|roles| roles.map(ToOwned::to_owned).collect())
+                    .or_else(|| {
+                        std::env::var("SEED_ADMIN_ROLES")
+                            .ok()
+                            .map(|roles| vec![roles])
+                    })
+                    .unwrap_or_else(|| vec!["admin".to_owned(), "member".to_owned()]);
+                let reset_password = sub_matches.get_flag("reset-password")
+                    || std::env::var("SEED_ADMIN_RESET_PASSWORD").as_deref() == Ok("true");
+
+                rust_web_server::commands::ensure_admin_user(
+                    username,
+                    password,
+                    roles,
+                    reset_password,
                 )
                 .await
             }
