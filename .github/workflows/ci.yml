@@ -30,6 +30,10 @@ jobs:
       APP_ENV: test
       AUTH_TOKEN_TTL_SECONDS: 86400
       DATABASE_URL: postgres://postgres:postgres@localhost:5432/app_db
+      CONNECTOR_SECRET_KEY: ci-connector-secret-key
+      CONNECTOR_WORKER_ENABLED: true
+      CONNECTOR_SCHEDULER_ENABLED: true
+      CONNECTOR_WORKER_POLL_MS: 250
       ROCKET_ADDRESS: 127.0.0.1
       ROCKET_PORT: 8000
       ROCKET_DATABASES: '{postgres={url="postgres://postgres:postgres@localhost:5432/app_db"}}'
@@ -44,6 +48,18 @@ jobs:
 
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y libpq-dev
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Build frontend
+        run: |
+          npm ci --prefix frontend
+          npm run build --prefix frontend
 
       - name: Check formatting
         run: cargo fmt --check
@@ -73,9 +89,20 @@ jobs:
           cat server.log
           exit 1
 
+      - name: Start connector worker
+        run: |
+          cargo run --bin worker > worker.log 2>&1 &
+          echo $! > worker.pid
+          sleep 2
+          if ! kill -0 "$(cat worker.pid)" 2>/dev/null; then
+            cat worker.log
+            exit 1
+          fi
+
       - name: Run tests
         run: |
           if ! cargo test; then
             cat server.log
+            cat worker.log
             exit 1
           fi
