@@ -13,9 +13,9 @@ export function ConnectorOperationsPanel({ operations }) {
   const latestCleanup = maintenanceRuns[0];
 
   return (
-    <Grid>
-      <Grid.Col span={{ base: 12, lg: 5 }}>
-        <DataPanel title="Worker heartbeat">
+    <Grid align="stretch" className="connectorOperationsGrid">
+      <Grid.Col span={{ base: 12, lg: 5 }} className="connectorOperationsCol">
+        <DataPanel title="Worker heartbeat" className="connectorOperationsPanel">
           <SimpleGrid cols={{ base: 2, sm: 4 }} className="operationsMetrics">
             <OperationMetric label="Active" value={activeWorkers} tone="success" />
             <OperationMetric label="Stale" value={staleWorkers} tone={staleWorkers > 0 ? "warning" : "success"} />
@@ -41,8 +41,8 @@ export function ConnectorOperationsPanel({ operations }) {
         </DataPanel>
       </Grid.Col>
 
-      <Grid.Col span={{ base: 12, lg: 7 }}>
-        <DataPanel title="Retention cleanup history">
+      <Grid.Col span={{ base: 12, lg: 7 }} className="connectorOperationsCol">
+        <DataPanel title="Retention cleanup history" className="connectorOperationsPanel">
           <SimpleGrid cols={{ base: 2, sm: 4 }} className="operationsMetrics">
             <OperationMetric
               label="Last status"
