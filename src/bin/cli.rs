@@ -1,13 +1,13 @@
 use clap::{value_parser, Arg, ArgAction, Command};
 
-extern crate rust_web_server;
+extern crate internal_developer_portal;
 
 #[tokio::main]
 async fn main() {
     dotenvy::dotenv().ok();
 
-    let matches = Command::new("rust_web_server")
-        .about("rust_web_server commands")
+    let matches = Command::new("internal-developer-portal")
+        .about("Internal Developer Portal commands")
         .arg_required_else_help(true)
         .subcommand(
             Command::new("users")
@@ -60,7 +60,7 @@ async fn main() {
     if let Some(("users", sub_matches)) = matches.subcommand() {
         match sub_matches.subcommand() {
             Some(("create", sub_matches)) => {
-                rust_web_server::commands::create_user(
+                internal_developer_portal::commands::create_user(
                     sub_matches
                         .get_one::<String>("username")
                         .unwrap()
@@ -100,7 +100,7 @@ async fn main() {
                 let reset_password = sub_matches.get_flag("reset-password")
                     || std::env::var("SEED_ADMIN_RESET_PASSWORD").as_deref() == Ok("true");
 
-                rust_web_server::commands::ensure_admin_user(
+                internal_developer_portal::commands::ensure_admin_user(
                     username,
                     password,
                     roles,
@@ -108,9 +108,9 @@ async fn main() {
                 )
                 .await
             }
-            Some(("list", _)) => rust_web_server::commands::list_users().await,
+            Some(("list", _)) => internal_developer_portal::commands::list_users().await,
             Some(("delete", sub_matches)) => {
-                rust_web_server::commands::delete_user(
+                internal_developer_portal::commands::delete_user(
                     sub_matches.get_one::<i32>("id").unwrap().to_owned(),
                 )
                 .await

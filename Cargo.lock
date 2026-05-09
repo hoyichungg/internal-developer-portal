@@ -1092,6 +1092,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "internal-developer-portal"
+version = "0.1.0"
+dependencies = [
+ "aes-gcm",
+ "argon2",
+ "base64 0.22.1",
+ "chrono",
+ "clap",
+ "diesel",
+ "diesel-async",
+ "dotenvy",
+ "reqwest",
+ "rocket",
+ "rocket_db_pools",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "ipnet"
 version = "2.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1817,28 +1839,6 @@ dependencies = [
  "time",
  "tokio",
  "uncased",
-]
-
-[[package]]
-name = "rust-web-server"
-version = "0.1.0"
-dependencies = [
- "aes-gcm",
- "argon2",
- "base64 0.22.1",
- "chrono",
- "clap",
- "diesel",
- "diesel-async",
- "dotenvy",
- "reqwest",
- "rocket",
- "rocket_db_pools",
- "serde",
- "serde_json",
- "sha2",
- "tokio",
- "uuid",
 ]
 
 [[package]]

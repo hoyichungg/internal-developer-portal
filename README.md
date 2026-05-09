@@ -1,9 +1,10 @@
-# Internal Developer Portal API
+# Internal Developer Portal
 
-A Rocket + Diesel Async + PostgreSQL API for an internal developer portal. It
-includes a software catalog, service health snapshots, DevOps work cards,
-notifications, CLI user management, Argon2 password hashing, session tokens,
-request validation, and integration tests for the main REST resources.
+An internal developer portal built with Rocket, Diesel Async, PostgreSQL,
+React, TypeScript, and pnpm. It includes a software catalog, service health
+snapshots, DevOps work cards, connector operations, notifications, CLI user
+management, Argon2 password hashing, session tokens, request validation, and
+integration tests for the main REST resources.
 
 ## Stack
 

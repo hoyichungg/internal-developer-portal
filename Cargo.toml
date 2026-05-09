@@ -1,9 +1,10 @@
 [package]
-name = "rust-web-server"
+name = "internal-developer-portal"
 default-run = "server"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.81"
+description = "Internal developer portal for service health, work cards, connector operations, audit logs, and team dashboards."
 
 [dependencies]
 tokio = "1"
