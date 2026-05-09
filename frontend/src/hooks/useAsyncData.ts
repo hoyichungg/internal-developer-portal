@@ -1,7 +1,17 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import type { DependencyList } from "react";
 
-export function useAsyncData(loader, deps = []) {
-  const [state, setState] = useState({ loading: true, error: null, value: null });
+type AsyncState<T> = {
+  loading: boolean;
+  error: Error | null;
+  value: T | null;
+};
+
+export function useAsyncData<T = any>(
+  loader: () => Promise<T>,
+  deps: DependencyList = []
+): [AsyncState<T>, { reload: () => Promise<void> }] {
+  const [state, setState] = useState<AsyncState<T>>({ loading: true, error: null, value: null });
   const mountedRef = useRef(false);
   const requestIdRef = useRef(0);
 
@@ -20,7 +30,11 @@ export function useAsyncData(loader, deps = []) {
       }
     } catch (error) {
       if (mountedRef.current && requestIdRef.current === requestId) {
-        setState({ loading: false, error, value: null });
+        setState({
+          loading: false,
+          error: error instanceof Error ? error : new Error(String(error)),
+          value: null
+        });
       }
     }
   }, deps);

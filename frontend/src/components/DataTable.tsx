@@ -1,9 +1,14 @@
 import { ScrollArea, Table } from "@mantine/core";
+import type { ReactNode } from "react";
 
-import { EmptyText } from "./EmptyText.jsx";
-import { formatValue } from "../utils/format.js";
+import { EmptyText } from "./EmptyText";
+import { formatValue } from "../utils/format";
 
-export function DataTable({ rows, columns }) {
+type DataRow = Record<string, any>;
+type CellRenderer = (props: { value: any; row: DataRow }) => ReactNode;
+type DataColumn = [key: string, label: string, renderer?: CellRenderer];
+
+export function DataTable({ rows, columns }: { rows?: DataRow[]; columns: DataColumn[] }) {
   if (!rows || rows.length === 0) {
     return <EmptyText>No records</EmptyText>;
   }

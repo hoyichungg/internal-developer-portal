@@ -1,6 +1,6 @@
 import { Box, Grid, Group, Loader, Paper, SimpleGrid, Skeleton, Stack } from "@mantine/core";
 
-import { DataPanel } from "./DataPanel.jsx";
+import { DataPanel } from "./DataPanel";
 
 export function PageLoader() {
   return (

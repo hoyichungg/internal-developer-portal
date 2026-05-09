@@ -1,4 +1,4 @@
-import { prettyJson } from "../../utils/format.js";
+import { prettyJson } from "../../utils/format";
 
 export const defaultConnectorConfig = {
   target: "work_cards",

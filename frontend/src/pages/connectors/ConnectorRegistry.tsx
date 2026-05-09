@@ -1,8 +1,8 @@
 import { NavLink, Stack } from "@mantine/core";
 
-import { DataPanel } from "../../components/DataPanel.jsx";
-import { EmptyText } from "../../components/EmptyText.jsx";
-import { StatusBadge } from "../../components/tableCells.jsx";
+import { DataPanel } from "../../components/DataPanel";
+import { EmptyText } from "../../components/EmptyText";
+import { StatusBadge } from "../../components/tableCells";
 
 export function ConnectorRegistry({ connectors, selectedSource, onSelect }) {
   return (

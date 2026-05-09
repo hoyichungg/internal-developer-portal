@@ -11,12 +11,13 @@ import {
 } from "@mantine/core";
 import { IconArrowRight, IconEye, IconRefresh } from "@tabler/icons-react";
 import { useState } from "react";
+import type { ReactNode } from "react";
 
-import { DataPanel } from "../../components/DataPanel.jsx";
-import { DataTable } from "../../components/DataTable.jsx";
-import { EmptyText } from "../../components/EmptyText.jsx";
-import { DateCell, StatusBadge } from "../../components/tableCells.jsx";
-import { prettyJson } from "../../utils/format.js";
+import { DataPanel } from "../../components/DataPanel";
+import { DataTable } from "../../components/DataTable";
+import { EmptyText } from "../../components/EmptyText";
+import { DateCell, StatusBadge } from "../../components/tableCells";
+import { prettyJson } from "../../utils/format";
 
 export function ConnectorRunsPanel({
   runs,
@@ -227,11 +228,19 @@ function RunDetail({ detail, loading, onRetryRun, retryingRunId, onOpenService }
   );
 }
 
-function canRetry(run) {
+function canRetry(run?: { status?: string }) {
   return ["failed", "partial_success"].includes(run?.status);
 }
 
-function RunMetric({ label, value, tone }) {
+function RunMetric({
+  label,
+  value,
+  tone = ""
+}: {
+  label: string;
+  value: ReactNode;
+  tone?: string;
+}) {
   return (
     <Box className={`runDetailMetric${tone ? ` is-${tone}` : ""}`}>
       <Text size="xs" c="dimmed" fw={700} tt="uppercase">
@@ -244,7 +253,7 @@ function RunMetric({ label, value, tone }) {
   );
 }
 
-function SectionTitle({ title, count }) {
+function SectionTitle({ title, count }: { title: string; count: number }) {
   return (
     <Group justify="space-between" mb="xs" className="runDetailSectionTitle">
       <Text fw={800}>{title}</Text>
@@ -255,7 +264,7 @@ function SectionTitle({ title, count }) {
   );
 }
 
-function SnapshotCell({ value }) {
+function SnapshotCell({ value }: { value?: unknown }) {
   const [opened, setOpened] = useState(false);
 
   if (!value) {

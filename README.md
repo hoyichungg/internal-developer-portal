@@ -113,8 +113,8 @@ Build the frontend before starting the backend when running from a clean
 checkout:
 
 ```sh
-npm ci --prefix frontend
-npm run build --prefix frontend
+pnpm --dir frontend install --frozen-lockfile
+pnpm --dir frontend build
 ```
 
 Integration tests expect the server to be running on `127.0.0.1:8000`.

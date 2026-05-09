@@ -40,14 +40,20 @@ import { MantineProvider, localStorageColorSchemeManager } from "@mantine/core";
 import { Notifications } from "@mantine/notifications";
 import { createRoot } from "react-dom/client";
 
-import App from "./App.jsx";
-import { theme } from "./theme.js";
+import App from "./App";
+import { theme } from "./theme";
 
 const colorSchemeManager = localStorageColorSchemeManager({
   key: "idp-color-scheme"
 });
 
-createRoot(document.getElementById("root")).render(
+const rootElement = document.getElementById("root");
+
+if (!rootElement) {
+  throw new Error("Root element was not found");
+}
+
+createRoot(rootElement).render(
   <React.StrictMode>
     <MantineProvider
       theme={theme}

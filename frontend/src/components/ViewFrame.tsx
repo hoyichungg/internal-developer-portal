@@ -1,6 +1,18 @@
 import { Alert, Box, Group, Stack, Text, Title } from "@mantine/core";
+import type { ReactNode } from "react";
 
-import { PageLoader } from "./LoadingState.jsx";
+import { PageLoader } from "./LoadingState";
+
+type ViewFrameProps = {
+  eyebrow: string;
+  title: ReactNode;
+  backAction?: ReactNode;
+  actions?: ReactNode;
+  loading?: boolean;
+  loadingFallback?: ReactNode;
+  error?: Error | null;
+  children: ReactNode;
+};
 
 export function ViewFrame({
   eyebrow,
@@ -11,7 +23,7 @@ export function ViewFrame({
   loadingFallback,
   error,
   children
-}) {
+}: ViewFrameProps) {
   return (
     <Stack gap="lg" className="viewFrame">
       <Stack gap={6} className="viewHeader">

@@ -14,7 +14,7 @@ import {
 } from "@mantine/core";
 import { IconBolt, IconPlayerPlay, IconTemplate } from "@tabler/icons-react";
 
-import { connectorTemplates } from "./connectorConfig.js";
+import { connectorTemplates } from "./connectorConfig";
 
 const templateOptions = connectorTemplates.map((template) => ({
   value: template.id,

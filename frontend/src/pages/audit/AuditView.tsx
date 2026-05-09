@@ -1,11 +1,11 @@
-import { DataPanel } from "../../components/DataPanel.jsx";
-import { DataTable } from "../../components/DataTable.jsx";
-import { AuditSkeleton } from "../../components/LoadingState.jsx";
-import { DateCell } from "../../components/tableCells.jsx";
-import { ViewFrame } from "../../components/ViewFrame.jsx";
-import { useAsyncData } from "../../hooks/useAsyncData.js";
-import { useRefresh } from "../../hooks/useRefresh.js";
-import { AuditMetadataCell } from "./AuditMetadataCell.jsx";
+import { DataPanel } from "../../components/DataPanel";
+import { DataTable } from "../../components/DataTable";
+import { AuditSkeleton } from "../../components/LoadingState";
+import { DateCell } from "../../components/tableCells";
+import { ViewFrame } from "../../components/ViewFrame";
+import { useAsyncData } from "../../hooks/useAsyncData";
+import { useRefresh } from "../../hooks/useRefresh";
+import { AuditMetadataCell } from "./AuditMetadataCell";
 
 export function AuditView({ client }) {
   const [data, actions] = useAsyncData(() => client.get("/audit-logs"), [client]);

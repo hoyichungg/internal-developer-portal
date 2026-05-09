@@ -12,8 +12,8 @@ import {
 } from "@mantine/core";
 import { useState } from "react";
 
-import { CenterStage } from "../../components/CenterStage.jsx";
-import { ThemeToggle } from "../../components/ThemeToggle.jsx";
+import { CenterStage } from "../../components/CenterStage";
+import { ThemeToggle } from "../../components/ThemeToggle";
 
 export function LoginScreen({ onLogin }) {
   const [username, setUsername] = useState("admin");

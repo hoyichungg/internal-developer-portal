@@ -1,12 +1,12 @@
 import { Grid } from "@mantine/core";
 
-import { DataPanel } from "../../components/DataPanel.jsx";
-import { DataTable } from "../../components/DataTable.jsx";
-import { CatalogSkeleton } from "../../components/LoadingState.jsx";
-import { LinkCell, StatusBadge } from "../../components/tableCells.jsx";
-import { ViewFrame } from "../../components/ViewFrame.jsx";
-import { useAsyncData } from "../../hooks/useAsyncData.js";
-import { useRefresh } from "../../hooks/useRefresh.js";
+import { DataPanel } from "../../components/DataPanel";
+import { DataTable } from "../../components/DataTable";
+import { CatalogSkeleton } from "../../components/LoadingState";
+import { LinkCell, StatusBadge } from "../../components/tableCells";
+import { ViewFrame } from "../../components/ViewFrame";
+import { useAsyncData } from "../../hooks/useAsyncData";
+import { useRefresh } from "../../hooks/useRefresh";
 
 export function CatalogView({ client }) {
   const [data, actions] = useAsyncData(async () => {

@@ -50,6 +50,6 @@ Use these checks before considering work complete:
 ```sh
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
-npm run build --prefix frontend
+pnpm --dir frontend build
 cargo test
 ```

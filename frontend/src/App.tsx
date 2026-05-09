@@ -1,17 +1,17 @@
 import { notifications } from "@mantine/notifications";
 import { useEffect, useMemo, useRef, useState } from "react";
 
-import { createApiClient } from "./api/client.js";
-import { CenterStage } from "./components/CenterStage.jsx";
-import { PageLoader } from "./components/LoadingState.jsx";
-import { useStoredToken } from "./hooks/useStoredToken.js";
-import { PortalShell } from "./layout/PortalShell.jsx";
-import { AuditView } from "./pages/audit/AuditView.jsx";
-import { CatalogView } from "./pages/catalog/CatalogView.jsx";
-import { ConnectorsView } from "./pages/connectors/ConnectorsView.jsx";
-import { DashboardView } from "./pages/dashboard/DashboardView.jsx";
-import { LoginScreen } from "./pages/login/LoginScreen.jsx";
-import { ServiceOverviewView } from "./pages/services/ServiceOverviewView.jsx";
+import { createApiClient } from "./api/client";
+import { CenterStage } from "./components/CenterStage";
+import { PageLoader } from "./components/LoadingState";
+import { useStoredToken } from "./hooks/useStoredToken";
+import { PortalShell } from "./layout/PortalShell";
+import { AuditView } from "./pages/audit/AuditView";
+import { CatalogView } from "./pages/catalog/CatalogView";
+import { ConnectorsView } from "./pages/connectors/ConnectorsView";
+import { DashboardView } from "./pages/dashboard/DashboardView";
+import { LoginScreen } from "./pages/login/LoginScreen";
+import { ServiceOverviewView } from "./pages/services/ServiceOverviewView";
 
 const TOP_LEVEL_VIEWS = new Set(["dashboard", "connectors", "catalog", "audit"]);
 

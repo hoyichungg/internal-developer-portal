@@ -1,9 +1,9 @@
 import { Box, Grid, Group, SimpleGrid, Text } from "@mantine/core";
 
-import { DataPanel } from "../../components/DataPanel.jsx";
-import { DataTable } from "../../components/DataTable.jsx";
-import { EmptyText } from "../../components/EmptyText.jsx";
-import { DateCell, StatusBadge } from "../../components/tableCells.jsx";
+import { DataPanel } from "../../components/DataPanel";
+import { DataTable } from "../../components/DataTable";
+import { EmptyText } from "../../components/EmptyText";
+import { DateCell, StatusBadge } from "../../components/tableCells";
 
 export function ConnectorOperationsPanel({ operations }) {
   const workers = operations?.workers || [];

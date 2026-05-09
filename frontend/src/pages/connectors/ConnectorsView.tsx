@@ -3,41 +3,57 @@ import { useDisclosure } from "@mantine/hooks";
 import { notifications } from "@mantine/notifications";
 import { IconPlus } from "@tabler/icons-react";
 import { useCallback, useEffect, useRef, useState } from "react";
+import type { FormEvent } from "react";
 
-import { ViewFrame } from "../../components/ViewFrame.jsx";
-import { ConnectorsSkeleton } from "../../components/LoadingState.jsx";
-import { useRefresh } from "../../hooks/useRefresh.js";
-import { showError } from "../../utils/notifications.js";
-import { ConnectorConfigEditor } from "./ConnectorConfigEditor.jsx";
-import { ConnectorCreateForm } from "./ConnectorCreateForm.jsx";
-import { ConnectorOperationsPanel } from "./ConnectorOperationsPanel.jsx";
-import { ConnectorRegistry } from "./ConnectorRegistry.jsx";
-import { ConnectorRunsPanel } from "./ConnectorRunsPanel.jsx";
+import type { ApiClient } from "../../api/client";
+import { ViewFrame } from "../../components/ViewFrame";
+import { ConnectorsSkeleton } from "../../components/LoadingState";
+import { useRefresh } from "../../hooks/useRefresh";
+import { showError } from "../../utils/notifications";
+import { ConnectorConfigEditor } from "./ConnectorConfigEditor";
+import { ConnectorCreateForm } from "./ConnectorCreateForm";
+import { ConnectorOperationsPanel } from "./ConnectorOperationsPanel";
+import { ConnectorRegistry } from "./ConnectorRegistry";
+import { ConnectorRunsPanel } from "./ConnectorRunsPanel";
 import {
   connectorConfigFromResponse,
   connectorConfigFromTemplate,
   defaultConnectorConfig
-} from "./connectorConfig.js";
+} from "./connectorConfig";
 
-export function ConnectorsView({ client, onOpenService }) {
-  const [connectors, setConnectors] = useState([]);
+type ConnectorViewOptions = {
+  preserveRunDetail?: boolean;
+};
+
+type RunDetailOptions = {
+  source?: string;
+};
+
+export function ConnectorsView({
+  client,
+  onOpenService
+}: {
+  client: ApiClient;
+  onOpenService: (serviceId: string | number) => void;
+}) {
+  const [connectors, setConnectors] = useState<any[]>([]);
   const [operations, setOperations] = useState(null);
   const [selectedSource, setSelectedSource] = useState("");
   const [config, setConfig] = useState(defaultConnectorConfig);
-  const [runs, setRuns] = useState([]);
+  const [runs, setRuns] = useState<any[]>([]);
   const [runDetail, setRunDetail] = useState(null);
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
   const [saving, setSaving] = useState(false);
   const [runLoading, setRunLoading] = useState(false);
-  const [retryingRunId, setRetryingRunId] = useState(null);
+  const [retryingRunId, setRetryingRunId] = useState<string | number | null>(null);
   const [runDetailLoading, setRunDetailLoading] = useState(false);
   const [createOpened, createModal] = useDisclosure(false);
   const selectedSourceRef = useRef("");
   const detailsRequestSeqRef = useRef(0);
   const reloadRequestSeqRef = useRef(0);
   const runDetailRequestSeqRef = useRef(0);
-  const refreshTimeoutRef = useRef(null);
+  const refreshTimeoutRef = useRef<number | null>(null);
   const selected = connectors.find((connector) => connector.source === selectedSource);
   const initialLoading = loading && connectors.length === 0;
 
@@ -52,7 +68,7 @@ export function ConnectorsView({ client, onOpenService }) {
   }, []);
 
   const loadConnectorDetails = useCallback(
-    async (source, options = {}) => {
+    async (source: string, options: ConnectorViewOptions = {}) => {
       const requestSeq = ++detailsRequestSeqRef.current;
       try {
         if (!options.preserveRunDetail) {
@@ -87,7 +103,7 @@ export function ConnectorsView({ client, onOpenService }) {
   }, [client]);
 
   const loadRunDetail = useCallback(
-    async (runId, options = {}) => {
+    async (runId: string | number, options: RunDetailOptions = {}) => {
       const requestSeq = ++runDetailRequestSeqRef.current;
       setRunDetailLoading(true);
       try {
@@ -113,7 +129,7 @@ export function ConnectorsView({ client, onOpenService }) {
     [client]
   );
 
-  const reload = useCallback(async (preferredSource) => {
+  const reload = useCallback(async (preferredSource?: string) => {
     const requestSeq = ++reloadRequestSeqRef.current;
     setLoading(true);
     try {
@@ -158,7 +174,7 @@ export function ConnectorsView({ client, onOpenService }) {
   }, []);
   useRefresh(() => reload());
 
-  async function selectConnector(source) {
+  async function selectConnector(source: string) {
     if (refreshTimeoutRef.current) {
       window.clearTimeout(refreshTimeoutRef.current);
       refreshTimeoutRef.current = null;
@@ -168,7 +184,7 @@ export function ConnectorsView({ client, onOpenService }) {
     await loadConnectorDetails(source);
   }
 
-  function scheduleRunRefresh(runSource, runId) {
+  function scheduleRunRefresh(runSource: string, runId: string | number) {
     if (refreshTimeoutRef.current) {
       window.clearTimeout(refreshTimeoutRef.current);
     }
@@ -185,7 +201,7 @@ export function ConnectorsView({ client, onOpenService }) {
     }, 1200);
   }
 
-  async function createConnector(event) {
+  async function createConnector(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
     setCreating(true);
@@ -207,7 +223,7 @@ export function ConnectorsView({ client, onOpenService }) {
     }
   }
 
-  async function saveConfig(event) {
+  async function saveConfig(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!selected) {
       return;
@@ -233,7 +249,7 @@ export function ConnectorsView({ client, onOpenService }) {
     }
   }
 
-  async function runConnector(mode) {
+  async function runConnector(mode: string) {
     if (!selected) {
       return;
     }
@@ -259,7 +275,7 @@ export function ConnectorsView({ client, onOpenService }) {
     }
   }
 
-  async function retryRun(run) {
+  async function retryRun(run: any) {
     if (!run) {
       return;
     }
@@ -283,7 +299,7 @@ export function ConnectorsView({ client, onOpenService }) {
     }
   }
 
-  function applyTemplate(templateId) {
+  function applyTemplate(templateId: string) {
     const nextConfig = connectorConfigFromTemplate(templateId);
 
     if (nextConfig) {

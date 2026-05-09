@@ -12,16 +12,16 @@ import {
 } from "@mantine/core";
 import { IconAlertTriangle, IconArrowRight, IconExternalLink } from "@tabler/icons-react";
 
-import { DataPanel } from "../../components/DataPanel.jsx";
-import { DataTable } from "../../components/DataTable.jsx";
-import { EmptyText } from "../../components/EmptyText.jsx";
-import { DashboardSkeleton } from "../../components/LoadingState.jsx";
-import { Metric } from "../../components/Metric.jsx";
-import { QuickLinks } from "../../components/QuickLinks.jsx";
-import { DateCell, StatusBadge } from "../../components/tableCells.jsx";
-import { ViewFrame } from "../../components/ViewFrame.jsx";
-import { useAsyncData } from "../../hooks/useAsyncData.js";
-import { useRefresh } from "../../hooks/useRefresh.js";
+import { DataPanel } from "../../components/DataPanel";
+import { DataTable } from "../../components/DataTable";
+import { EmptyText } from "../../components/EmptyText";
+import { DashboardSkeleton } from "../../components/LoadingState";
+import { Metric } from "../../components/Metric";
+import { QuickLinks } from "../../components/QuickLinks";
+import { DateCell, StatusBadge } from "../../components/tableCells";
+import { ViewFrame } from "../../components/ViewFrame";
+import { useAsyncData } from "../../hooks/useAsyncData";
+import { useRefresh } from "../../hooks/useRefresh";
 
 export function DashboardView({ client, onOpenService }) {
   const [data, actions] = useAsyncData(() => client.get("/me/overview"), [client]);

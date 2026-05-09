@@ -12,8 +12,8 @@ import {
 import { useDisclosure } from "@mantine/hooks";
 import { IconLogout, IconRefresh } from "@tabler/icons-react";
 
-import { ThemeToggle } from "../components/ThemeToggle.jsx";
-import { NAV_ITEMS } from "../navigation.js";
+import { ThemeToggle } from "../components/ThemeToggle";
+import { NAV_ITEMS } from "../navigation";
 
 export function PortalShell({ user, view, onLogout, children }) {
   const [opened, { toggle }] = useDisclosure(false);

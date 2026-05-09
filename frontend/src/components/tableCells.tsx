@@ -1,12 +1,14 @@
 import { Badge, Button, Code, Text } from "@mantine/core";
 
-export function StatusBadge({ value, className }) {
+type CellValue = string | number | boolean | null | undefined;
+
+export function StatusBadge({ value, className }: { value?: CellValue; className?: string }) {
   if (!value) {
     return null;
   }
 
   const status = String(value).trim().toLowerCase();
-  const colorMap = {
+  const colorMap: Record<string, string> = {
     active: "teal",
     archived: "gray",
     blocked: "orange",
@@ -44,33 +46,33 @@ export function StatusBadge({ value, className }) {
   const classes = ["statusBadge", className].filter(Boolean).join(" ");
 
   return (
-    <Badge variant="light" color={colorMap[status] || "gray"} className={classes} title={value}>
+    <Badge variant="light" color={colorMap[status] || "gray"} className={classes} title={String(value)}>
       {status.replaceAll("_", " ")}
     </Badge>
   );
 }
 
-export function DateCell({ value }) {
+export function DateCell({ value }: { value?: CellValue }) {
   if (!value) {
     return null;
   }
 
-  return <Text size="sm">{new Date(value).toLocaleString()}</Text>;
+  return <Text size="sm">{new Date(String(value)).toLocaleString()}</Text>;
 }
 
-export function LinkCell({ value }) {
+export function LinkCell({ value }: { value?: CellValue }) {
   if (!value) {
     return null;
   }
 
   return (
-    <Button component="a" href={value} target="_blank" rel="noreferrer" size="compact-sm" variant="subtle">
+    <Button component="a" href={String(value)} target="_blank" rel="noreferrer" size="compact-sm" variant="subtle">
       Open
     </Button>
   );
 }
 
-export function MetadataCell({ value }) {
+export function MetadataCell({ value }: { value?: unknown }) {
   if (!value) {
     return null;
   }

@@ -2,11 +2,13 @@ FROM node:20-bookworm AS frontend-build
 
 WORKDIR /app/frontend
 
-COPY frontend/package*.json ./
-RUN npm ci
+RUN corepack enable
+
+COPY frontend/package.json frontend/pnpm-lock.yaml ./
+RUN pnpm install --frozen-lockfile
 
 COPY frontend ./
-RUN npm run build
+RUN pnpm build
 
 FROM rust:1.81-bookworm
 

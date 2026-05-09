@@ -1,15 +1,15 @@
 import { Box, Button, Grid, Group, Paper, Stack, Text } from "@mantine/core";
 import { IconArrowLeft } from "@tabler/icons-react";
 
-import { DataPanel } from "../../components/DataPanel.jsx";
-import { DataTable } from "../../components/DataTable.jsx";
-import { EmptyText } from "../../components/EmptyText.jsx";
-import { ServiceOverviewSkeleton } from "../../components/LoadingState.jsx";
-import { QuickLinks } from "../../components/QuickLinks.jsx";
-import { DateCell, StatusBadge } from "../../components/tableCells.jsx";
-import { ViewFrame } from "../../components/ViewFrame.jsx";
-import { useAsyncData } from "../../hooks/useAsyncData.js";
-import { useRefresh } from "../../hooks/useRefresh.js";
+import { DataPanel } from "../../components/DataPanel";
+import { DataTable } from "../../components/DataTable";
+import { EmptyText } from "../../components/EmptyText";
+import { ServiceOverviewSkeleton } from "../../components/LoadingState";
+import { QuickLinks } from "../../components/QuickLinks";
+import { DateCell, StatusBadge } from "../../components/tableCells";
+import { ViewFrame } from "../../components/ViewFrame";
+import { useAsyncData } from "../../hooks/useAsyncData";
+import { useRefresh } from "../../hooks/useRefresh";
 
 export function ServiceOverviewView({ client, serviceId, onBack }) {
   const [data, actions] = useAsyncData(
