@@ -697,6 +697,107 @@ fn test_scheduler_enqueues_due_config_and_worker_executes_it() {
 }
 
 #[test]
+fn test_sample_notification_adapters_import_product_core_feeds() {
+    let client = Client::new();
+    let auth = common::create_admin_auth(&client);
+
+    let calendar = execute_sample_notification_adapter(
+        &client,
+        &auth.token,
+        SampleNotificationAdapterCase {
+            source_prefix: "calendar_adapter",
+            kind: "calendar",
+            display_name: "Calendar Adapter",
+            config: json!({
+                "adapter": "calendar_sample",
+                "events": [{
+                    "id": "calendar-standup",
+                    "subject": "Platform standup in 15 minutes",
+                    "organizer": "Taylor Lin",
+                    "location": "Teams",
+                    "starts_at": "2026-05-11T09:30:00Z",
+                    "webLink": "https://calendar.example.test/events/calendar-standup"
+                }]
+            }),
+            expected_external_id: "calendar-standup",
+            expected_title: "Platform standup in 15 minutes",
+            expected_severity: "info",
+        },
+    );
+    assert!(calendar.notification["body"]
+        .as_str()
+        .unwrap()
+        .contains("Organizer: Taylor Lin"));
+
+    let mail = execute_sample_notification_adapter(
+        &client,
+        &auth.token,
+        SampleNotificationAdapterCase {
+            source_prefix: "outlook_mail_adapter",
+            kind: "outlook",
+            display_name: "Outlook Mail Adapter",
+            config: json!({
+                "adapter": "outlook_mail_sample",
+                "messages": [{
+                    "id": "mail-release-brief",
+                    "subject": "Release brief ready for review",
+                    "from": { "emailAddress": { "name": "Release Bot", "address": "release-bot@example.test" } },
+                    "bodyPreview": "API deploy window moved to 15:30.",
+                    "importance": "high",
+                    "webLink": "https://outlook.example.test/mail/release-brief"
+                }]
+            }),
+            expected_external_id: "mail-release-brief",
+            expected_title: "Release brief ready for review",
+            expected_severity: "warning",
+        },
+    );
+    assert!(mail.notification["body"]
+        .as_str()
+        .unwrap()
+        .contains("From: Release Bot"));
+
+    let erp = execute_sample_notification_adapter(
+        &client,
+        &auth.token,
+        SampleNotificationAdapterCase {
+            source_prefix: "erp_messages_adapter",
+            kind: "erp",
+            display_name: "ERP Messages Adapter",
+            config: json!({
+                "adapter": "erp_messages_sample",
+                "messages": [{
+                    "id": "erp-access-approval",
+                    "title": "Deployment access approval waiting",
+                    "message": "Mock ERP private message for local development.",
+                    "requires_approval": true
+                }]
+            }),
+            expected_external_id: "erp-access-approval",
+            expected_title: "Deployment access approval waiting",
+            expected_severity: "warning",
+        },
+    );
+    assert_eq!(erp.notification["url"], Value::Null);
+
+    for connector in [&calendar, &mail, &erp] {
+        let response = client
+            .delete(format!(
+                "{}/connectors/{}",
+                common::APP_HOST,
+                connector.source
+            ))
+            .bearer_auth(&auth.token)
+            .send()
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        common::delete_test_notification(&client, connector.notification.clone());
+    }
+
+    common::delete_test_user(auth.user_id);
+}
+
+#[test]
 fn test_azure_devops_adapter_fetches_and_normalizes_work_items() {
     let client = Client::new();
     let auth = common::create_admin_auth(&client);
@@ -1173,6 +1274,100 @@ fn assert_not_contains_id(items: &Value, id: i64) {
             .any(|item| item["id"].as_i64() == Some(id)),
         "expected dashboard collection to exclude id {id}, got {items:?}"
     );
+}
+
+struct SampleNotificationExecution {
+    source: String,
+    notification: Value,
+}
+
+struct SampleNotificationAdapterCase {
+    source_prefix: &'static str,
+    kind: &'static str,
+    display_name: &'static str,
+    config: Value,
+    expected_external_id: &'static str,
+    expected_title: &'static str,
+    expected_severity: &'static str,
+}
+
+fn execute_sample_notification_adapter(
+    client: &Client,
+    token: &str,
+    case: SampleNotificationAdapterCase,
+) -> SampleNotificationExecution {
+    let source = common::unique_name(case.source_prefix);
+
+    let response = client
+        .post(format!("{}/connectors", common::APP_HOST))
+        .bearer_auth(token)
+        .json(&json!({
+            "source": source.clone(),
+            "kind": case.kind,
+            "display_name": case.display_name,
+            "status": "active"
+        }))
+        .send()
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    let response = client
+        .put(format!("{}/connectors/{}/config", common::APP_HOST, source))
+        .bearer_auth(token)
+        .json(&json!({
+            "target": "notifications",
+            "enabled": true,
+            "schedule_cron": null,
+            "config": case.config.to_string(),
+            "sample_payload": "{\"items\":[]}"
+        }))
+        .send()
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = client
+        .post(format!("{}/connectors/{}/runs", common::APP_HOST, source))
+        .bearer_auth(token)
+        .json(&json!({}))
+        .send()
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    let execution = response.json::<Value>().unwrap()["data"].clone();
+    assert_eq!(execution["source"].as_str().unwrap(), source);
+    assert_eq!(execution["target"], "notifications");
+    assert_eq!(execution["imported"], 1, "execution: {execution:#}");
+    assert_eq!(execution["failed"], 0);
+    assert_eq!(execution["run"]["status"], "success");
+    assert!(
+        execution["item_errors"].as_array().unwrap().is_empty(),
+        "sample adapter should not emit item errors: {execution:#}"
+    );
+
+    let notification = execution["data"][0].clone();
+    assert_eq!(notification["source"].as_str().unwrap(), source);
+    assert_eq!(notification["external_id"], case.expected_external_id);
+    assert_eq!(notification["title"], case.expected_title);
+    assert_eq!(notification["severity"], case.expected_severity);
+    assert_eq!(notification["is_read"], false);
+
+    let dashboard = client
+        .get(format!("{}/dashboard?source={}", common::APP_HOST, source))
+        .bearer_auth(token)
+        .send()
+        .unwrap()
+        .json::<Value>()
+        .unwrap()["data"]
+        .clone();
+    assert_contains_id(
+        &dashboard["notifications"],
+        notification["id"].as_i64().unwrap(),
+    );
+
+    SampleNotificationExecution {
+        source,
+        notification,
+    }
 }
 
 fn assert_contains_service_check(items: &Value, service_id: i64) {

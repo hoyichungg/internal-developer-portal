@@ -35,6 +35,13 @@ struct MonitoringConfig {
     timeout_seconds: Option<u64>,
 }
 
+#[derive(Clone, Copy)]
+enum SampleNotificationKind {
+    Calendar,
+    OutlookMail,
+    ErpMessages,
+}
+
 pub async fn fetch_connector_payload(
     target: &str,
     config_json: &str,
@@ -55,6 +62,24 @@ pub async fn fetch_connector_payload(
         }
         Some("monitoring") => Err(format!(
             "monitoring adapter does not support target {target}"
+        )),
+        Some("calendar_sample" | "calendar") if target == "notifications" => {
+            fetch_sample_notifications(config_json, SampleNotificationKind::Calendar).map(Some)
+        }
+        Some("calendar_sample" | "calendar") => Err(format!(
+            "calendar_sample adapter does not support target {target}"
+        )),
+        Some("outlook_mail_sample" | "outlook_mail" | "outlook") if target == "notifications" => {
+            fetch_sample_notifications(config_json, SampleNotificationKind::OutlookMail).map(Some)
+        }
+        Some("outlook_mail_sample" | "outlook_mail" | "outlook") => Err(format!(
+            "outlook_mail_sample adapter does not support target {target}"
+        )),
+        Some("erp_messages_sample" | "erp_messages" | "erp") if target == "notifications" => {
+            fetch_sample_notifications(config_json, SampleNotificationKind::ErpMessages).map(Some)
+        }
+        Some("erp_messages_sample" | "erp_messages" | "erp") => Err(format!(
+            "erp_messages_sample adapter does not support target {target}"
         )),
         Some(adapter) => Err(format!("connector adapter {adapter} is not supported")),
         None => Ok(None),
@@ -188,6 +213,23 @@ async fn fetch_monitoring_service_health(config_json: &str) -> Result<Value, Str
     Ok(json!({ "items": items }))
 }
 
+fn fetch_sample_notifications(
+    config_json: &str,
+    kind: SampleNotificationKind,
+) -> Result<Value, String> {
+    let config = serde_json::from_str::<Value>(config_json)
+        .map_err(|error| format!("{} config is not valid JSON: {error}", kind.adapter_name()))?;
+    let items = match sample_notification_items(&config, kind) {
+        Some(items) => items
+            .into_iter()
+            .map(|item| normalize_sample_notification(kind, item))
+            .collect(),
+        None => default_sample_notifications(kind),
+    };
+
+    Ok(json!({ "items": items }))
+}
+
 async fn send_azure_request(
     request: reqwest::RequestBuilder,
     token: Option<&str>,
@@ -243,6 +285,24 @@ async fn send_monitoring_request(
         .map_err(|error| format!("monitoring response was not valid JSON: {error}"))
 }
 
+impl SampleNotificationKind {
+    fn adapter_name(self) -> &'static str {
+        match self {
+            SampleNotificationKind::Calendar => "calendar_sample",
+            SampleNotificationKind::OutlookMail => "outlook_mail_sample",
+            SampleNotificationKind::ErpMessages => "erp_messages_sample",
+        }
+    }
+
+    fn item_keys(self) -> &'static [&'static str] {
+        match self {
+            SampleNotificationKind::Calendar => &["items", "events", "meetings"],
+            SampleNotificationKind::OutlookMail => &["items", "messages", "mail"],
+            SampleNotificationKind::ErpMessages => &["items", "messages", "private_messages"],
+        }
+    }
+}
+
 fn normalize_azure_work_item(item: &Value, web_url_base: Option<&str>) -> Value {
     let id = item.get("id").and_then(Value::as_i64).unwrap_or_default();
     let fields = item.get("fields").unwrap_or(&Value::Null);
@@ -275,6 +335,184 @@ fn normalize_azure_work_item(item: &Value, web_url_base: Option<&str>) -> Value 
         "due_at": null,
         "url": url
     })
+}
+
+fn sample_notification_items(config: &Value, kind: SampleNotificationKind) -> Option<Vec<&Value>> {
+    for key in kind.item_keys() {
+        if let Some(items) = config.get(*key).and_then(Value::as_array) {
+            return Some(items.iter().collect());
+        }
+    }
+
+    None
+}
+
+fn normalize_sample_notification(kind: SampleNotificationKind, item: &Value) -> Value {
+    match kind {
+        SampleNotificationKind::Calendar => normalize_calendar_notification(item),
+        SampleNotificationKind::OutlookMail => normalize_outlook_mail_notification(item),
+        SampleNotificationKind::ErpMessages => normalize_erp_message_notification(item),
+    }
+}
+
+fn normalize_calendar_notification(item: &Value) -> Value {
+    let title = field_string(item, &["title", "subject", "summary", "name"])
+        .unwrap_or_else(|| "Calendar event".to_owned());
+    let external_id = notification_external_id(
+        "calendar",
+        item,
+        &["external_id", "id", "event_id", "uid", "ical_uid"],
+        &title,
+    );
+    let severity = field_string(item, &["severity", "importance", "priority"])
+        .map(|value| normalize_notification_severity(&value, "info"))
+        .unwrap_or("info");
+
+    json!({
+        "external_id": external_id,
+        "title": title,
+        "body": calendar_body(item),
+        "severity": severity,
+        "is_read": field_bool(item, &["is_read", "read", "seen"]).unwrap_or(false),
+        "url": field_url(item, &["url", "web_url", "web_link", "webLink", "join_url", "online_meeting_url"])
+    })
+}
+
+fn normalize_outlook_mail_notification(item: &Value) -> Value {
+    let title = field_string(item, &["title", "subject"])
+        .unwrap_or_else(|| "Outlook mail message".to_owned());
+    let external_id = notification_external_id(
+        "mail",
+        item,
+        &["external_id", "id", "message_id", "internet_message_id"],
+        &title,
+    );
+    let severity = field_string(item, &["severity", "importance", "priority"])
+        .map(|value| normalize_notification_severity(&value, "info"))
+        .unwrap_or("info");
+
+    json!({
+        "external_id": external_id,
+        "title": title,
+        "body": mail_body(item),
+        "severity": severity,
+        "is_read": field_bool(item, &["is_read", "isRead", "read", "seen"]).unwrap_or(false),
+        "url": field_url(item, &["url", "web_url", "web_link", "webLink"])
+    })
+}
+
+fn normalize_erp_message_notification(item: &Value) -> Value {
+    let title = field_string(item, &["title", "subject", "type", "request_type"])
+        .unwrap_or_else(|| "ERP message".to_owned());
+    let external_id = notification_external_id(
+        "erp",
+        item,
+        &[
+            "external_id",
+            "id",
+            "message_id",
+            "request_id",
+            "approval_id",
+        ],
+        &title,
+    );
+
+    json!({
+        "external_id": external_id,
+        "title": title,
+        "body": field_string(item, &["body", "message", "description", "summary", "preview"]),
+        "severity": erp_message_severity(item),
+        "is_read": field_bool(item, &["is_read", "read", "seen"]).unwrap_or(false),
+        "url": field_url(item, &["url", "web_url", "web_link", "webLink"])
+    })
+}
+
+fn default_sample_notifications(kind: SampleNotificationKind) -> Vec<Value> {
+    match kind {
+        SampleNotificationKind::Calendar => vec![json!({
+            "external_id": "calendar-platform-standup",
+            "title": "Calendar: Platform standup in 15 minutes",
+            "body": "Organizer: Taylor Lin | Location: Teams",
+            "severity": "info",
+            "is_read": false,
+            "url": "https://calendar.example.test/events/platform-standup"
+        })],
+        SampleNotificationKind::OutlookMail => vec![json!({
+            "external_id": "mail-release-brief",
+            "title": "Mail: Release brief ready for review",
+            "body": "From: release-bot@example.test | API deploy window moved to 15:30.",
+            "severity": "warning",
+            "is_read": false,
+            "url": "https://outlook.example.test/mail/release-brief"
+        })],
+        SampleNotificationKind::ErpMessages => vec![json!({
+            "external_id": "erp-access-approval",
+            "title": "ERP: Deployment access approval waiting",
+            "body": "Sample ERP private message. Replace this adapter with the real ERP integration when one is available.",
+            "severity": "warning",
+            "is_read": false,
+            "url": null
+        })],
+    }
+}
+
+fn calendar_body(item: &Value) -> Option<String> {
+    let body = field_string(item, &["body", "description", "preview"]);
+    if body.is_some() {
+        return body;
+    }
+
+    let mut details = Vec::new();
+    if let Some(organizer) = person_display(item, &["organizer", "organizer_name", "from"]) {
+        details.push(format!("Organizer: {organizer}"));
+    }
+    if let Some(location) = field_string(item, &["location", "room"]) {
+        details.push(format!("Location: {location}"));
+    }
+    if let Some(starts_at) =
+        normalized_time_field(item, &["starts_at", "start_at", "start_time", "start"])
+    {
+        details.push(format!("Starts: {starts_at}"));
+    }
+    if let Some(ends_at) = normalized_time_field(item, &["ends_at", "end_at", "end_time", "end"]) {
+        details.push(format!("Ends: {ends_at}"));
+    }
+
+    (!details.is_empty()).then(|| details.join(" | "))
+}
+
+fn mail_body(item: &Value) -> Option<String> {
+    let preview = field_string(
+        item,
+        &["body", "body_preview", "bodyPreview", "preview", "summary"],
+    );
+    let sender = person_display(item, &["from", "sender"]);
+
+    match (sender, preview) {
+        (Some(sender), Some(preview)) => Some(format!("From: {sender} | {preview}")),
+        (Some(sender), None) => Some(format!("From: {sender}")),
+        (None, Some(preview)) => Some(preview),
+        (None, None) => None,
+    }
+}
+
+fn erp_message_severity(item: &Value) -> &'static str {
+    if let Some(severity) = field_string(item, &["severity"]) {
+        return normalize_notification_severity(&severity, "warning");
+    }
+    if let Some(priority) = field_string(item, &["priority", "importance"]) {
+        return normalize_notification_severity(&priority, "warning");
+    }
+    if field_bool(
+        item,
+        &["requires_approval", "approval_required", "is_pending"],
+    )
+    .unwrap_or(false)
+    {
+        return "warning";
+    }
+
+    "info"
 }
 
 fn monitoring_items(response: &Value) -> Vec<&Value> {
@@ -360,6 +598,15 @@ fn normalize_monitoring_health(status: &str) -> &'static str {
     }
 }
 
+fn normalize_notification_severity(value: &str, default: &'static str) -> &'static str {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "critical" | "urgent" | "blocker" | "error" | "failed" | "failure" => "critical",
+        "warning" | "warn" | "high" | "medium" | "normal" => "warning",
+        "info" | "low" | "ok" | "success" | "none" => "info",
+        _ => default,
+    }
+}
+
 fn normalize_lifecycle(status: &str) -> &'static str {
     match status.to_ascii_lowercase().as_str() {
         "deprecated" => "deprecated",
@@ -389,6 +636,18 @@ fn require_url(field: &str, url: &str) -> Result<(), String> {
     }
 }
 
+fn notification_external_id(prefix: &str, item: &Value, id_fields: &[&str], title: &str) -> String {
+    field_string(item, id_fields).unwrap_or_else(|| {
+        let slug = stable_slug(None, &[title]);
+        format!("{prefix}-{slug}")
+    })
+}
+
+fn field_url(item: &Value, names: &[&str]) -> Option<String> {
+    field_string(item, names)
+        .filter(|value| value.starts_with("http://") || value.starts_with("https://"))
+}
+
 fn field_string(item: &Value, names: &[&str]) -> Option<String> {
     field(item, names)
         .and_then(scalar_to_string)
@@ -400,6 +659,40 @@ fn field_i32(item: &Value, names: &[&str]) -> Option<i32> {
     field(item, names)
         .and_then(Value::as_i64)
         .and_then(|value| i32::try_from(value).ok())
+}
+
+fn field_bool(item: &Value, names: &[&str]) -> Option<bool> {
+    field(item, names).and_then(|value| match value {
+        Value::Bool(value) => Some(*value),
+        Value::Number(value) => value.as_i64().map(|value| value != 0),
+        Value::String(value) => match value.trim().to_ascii_lowercase().as_str() {
+            "true" | "yes" | "1" => Some(true),
+            "false" | "no" | "0" => Some(false),
+            _ => None,
+        },
+        _ => None,
+    })
+}
+
+fn person_display(item: &Value, names: &[&str]) -> Option<String> {
+    field(item, names).and_then(|value| {
+        scalar_to_string(value)
+            .or_else(|| {
+                field_string(
+                    value,
+                    &["display_name", "displayName", "name", "email", "address"],
+                )
+            })
+            .or_else(|| {
+                value
+                    .get("emailAddress")
+                    .and_then(|email| field_string(email, &["name", "address"]))
+            })
+    })
+}
+
+fn normalized_time_field(item: &Value, names: &[&str]) -> Option<String> {
+    field_string(item, names).map(|value| normalize_naive_datetime(&value).unwrap_or(value))
 }
 
 fn field<'a>(item: &'a Value, names: &[&str]) -> Option<&'a Value> {

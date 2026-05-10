@@ -44,7 +44,8 @@ Open the same URL in a browser to use the built-in management UI.
 The `migrate` container runs database migrations before `app` and `worker`
 start. It also ensures a development admin user exists and seeds local demo
 data so the dashboard has services, health checks, work cards, notifications,
-and connector run history on first launch.
+connector run history, and sample Calendar/Outlook/ERP connector configs on
+first launch.
 
 Default local credentials:
 
@@ -306,6 +307,13 @@ Connector configs can also select a real adapter. Supported adapters include
 `service_health` target. When `config` contains `"adapter": "azure_devops"`,
 the worker calls Azure DevOps WIQL and work item batch APIs, then normalizes
 work items into the existing `work_cards` payload.
+For product walkthroughs and local development, three notification adapters are
+available without external credentials: `calendar_sample`, `outlook_mail_sample`,
+and `erp_messages_sample`. These target `notifications` and normalize sample
+calendar events, mail messages, and ERP-style private messages into the same
+payload accepted by `POST /connectors/<source>/notifications/import`. The ERP
+adapter is intentionally a mock/sample adapter, so it does not require a real ERP
+instance.
 Config responses redact secret-looking keys such as `personal_access_token`,
 `pat`, `token`, `password`, `secret`, `client_secret`, `bearer_token`, and
 `api_key`.
@@ -347,6 +355,20 @@ The monitoring response can be `{ "items": [...] }`, `{ "services": [...] }`,
 or a top-level array. Items are normalized into service health records using
 common fields such as `id`, `name`, `status`, `health`, `summary`,
 `dashboard_url`, `repository_url`, and `runbook_url`.
+
+Sample notification adapter configs:
+
+```json
+{ "adapter": "calendar_sample", "events": [{ "id": "standup", "subject": "Daily standup" }] }
+```
+
+```json
+{ "adapter": "outlook_mail_sample", "messages": [{ "id": "mail-1", "subject": "Release brief", "importance": "high" }] }
+```
+
+```json
+{ "adapter": "erp_messages_sample", "messages": [{ "id": "approval-1", "title": "Access approval waiting", "requires_approval": true }] }
+```
 
 Each successful service health item also writes an append-only
 `service_health_checks` record tied to the connector run. `/dashboard` and

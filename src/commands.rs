@@ -25,6 +25,9 @@ use crate::{
 };
 
 const DEMO_SOURCE: &str = "demo-workday";
+const DEMO_CALENDAR_SOURCE: &str = "demo-calendar";
+const DEMO_OUTLOOK_SOURCE: &str = "demo-outlook-mail";
+const DEMO_ERP_SOURCE: &str = "demo-erp-messages";
 const DEMO_MAINTAINER_EMAIL: &str = "platform-ops@example.test";
 
 struct DemoSeedSummary {
@@ -177,6 +180,7 @@ async fn seed_demo_data_transaction(
     }
 
     ensure_demo_connector(c, maintainer.id).await?;
+    ensure_demo_product_connectors(c).await?;
 
     let packages = vec![
         ensure_demo_package(
@@ -380,6 +384,153 @@ async fn ensure_demo_connector(
     )
     .await?;
     diesel::update(connector_configs::table.filter(connector_configs::source.eq(DEMO_SOURCE)))
+        .set(
+            connector_configs::next_run_at.eq(Some(Utc::now().naive_utc() + Duration::minutes(15))),
+        )
+        .execute(c)
+        .await?;
+
+    Ok(())
+}
+
+async fn ensure_demo_product_connectors(c: &mut AsyncPgConnection) -> Result<(), DieselError> {
+    ensure_demo_product_connector(
+        c,
+        DEMO_CALENDAR_SOURCE,
+        "calendar",
+        "Calendar Sample Feed",
+        "@every 30m",
+        json!({
+            "adapter": "calendar_sample",
+            "events": [{
+                "id": "calendar-platform-standup",
+                "subject": "Calendar: Platform standup in 15 minutes",
+                "organizer": "Taylor Lin",
+                "location": "Teams",
+                "starts_at": "2026-05-11T09:30:00Z",
+                "web_link": "https://calendar.example.test/events/platform-standup"
+            }]
+        }),
+        json!({
+            "items": [{
+                "external_id": "calendar-platform-standup",
+                "title": "Calendar: Platform standup in 15 minutes",
+                "body": "Organizer: Taylor Lin | Location: Teams",
+                "severity": "info",
+                "is_read": false,
+                "url": "https://calendar.example.test/events/platform-standup"
+            }]
+        }),
+    )
+    .await?;
+    ensure_demo_product_connector(
+        c,
+        DEMO_OUTLOOK_SOURCE,
+        "outlook",
+        "Outlook Mail Sample Feed",
+        "@every 15m",
+        json!({
+            "adapter": "outlook_mail_sample",
+            "messages": [{
+                "id": "release-brief",
+                "subject": "Mail: Release brief ready for review",
+                "from": "release-bot@example.test",
+                "body_preview": "API deploy window moved to 15:30.",
+                "importance": "high",
+                "web_link": "https://outlook.example.test/mail/release-brief"
+            }]
+        }),
+        json!({
+            "items": [{
+                "external_id": "release-brief",
+                "title": "Mail: Release brief ready for review",
+                "body": "From: release-bot@example.test | API deploy window moved to 15:30.",
+                "severity": "warning",
+                "is_read": false,
+                "url": "https://outlook.example.test/mail/release-brief"
+            }]
+        }),
+    )
+    .await?;
+    ensure_demo_product_connector(
+        c,
+        DEMO_ERP_SOURCE,
+        "erp",
+        "ERP Messages Sample Feed",
+        "@every 15m",
+        json!({
+            "adapter": "erp_messages_sample",
+            "messages": [{
+                "id": "access-approval",
+                "title": "ERP: Deployment access approval waiting",
+                "message": "Sample ERP private message. Replace this adapter with the real ERP integration when one is available.",
+                "requires_approval": true
+            }]
+        }),
+        json!({
+            "items": [{
+                "external_id": "access-approval",
+                "title": "ERP: Deployment access approval waiting",
+                "body": "Sample ERP private message. Replace this adapter with the real ERP integration when one is available.",
+                "severity": "warning",
+                "is_read": false,
+                "url": null
+            }]
+        }),
+    )
+    .await
+}
+
+async fn ensure_demo_product_connector(
+    c: &mut AsyncPgConnection,
+    source: &str,
+    kind: &str,
+    display_name: &str,
+    schedule_cron: &str,
+    config: Value,
+    sample_payload: Value,
+) -> Result<(), DieselError> {
+    match ConnectorRepository::find_by_source(c, source).await {
+        Ok(_) => {
+            ConnectorRepository::update_by_source(
+                c,
+                source,
+                ConnectorUpdate {
+                    kind: kind.to_owned(),
+                    display_name: display_name.to_owned(),
+                    status: "active".to_owned(),
+                },
+            )
+            .await?;
+        }
+        Err(DieselError::NotFound) => {
+            ConnectorRepository::create(
+                c,
+                NewConnector {
+                    source: source.to_owned(),
+                    kind: kind.to_owned(),
+                    display_name: display_name.to_owned(),
+                    status: "active".to_owned(),
+                },
+            )
+            .await?;
+        }
+        Err(error) => return Err(error),
+    }
+
+    ConnectorConfigRepository::upsert_by_source(
+        c,
+        source,
+        crate::models::ConnectorConfigUpdate {
+            target: "notifications".to_owned(),
+            enabled: true,
+            schedule_cron: Some(schedule_cron.to_owned()),
+            config: config.to_string(),
+            sample_payload: sample_payload.to_string(),
+        },
+    )
+    .await?;
+    diesel::update(connector_configs::table.filter(connector_configs::source.eq(source)))
         .set(
             connector_configs::next_run_at.eq(Some(Utc::now().naive_utc() + Duration::minutes(15))),
         )
