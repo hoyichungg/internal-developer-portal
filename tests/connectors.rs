@@ -1,3 +1,4 @@
+use chrono::{Duration, Utc};
 use reqwest::{blocking::Client, StatusCode};
 use serde_json::{json, Value};
 use std::io::{Read, Write};
@@ -869,6 +870,9 @@ fn test_monitoring_adapter_fetches_and_normalizes_service_health() {
     let auth = common::create_admin_auth(&client);
     let maintainer = common::create_test_maintainer(&client);
     let source = common::unique_name("monitoring_adapter");
+    let checked_at = (Utc::now().naive_utc() - Duration::minutes(10))
+        .format("%Y-%m-%dT%H:%M:%S")
+        .to_string();
     let mock = start_monitoring_mock(json!({
         "services": [{
             "id": "identity-api",
@@ -877,7 +881,7 @@ fn test_monitoring_adapter_fetches_and_normalizes_service_health() {
             "summary": "Login and session service",
             "url": "https://grafana.example.test/d/identity",
             "runbook": "https://docs.example.test/runbooks/identity",
-            "checked_at": "2026-05-09T01:02:03Z"
+            "checked_at": format!("{checked_at}Z")
         }, {
             "id": "billing-worker",
             "name": "Billing Worker",
@@ -982,7 +986,7 @@ fn test_monitoring_adapter_fetches_and_normalizes_service_health() {
         identity["dashboard_url"],
         "https://grafana.example.test/d/identity"
     );
-    assert_eq!(identity["last_checked_at"], "2026-05-09T01:02:03");
+    assert_eq!(identity["last_checked_at"], checked_at);
     assert_eq!(billing["health_status"], "down");
     assert_eq!(
         billing["repository_url"],

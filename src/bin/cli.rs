@@ -55,10 +55,20 @@ async fn main() {
                         ),
                 ),
         )
+        .subcommand(
+            Command::new("demo")
+                .about("Demo data")
+                .arg_required_else_help(true)
+                .subcommand(
+                    Command::new("seed")
+                        .about("Seed local demo portal data")
+                        .arg(Arg::new("admin-username").long("admin-username")),
+                ),
+        )
         .get_matches();
 
-    if let Some(("users", sub_matches)) = matches.subcommand() {
-        match sub_matches.subcommand() {
+    match matches.subcommand() {
+        Some(("users", sub_matches)) => match sub_matches.subcommand() {
             Some(("create", sub_matches)) => {
                 internal_developer_portal::commands::create_user(
                     sub_matches
@@ -116,6 +126,15 @@ async fn main() {
                 .await
             }
             _ => {}
+        },
+        Some(("demo", sub_matches)) => {
+            if let Some(("seed", sub_matches)) = sub_matches.subcommand() {
+                internal_developer_portal::commands::seed_demo_data(
+                    sub_matches.get_one::<String>("admin-username").cloned(),
+                )
+                .await
+            }
         }
+        _ => {}
     }
 }

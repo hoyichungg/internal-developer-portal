@@ -30,7 +30,7 @@ services:
       - SEED_ADMIN_USERNAME=admin
       - SEED_ADMIN_PASSWORD=admin123
       - SEED_ADMIN_ROLES=admin,member
-    command: ["sh", "-c", "diesel migration run && cargo run --bin cli -- users ensure-admin"]
+    command: ["sh", "-c", "diesel migration run && cargo run --bin cli -- users ensure-admin && cargo run --bin cli -- demo seed"]
     volumes:
       - ./:/app/
       - app-target:/app/target

@@ -42,7 +42,9 @@ http://127.0.0.1:8000
 Open the same URL in a browser to use the built-in management UI.
 
 The `migrate` container runs database migrations before `app` and `worker`
-start. It also ensures a development admin user exists.
+start. It also ensures a development admin user exists and seeds local demo
+data so the dashboard has services, health checks, work cards, notifications,
+and connector run history on first launch.
 
 Default local credentials:
 
@@ -107,6 +109,14 @@ cargo run --bin cli -- users ensure-admin --username admin --password admin123 -
 
 Use `--reset-password` when you intentionally want to replace the password for
 an existing seed account.
+
+Seed local demo data:
+
+```sh
+cargo run --bin cli -- demo seed
+```
+
+The demo seed is idempotent and uses the `demo-workday` connector source.
 
 ## Tests
 

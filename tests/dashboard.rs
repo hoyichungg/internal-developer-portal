@@ -1,3 +1,4 @@
+use chrono::{Duration, Utc};
 use reqwest::{blocking::Client, StatusCode};
 use serde_json::{json, Value};
 
@@ -114,6 +115,9 @@ fn test_me_overview_returns_user_owned_operational_context() {
     let owner = common::create_test_auth(&client, "member");
     let maintainer = common::create_test_maintainer(&client);
     let source = common::unique_name("meov");
+    let checked_at = (Utc::now().naive_utc() - Duration::minutes(10))
+        .format("%Y-%m-%dT%H:%M:%S")
+        .to_string();
 
     let response = client
         .post(format!(
@@ -149,7 +153,7 @@ fn test_me_overview_returns_user_owned_operational_context() {
                 "repository_url": "https://github.com/acme/me-overview",
                 "dashboard_url": "https://grafana.acme.test/d/me-overview",
                 "runbook_url": "https://docs.acme.test/runbooks/me-overview",
-                "last_checked_at": "2026-05-09T02:03:04Z"
+                "last_checked_at": format!("{checked_at}Z")
             }]
         }))
         .send()
