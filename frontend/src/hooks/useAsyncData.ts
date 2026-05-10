@@ -7,7 +7,7 @@ type AsyncState<T> = {
   value: T | null;
 };
 
-export function useAsyncData<T = any>(
+export function useAsyncData<T = unknown>(
   loader: () => Promise<T>,
   deps: DependencyList = []
 ): [AsyncState<T>, { reload: () => Promise<void> }] {

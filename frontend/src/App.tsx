@@ -12,22 +12,24 @@ import { ConnectorsView } from "./pages/connectors/ConnectorsView";
 import { DashboardView } from "./pages/dashboard/DashboardView";
 import { LoginScreen } from "./pages/login/LoginScreen";
 import { ServiceOverviewView } from "./pages/services/ServiceOverviewView";
+import type { ApiId, LoginRequest, LoginResponse, MeResponse } from "./types/api";
 
 const TOP_LEVEL_VIEWS = new Set(["dashboard", "connectors", "catalog", "audit"]);
+type AppView = "dashboard" | "connectors" | "catalog" | "audit" | "service-overview";
 
-function viewFromHash() {
+function viewFromHash(): AppView {
   const hash = window.location.hash.replace(/^#\/?/, "");
 
-  return TOP_LEVEL_VIEWS.has(hash) ? hash : "dashboard";
+  return TOP_LEVEL_VIEWS.has(hash) ? (hash as AppView) : "dashboard";
 }
 
 export default function App() {
   const [token, setToken] = useStoredToken();
-  const [user, setUser] = useState(null);
+  const [user, setUser] = useState<MeResponse | null>(null);
   const [view, setView] = useState(viewFromHash);
-  const [selectedServiceId, setSelectedServiceId] = useState(null);
+  const [selectedServiceId, setSelectedServiceId] = useState<ApiId | null>(null);
   const [booting, setBooting] = useState(true);
-  const restoredTokenRef = useRef(null);
+  const restoredTokenRef = useRef<string | null>(null);
 
   const client = useMemo(() => createApiClient(token), [token]);
 
@@ -64,7 +66,7 @@ export default function App() {
       setBooting(true);
 
       try {
-        const me = await createApiClient(token).get("/me");
+        const me = await createApiClient(token).get<MeResponse>("/me");
         if (mounted) {
           setUser(me);
         }
@@ -87,8 +89,8 @@ export default function App() {
     };
   }, [setToken, token]);
 
-  async function handleLogin(credentials) {
-    const login = await createApiClient(null).post("/login", credentials);
+  async function handleLogin(credentials: LoginRequest) {
+    const login = await createApiClient(null).post<LoginResponse>("/login", credentials);
     setBooting(true);
     setUser(null);
     setSelectedServiceId(null);
@@ -112,7 +114,7 @@ export default function App() {
     setToken(null);
   }
 
-  function handleViewChange(nextView) {
+  function handleViewChange(nextView: AppView) {
     setView(nextView);
     setSelectedServiceId(null);
 
@@ -124,8 +126,8 @@ export default function App() {
     }
   }
 
-  function openServiceOverview(serviceId) {
-    setSelectedServiceId(serviceId);
+  function openServiceOverview(serviceId: string | number) {
+    setSelectedServiceId(Number(serviceId));
     setView("service-overview");
   }
 

@@ -12,6 +12,7 @@ import {
 } from "@mantine/core";
 import { IconAlertTriangle, IconArrowRight, IconExternalLink } from "@tabler/icons-react";
 
+import type { ApiClient } from "../../api/client";
 import { DataPanel } from "../../components/DataPanel";
 import { DataTable } from "../../components/DataTable";
 import { EmptyText } from "../../components/EmptyText";
@@ -22,9 +23,27 @@ import { DateCell, StatusBadge } from "../../components/tableCells";
 import { ViewFrame } from "../../components/ViewFrame";
 import { useAsyncData } from "../../hooks/useAsyncData";
 import { useRefresh } from "../../hooks/useRefresh";
+import type {
+  DashboardPriorityItem,
+  DateTimeString,
+  MeOperationsStatus,
+  MeOverviewResponse,
+  Notification,
+  Service,
+  ServiceHealthHistory
+} from "../../types/api";
 
-export function DashboardView({ client, onOpenService }) {
-  const [data, actions] = useAsyncData(() => client.get("/me/overview"), [client]);
+export function DashboardView({
+  client,
+  onOpenService
+}: {
+  client: ApiClient;
+  onOpenService: (serviceId: string | number) => void;
+}) {
+  const [data, actions] = useAsyncData<MeOverviewResponse>(
+    () => client.get<MeOverviewResponse>("/me/overview"),
+    [client]
+  );
 
   useRefresh(actions.reload);
 
@@ -42,7 +61,7 @@ export function DashboardView({ client, onOpenService }) {
         <Stack gap="lg">
           <SimpleGrid cols={{ base: 1, sm: 2, lg: 5 }}>
             <Metric label="My services" value={overview.summary.services} />
-            <Metric label="Needs attention" value={overview.summary.unhealthy_services} />
+            <Metric label="Today first" value={attentionCount(overview)} />
             <Metric label="Open work" value={overview.summary.open_work_cards} />
             <Metric label="Messages" value={overview.summary.unread_notifications} />
             <Metric label="Failed runs" value={overview.summary.failed_connector_runs} />
@@ -52,7 +71,7 @@ export function DashboardView({ client, onOpenService }) {
 
           <Grid>
             <Grid.Col span={{ base: 12, lg: 6 }}>
-              <DataPanel title="Needs attention">
+              <DataPanel title="Today first">
                 <AttentionQueue overview={overview} onOpenService={onOpenService} />
               </DataPanel>
             </Grid.Col>
@@ -156,12 +175,12 @@ export function DashboardView({ client, onOpenService }) {
   );
 }
 
-function OperationsWarning({ operations }) {
+function OperationsWarning({ operations }: { operations?: MeOperationsStatus | null }) {
   if (!operations) {
     return null;
   }
 
-  const messages = [];
+  const messages: string[] = [];
 
   if (operations.worker_status !== "healthy") {
     messages.push(
@@ -201,7 +220,13 @@ function OperationsWarning({ operations }) {
   );
 }
 
-function HealthTrendPanel({ history, onOpenService }) {
+function HealthTrendPanel({
+  history,
+  onOpenService
+}: {
+  history?: ServiceHealthHistory;
+  onOpenService: (serviceId: string | number) => void;
+}) {
   const summary = history?.summary;
   const checks = history?.recent_checks || [];
   const incidents = history?.recent_incidents || [];
@@ -277,7 +302,7 @@ function HealthTrendPanel({ history, onOpenService }) {
   );
 }
 
-function TrendStat({ label, value, tone }) {
+function TrendStat({ label, value, tone }: { label: string; value: number; tone?: string }) {
   return (
     <Box className={`healthTrendStat${tone ? ` is-${tone}` : ""}`}>
       <Text size="xs" c="dimmed" fw={700} tt="uppercase">
@@ -290,7 +315,7 @@ function TrendStat({ label, value, tone }) {
   );
 }
 
-function MessageList({ notifications }) {
+function MessageList({ notifications }: { notifications?: Notification[] }) {
   if (!notifications || notifications.length === 0) {
     return <EmptyText>No unread messages</EmptyText>;
   }
@@ -341,8 +366,16 @@ function MessageList({ notifications }) {
   );
 }
 
-function AttentionQueue({ overview, onOpenService }) {
-  const items = buildAttentionItems(overview);
+function AttentionQueue({
+  overview,
+  onOpenService
+}: {
+  overview: MeOverviewResponse;
+  onOpenService: (serviceId: string | number) => void;
+}) {
+  const items = overview.priority_items?.length
+    ? overview.priority_items
+    : buildAttentionItems(overview);
 
   if (items.length === 0) {
     return <EmptyText>Nothing needs attention</EmptyText>;
@@ -350,60 +383,94 @@ function AttentionQueue({ overview, onOpenService }) {
 
   return (
     <Stack gap={0} className="attentionList">
-      {items.map((item) => (
-        <Group
-          key={item.key}
-          justify="space-between"
-          align="center"
-          wrap="nowrap"
-          className="attentionRow"
-        >
-          <Group gap="sm" wrap="nowrap" className="attentionIdentity">
-            <StatusBadge value={item.severity} />
-            <Box className="attentionCopy">
-              <Text fw={750} className="attentionTitle" title={item.title}>
-                {item.title}
-              </Text>
-              <Text size="sm" c="dimmed" className="attentionDetail" title={item.detail}>
-                {item.detail}
-              </Text>
-            </Box>
-          </Group>
+      {items.map((item) => {
+        const serviceId = item.service_id ?? item.serviceId;
 
-          {item.serviceId && (
-            <Button
-              size="compact-sm"
-              variant="subtle"
-              rightSection={<IconArrowRight size={14} />}
-              onClick={() => onOpenService(item.serviceId)}
-            >
-              Overview
-            </Button>
-          )}
-          {item.url && (
-            <Button
-              component="a"
-              href={item.url}
-              target="_blank"
-              rel="noreferrer"
-              size="compact-sm"
-              variant="subtle"
-              rightSection={<IconExternalLink size={14} />}
-            >
-              Open
-            </Button>
-          )}
-        </Group>
-      ))}
+        return (
+          <Group key={item.key} justify="space-between" align="center" wrap="nowrap" className="attentionRow">
+            <Group gap="sm" wrap="nowrap" className="attentionIdentity">
+              <StatusBadge value={item.severity} />
+              <Box className="attentionCopy">
+                <Text fw={750} className="attentionTitle" title={item.title}>
+                  {item.title}
+                </Text>
+                <Text size="sm" c="dimmed" className="attentionDetail" title={item.detail}>
+                  {item.detail}
+                </Text>
+              </Box>
+            </Group>
+
+            {serviceId && (
+              <Button
+                size="compact-sm"
+                variant="subtle"
+                rightSection={<IconArrowRight size={14} />}
+                onClick={() => onOpenService(serviceId)}
+              >
+                Overview
+              </Button>
+            )}
+            {item.url && (
+              <Button
+                component="a"
+                href={item.url}
+                target="_blank"
+                rel="noreferrer"
+                size="compact-sm"
+                variant="subtle"
+                rightSection={<IconExternalLink size={14} />}
+              >
+                Open
+              </Button>
+            )}
+          </Group>
+        );
+      })}
     </Stack>
   );
 }
 
-function buildAttentionItems(overview) {
+function attentionCount(overview: MeOverviewResponse): number {
+  if (Array.isArray(overview.priority_items)) {
+    return overview.priority_items.length;
+  }
+
+  return overview.summary.unhealthy_services + overview.summary.failed_connector_runs;
+}
+
+function buildAttentionItems(overview: MeOverviewResponse): DashboardPriorityItem[] {
+  const operationItems: DashboardPriorityItem[] = [];
+  if (overview.operations?.worker_status && overview.operations.worker_status !== "healthy") {
+    operationItems.push({
+      key: "operations-worker",
+      kind: "operations",
+      severity: overview.operations.worker_status,
+      title:
+        overview.operations.worker_status === "missing"
+          ? "Connector worker heartbeat is missing"
+          : "Connector worker heartbeat is stale",
+      detail: overview.operations.latest_worker_seen_at
+        ? `Last seen at ${formatCheckTime(overview.operations.latest_worker_seen_at)}`
+        : "No connector worker has checked in"
+    });
+  }
+  if (overview.operations?.health_data_stale) {
+    operationItems.push({
+      key: "operations-health-data",
+      kind: "operations",
+      severity: "stale",
+      title: "Service health data is stale",
+      detail: overview.operations.latest_health_check_at
+        ? `Latest health check was ${formatCheckTime(overview.operations.latest_health_check_at)}`
+        : "No service health checks are available"
+    });
+  }
+
   const services = (overview.services || [])
     .filter((service) => service.health_status !== "healthy")
     .map((service) => ({
       key: `service-${service.id}`,
+      kind: "service",
       severity: service.health_status === "down" ? "down" : "degraded",
       title: service.name,
       detail: `${service.health_status} - ${service.source}`,
@@ -414,6 +481,7 @@ function buildAttentionItems(overview) {
     .filter((card) => card.priority === "urgent" || card.status === "blocked")
     .map((card) => ({
       key: `work-${card.id}`,
+      kind: "work",
       severity: card.status === "blocked" ? "blocked" : "urgent",
       title: card.title,
       detail: [card.priority, card.assignee, card.source].filter(Boolean).join(" - "),
@@ -421,9 +489,10 @@ function buildAttentionItems(overview) {
     }));
 
   const notifications = (overview.unread_notifications || [])
-    .filter((notification) => ["critical", "warning"].includes(notification.severity))
+    .filter((notification) => notification.severity === "critical")
     .map((notification) => ({
       key: `notification-${notification.id}`,
+      kind: "notification",
       severity: notification.severity,
       title: notification.title,
       detail: notification.source,
@@ -432,15 +501,22 @@ function buildAttentionItems(overview) {
 
   const runs = (overview.failed_connector_runs || []).map((run) => ({
     key: `run-${run.id}`,
+    kind: "connector_run",
     severity: run.status,
     title: `${run.source} / ${run.target}`,
     detail: run.error_message || `${run.failure_count} failed item(s)`
   }));
 
-  return [...services, ...workCards, ...notifications, ...runs].slice(0, 8);
+  return [...operationItems, ...services, ...workCards, ...notifications, ...runs].slice(0, 8);
 }
 
-function ServiceCards({ services, onOpenService }) {
+function ServiceCards({
+  services,
+  onOpenService
+}: {
+  services?: Service[];
+  onOpenService: (serviceId: string | number) => void;
+}) {
   if (!services || services.length === 0) {
     return <EmptyText>No services assigned</EmptyText>;
   }
@@ -487,7 +563,7 @@ function ServiceCards({ services, onOpenService }) {
   );
 }
 
-function formatCheckTime(value) {
+function formatCheckTime(value?: DateTimeString | null): string {
   if (!value) {
     return "";
   }
@@ -495,7 +571,7 @@ function formatCheckTime(value) {
   return new Date(value).toLocaleString();
 }
 
-function WorkLinkCell({ value }) {
+function WorkLinkCell({ value }: { value?: unknown }) {
   if (!value) {
     return null;
   }
@@ -503,7 +579,7 @@ function WorkLinkCell({ value }) {
   return (
     <Button
       component="a"
-      href={value}
+      href={String(value)}
       target="_blank"
       rel="noreferrer"
       size="compact-sm"

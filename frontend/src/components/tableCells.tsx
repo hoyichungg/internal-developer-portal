@@ -1,8 +1,6 @@
 import { Badge, Button, Code, Text } from "@mantine/core";
 
-type CellValue = string | number | boolean | null | undefined;
-
-export function StatusBadge({ value, className }: { value?: CellValue; className?: string }) {
+export function StatusBadge({ value, className }: { value?: unknown; className?: string }) {
   if (!value) {
     return null;
   }
@@ -52,7 +50,7 @@ export function StatusBadge({ value, className }: { value?: CellValue; className
   );
 }
 
-export function DateCell({ value }: { value?: CellValue }) {
+export function DateCell({ value }: { value?: unknown }) {
   if (!value) {
     return null;
   }
@@ -60,7 +58,7 @@ export function DateCell({ value }: { value?: CellValue }) {
   return <Text size="sm">{new Date(String(value)).toLocaleString()}</Text>;
 }
 
-export function LinkCell({ value }: { value?: CellValue }) {
+export function LinkCell({ value }: { value?: unknown }) {
   if (!value) {
     return null;
   }

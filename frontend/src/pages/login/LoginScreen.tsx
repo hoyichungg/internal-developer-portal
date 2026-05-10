@@ -11,17 +11,23 @@ import {
   Title
 } from "@mantine/core";
 import { useState } from "react";
+import type { FormEvent } from "react";
 
 import { CenterStage } from "../../components/CenterStage";
 import { ThemeToggle } from "../../components/ThemeToggle";
+import type { LoginRequest } from "../../types/api";
 
-export function LoginScreen({ onLogin }) {
+export function LoginScreen({
+  onLogin
+}: {
+  onLogin: (credentials: LoginRequest) => Promise<void>;
+}) {
   const [username, setUsername] = useState("admin");
   const [password, setPassword] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
 
-  async function submit(event) {
+  async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setSubmitting(true);
     setError("");
@@ -29,7 +35,7 @@ export function LoginScreen({ onLogin }) {
     try {
       await onLogin({ username, password });
     } catch (error) {
-      setError(error.message);
+      setError(error instanceof Error ? error.message : String(error));
     } finally {
       setSubmitting(false);
     }

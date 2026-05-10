@@ -1,7 +1,19 @@
 import { Button, Group } from "@mantine/core";
 import { IconBook, IconBrandGithub, IconChartBar } from "@tabler/icons-react";
 
-export function QuickLinks({ links, compact = true }) {
+type QuickLinksValue = {
+  repository_url?: string | null;
+  dashboard_url?: string | null;
+  runbook_url?: string | null;
+};
+
+export function QuickLinks({
+  links,
+  compact = true
+}: {
+  links?: QuickLinksValue | null;
+  compact?: boolean;
+}) {
   const items = [
     {
       label: "Repo",

@@ -1,6 +1,8 @@
 import { Box, Button, Grid, Group, Paper, Stack, Text } from "@mantine/core";
 import { IconArrowLeft } from "@tabler/icons-react";
+import type { ReactNode } from "react";
 
+import type { ApiClient } from "../../api/client";
 import { DataPanel } from "../../components/DataPanel";
 import { DataTable } from "../../components/DataTable";
 import { EmptyText } from "../../components/EmptyText";
@@ -10,10 +12,22 @@ import { DateCell, StatusBadge } from "../../components/tableCells";
 import { ViewFrame } from "../../components/ViewFrame";
 import { useAsyncData } from "../../hooks/useAsyncData";
 import { useRefresh } from "../../hooks/useRefresh";
+import type { ApiId, DateTimeString, MaintainerMember, ServiceOverviewResponse } from "../../types/api";
 
-export function ServiceOverviewView({ client, serviceId, onBack }) {
+export function ServiceOverviewView({
+  client,
+  serviceId,
+  onBack
+}: {
+  client: ApiClient;
+  serviceId: ApiId;
+  onBack: () => void;
+}) {
   const [data, actions] = useAsyncData(
-    () => client.get(`/services/${encodeURIComponent(serviceId)}/overview`),
+    () =>
+      client.get<ServiceOverviewResponse>(
+        `/services/${encodeURIComponent(serviceId)}/overview`
+      ),
     [client, serviceId]
   );
 
@@ -163,7 +177,7 @@ export function ServiceOverviewView({ client, serviceId, onBack }) {
   );
 }
 
-function ContextRow({ label, children }) {
+function ContextRow({ label, children }: { label: string; children: ReactNode }) {
   return (
     <Group justify="space-between" align="center" wrap="nowrap" className="contextRow">
       <Text size="sm" c="dimmed">
@@ -174,7 +188,15 @@ function ContextRow({ label, children }) {
   );
 }
 
-function PersonBlock({ label, name, email }) {
+function PersonBlock({
+  label,
+  name,
+  email
+}: {
+  label: string;
+  name?: string | null;
+  email?: string | null;
+}) {
   return (
     <Box className="personBlock">
       <Text size="xs" c="dimmed" fw={700} tt="uppercase">
@@ -190,7 +212,7 @@ function PersonBlock({ label, name, email }) {
   );
 }
 
-function MemberList({ members }) {
+function MemberList({ members }: { members?: MaintainerMember[] }) {
   if (!members || members.length === 0) {
     return <EmptyText>No members</EmptyText>;
   }
@@ -214,7 +236,7 @@ function MemberList({ members }) {
   );
 }
 
-function RepoCell({ value }) {
+function RepoCell({ value }: { value?: unknown }) {
   if (!value) {
     return null;
   }
@@ -222,7 +244,7 @@ function RepoCell({ value }) {
   return (
     <Button
       component="a"
-      href={value}
+      href={String(value)}
       target="_blank"
       rel="noreferrer"
       size="compact-sm"
@@ -233,7 +255,7 @@ function RepoCell({ value }) {
   );
 }
 
-function formatDate(value) {
+function formatDate(value?: DateTimeString | null): string {
   if (!value) {
     return "-";
   }
@@ -241,6 +263,6 @@ function formatDate(value) {
   return new Date(value).toLocaleString();
 }
 
-function hasAnyLink(links) {
+function hasAnyLink(links?: ServiceOverviewResponse["links"] | null): boolean {
   return Boolean(links?.repository_url || links?.dashboard_url || links?.runbook_url);
 }

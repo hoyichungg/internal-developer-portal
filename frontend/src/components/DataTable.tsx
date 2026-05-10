@@ -4,11 +4,11 @@ import type { ReactNode } from "react";
 import { EmptyText } from "./EmptyText";
 import { formatValue } from "../utils/format";
 
-type DataRow = Record<string, any>;
-type CellRenderer = (props: { value: any; row: DataRow }) => ReactNode;
-type DataColumn = [key: string, label: string, renderer?: CellRenderer];
+type DataRow = object;
+type CellRenderer<Row extends DataRow> = (props: { value: unknown; row: Row }) => ReactNode;
+export type DataColumn<Row extends DataRow> = [key: Extract<keyof Row, string> | string, label: string, renderer?: CellRenderer<Row>];
 
-export function DataTable({ rows, columns }: { rows?: DataRow[]; columns: DataColumn[] }) {
+export function DataTable<Row extends DataRow>({ rows, columns }: { rows?: Row[]; columns: DataColumn<Row>[] }) {
   if (!rows || rows.length === 0) {
     return <EmptyText>No records</EmptyText>;
   }
@@ -24,15 +24,24 @@ export function DataTable({ rows, columns }: { rows?: DataRow[]; columns: DataCo
           </Table.Tr>
         </Table.Thead>
         <Table.Tbody>
-          {rows.map((row, index) => (
-            <Table.Tr key={row.id || `${row.source || "row"}-${index}`}>
-              {columns.map(([key, label, Renderer]) => (
-                <Table.Td key={`${key}-${label}`}>
-                  {Renderer ? <Renderer value={row[key]} row={row} /> : formatValue(row[key])}
-                </Table.Td>
-              ))}
-            </Table.Tr>
-          ))}
+          {rows.map((row, index) => {
+            const rowData = row as Record<string, unknown>;
+            const rowKey = rowData.id || `${rowData.source || "row"}-${index}`;
+
+            return (
+              <Table.Tr key={String(rowKey)}>
+                {columns.map(([key, label, Renderer]) => (
+                  <Table.Td key={`${key}-${label}`}>
+                    {Renderer ? (
+                      <Renderer value={rowData[key]} row={row} />
+                    ) : (
+                      formatValue(rowData[key])
+                    )}
+                  </Table.Td>
+                ))}
+              </Table.Tr>
+            );
+          })}
         </Table.Tbody>
       </Table>
     </ScrollArea>

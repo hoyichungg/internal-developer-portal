@@ -11,11 +11,23 @@ import {
 } from "@mantine/core";
 import { useDisclosure } from "@mantine/hooks";
 import { IconLogout, IconRefresh } from "@tabler/icons-react";
+import type { ReactNode } from "react";
 
 import { ThemeToggle } from "../components/ThemeToggle";
 import { NAV_ITEMS } from "../navigation";
+import type { MeResponse } from "../types/api";
 
-export function PortalShell({ user, view, onLogout, children }) {
+export function PortalShell({
+  user,
+  view,
+  onLogout,
+  children
+}: {
+  user: MeResponse;
+  view: string;
+  onLogout: () => void | Promise<void>;
+  children: ReactNode;
+}) {
   const [opened, { toggle }] = useDisclosure(false);
 
   return (
