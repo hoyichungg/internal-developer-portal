@@ -569,6 +569,14 @@ body {
   padding: 8px 10px;
 }
 
+.catalogSourceCell {
+  display: block;
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .quickLinks :where(.mantine-Button-root) {
   min-width: 0;
 }
