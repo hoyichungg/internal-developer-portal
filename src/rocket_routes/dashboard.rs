@@ -10,10 +10,11 @@ use crate::repositories::{
 };
 use crate::rocket_routes::DbConn;
 use chrono::{Duration, Utc};
+use utoipa::ToSchema;
 
 pub const HEALTH_HISTORY_WINDOW_HOURS: i64 = 24;
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct DashboardSummary {
     pub total_services: i64,
     pub healthy_services: i64,
@@ -24,13 +25,13 @@ pub struct DashboardSummary {
     pub unread_notifications: i64,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, ToSchema)]
 pub struct DashboardScope {
     pub maintainer_id: Option<i32>,
     pub source: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct DashboardResponse {
     pub scope: DashboardScope,
     pub summary: DashboardSummary,
@@ -41,14 +42,14 @@ pub struct DashboardResponse {
     pub recent_packages: Vec<Package>,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, ToSchema)]
 pub struct ServiceHealthHistory {
     pub summary: ServiceHealthHistorySummary,
     pub recent_checks: Vec<ServiceHealthCheck>,
     pub recent_incidents: Vec<ServiceHealthCheck>,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, ToSchema)]
 pub struct ServiceHealthHistorySummary {
     pub window_hours: i64,
     pub checks: usize,

@@ -1,8 +1,9 @@
 use rocket::serde::Serialize;
+use utoipa::ToSchema;
 
 use crate::api::ApiError;
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, ToSchema)]
 pub struct FieldViolation {
     pub field: &'static str,
     pub message: String,

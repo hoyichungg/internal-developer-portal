@@ -3,6 +3,7 @@ use chrono::NaiveDateTime;
 use diesel::prelude::*;
 use rocket::serde::Serialize;
 use serde::Deserialize;
+use utoipa::ToSchema;
 
 use crate::validation::{
     email, max_len, max_optional_len, one_of, optional_url, positive, required, FieldViolation,
@@ -56,7 +57,7 @@ fn parse_duration_seconds(value: &str) -> Option<i64> {
         .map(|seconds| seconds * multiplier)
 }
 
-#[derive(Queryable, Serialize, Deserialize)]
+#[derive(Queryable, Serialize, Deserialize, ToSchema)]
 pub struct Connector {
     #[serde(skip_deserializing)]
     pub id: i32,
@@ -72,7 +73,7 @@ pub struct Connector {
     pub updated_at: NaiveDateTime,
 }
 
-#[derive(Insertable, Deserialize)]
+#[derive(Insertable, Deserialize, ToSchema)]
 #[diesel(table_name=connectors)]
 pub struct NewConnector {
     pub source: String,
@@ -104,7 +105,7 @@ impl Validate for NewConnector {
     }
 }
 
-#[derive(AsChangeset, Deserialize)]
+#[derive(AsChangeset, Deserialize, ToSchema)]
 #[diesel(table_name=connectors)]
 pub struct ConnectorUpdate {
     pub kind: String,
@@ -133,7 +134,7 @@ impl Validate for ConnectorUpdate {
     }
 }
 
-#[derive(Queryable, Serialize, Deserialize)]
+#[derive(Queryable, Serialize, Deserialize, ToSchema)]
 pub struct ConnectorConfig {
     #[serde(skip_deserializing)]
     pub id: i32,
@@ -168,7 +169,7 @@ pub struct NewConnectorConfig {
     pub last_scheduled_run_id: Option<i32>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct ConnectorConfigUpdate {
     pub target: String,
     #[serde(default = "default_connector_enabled")]
@@ -232,7 +233,7 @@ impl Validate for ConnectorConfigUpdate {
     }
 }
 
-#[derive(Queryable, Serialize, Deserialize)]
+#[derive(Queryable, Serialize, Deserialize, ToSchema)]
 pub struct ConnectorRun {
     #[serde(skip_deserializing)]
     pub id: i32,
@@ -282,7 +283,7 @@ pub struct ConnectorRunStateUpdate {
     pub finished_at: Option<NaiveDateTime>,
 }
 
-#[derive(Queryable, Serialize, Deserialize)]
+#[derive(Queryable, Serialize, Deserialize, ToSchema)]
 pub struct ConnectorRunItem {
     #[serde(skip_deserializing)]
     pub id: i32,
@@ -309,7 +310,7 @@ pub struct NewConnectorRunItem {
     pub snapshot: Option<String>,
 }
 
-#[derive(Queryable, Serialize, Deserialize)]
+#[derive(Queryable, Serialize, Deserialize, ToSchema)]
 pub struct ConnectorRunItemError {
     #[serde(skip_deserializing)]
     pub id: i32,
@@ -334,7 +335,7 @@ pub struct NewConnectorRunItemError {
     pub raw_item: Option<String>,
 }
 
-#[derive(Queryable, Serialize, Deserialize, Clone)]
+#[derive(Queryable, Serialize, Deserialize, Clone, ToSchema)]
 pub struct ConnectorWorker {
     #[serde(skip_deserializing)]
     pub id: i32,
@@ -362,7 +363,7 @@ pub struct ConnectorWorkerHeartbeat {
     pub started_at: NaiveDateTime,
 }
 
-#[derive(Queryable, Serialize, Deserialize, Clone)]
+#[derive(Queryable, Serialize, Deserialize, Clone, ToSchema)]
 pub struct MaintenanceRun {
     #[serde(skip_deserializing)]
     pub id: i32,
@@ -397,7 +398,7 @@ pub struct NewMaintenanceRun {
     pub error_message: Option<String>,
 }
 
-#[derive(Queryable, Serialize, Deserialize)]
+#[derive(Queryable, Serialize, Deserialize, ToSchema)]
 pub struct AuditLog {
     #[serde(skip_deserializing)]
     pub id: i32,
@@ -420,7 +421,7 @@ pub struct NewAuditLog {
     pub metadata: Option<String>,
 }
 
-#[derive(Queryable, Serialize, Deserialize)]
+#[derive(Queryable, Serialize, Deserialize, ToSchema)]
 pub struct Maintainer {
     #[serde(skip_deserializing)]
     pub id: i32,
@@ -430,7 +431,7 @@ pub struct Maintainer {
     pub created_at: NaiveDateTime,
 }
 
-#[derive(AsChangeset, Insertable, Deserialize)]
+#[derive(AsChangeset, Insertable, Deserialize, ToSchema)]
 #[diesel(table_name=maintainers)]
 pub struct NewMaintainer {
     pub display_name: String,
@@ -451,7 +452,7 @@ impl Validate for NewMaintainer {
     }
 }
 
-#[derive(Queryable, Serialize, Deserialize)]
+#[derive(Queryable, Serialize, Deserialize, ToSchema)]
 pub struct MaintainerMember {
     #[serde(skip_deserializing)]
     pub id: i32,
@@ -462,7 +463,7 @@ pub struct MaintainerMember {
     pub created_at: NaiveDateTime,
 }
 
-#[derive(AsChangeset, Insertable, Deserialize)]
+#[derive(AsChangeset, Insertable, Deserialize, ToSchema)]
 #[diesel(table_name=maintainer_members)]
 pub struct NewMaintainerMember {
     pub maintainer_id: i32,
@@ -489,7 +490,7 @@ impl Validate for NewMaintainerMember {
     }
 }
 
-#[derive(Queryable, Serialize, Deserialize)]
+#[derive(Queryable, Serialize, Deserialize, ToSchema)]
 pub struct Package {
     #[serde(skip_deserializing)]
     pub id: i32,
@@ -507,7 +508,7 @@ pub struct Package {
     pub updated_at: NaiveDateTime,
 }
 
-#[derive(AsChangeset, Insertable, Deserialize)]
+#[derive(AsChangeset, Insertable, Deserialize, ToSchema)]
 #[diesel(table_name=packages)]
 #[diesel(treat_none_as_null = true)]
 pub struct NewPackage {
@@ -554,7 +555,7 @@ impl Validate for NewPackage {
     }
 }
 
-#[derive(Queryable, Serialize, Deserialize)]
+#[derive(Queryable, Serialize, Deserialize, ToSchema)]
 pub struct Service {
     #[serde(skip_deserializing)]
     pub id: i32,
@@ -576,7 +577,7 @@ pub struct Service {
     pub external_id: Option<String>,
 }
 
-#[derive(Clone, Queryable, Serialize, Deserialize)]
+#[derive(Clone, Queryable, Serialize, Deserialize, ToSchema)]
 pub struct ServiceHealthCheck {
     #[serde(skip_deserializing)]
     pub id: i32,
@@ -610,7 +611,7 @@ pub struct NewServiceHealthCheck {
     pub raw_payload: Option<String>,
 }
 
-#[derive(AsChangeset, Insertable, Deserialize)]
+#[derive(AsChangeset, Insertable, Deserialize, ToSchema)]
 #[diesel(table_name=services)]
 #[diesel(treat_none_as_null = true)]
 pub struct NewService {
@@ -668,7 +669,7 @@ impl Validate for NewService {
     }
 }
 
-#[derive(Queryable, Serialize, Deserialize)]
+#[derive(Queryable, Serialize, Deserialize, ToSchema)]
 pub struct WorkCard {
     #[serde(skip_deserializing)]
     pub id: i32,
@@ -686,7 +687,7 @@ pub struct WorkCard {
     pub updated_at: NaiveDateTime,
 }
 
-#[derive(AsChangeset, Insertable, Deserialize)]
+#[derive(AsChangeset, Insertable, Deserialize, ToSchema)]
 #[diesel(table_name=work_cards)]
 #[diesel(treat_none_as_null = true)]
 pub struct NewWorkCard {
@@ -733,7 +734,7 @@ impl Validate for NewWorkCard {
     }
 }
 
-#[derive(Queryable, Serialize, Deserialize)]
+#[derive(Queryable, Serialize, Deserialize, ToSchema)]
 pub struct Notification {
     #[serde(skip_deserializing)]
     pub id: i32,
@@ -750,7 +751,7 @@ pub struct Notification {
     pub external_id: Option<String>,
 }
 
-#[derive(AsChangeset, Insertable, Deserialize)]
+#[derive(AsChangeset, Insertable, Deserialize, ToSchema)]
 #[diesel(table_name=notifications)]
 #[diesel(treat_none_as_null = true)]
 pub struct NewNotification {

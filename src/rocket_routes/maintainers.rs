@@ -10,8 +10,9 @@ use rocket::serde::json::Json;
 use rocket::serde::Deserialize;
 use rocket_db_pools::Connection;
 use serde_json::json;
+use utoipa::ToSchema;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct MaintainerMemberRequest {
     pub user_id: i32,
     pub role: String,

@@ -25,11 +25,12 @@ use rocket::serde::Serialize;
 use rocket::State;
 use rocket_db_pools::Connection;
 use std::collections::{BTreeSet, HashMap};
+use utoipa::ToSchema;
 use uuid::Uuid;
 
 const SERVICE_HEALTH_STALE_AFTER_HOURS: i64 = 2;
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, ToSchema)]
 pub struct Credentials {
     username: String,
     password: String,
@@ -46,21 +47,21 @@ impl Validate for Credentials {
     }
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct LoginResponse {
     pub token: String,
     pub token_type: &'static str,
     pub expires_at: NaiveDateTime,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct MeResponse {
     pub id: i32,
     pub username: String,
     pub roles: Vec<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct MeOverviewResponse {
     pub user: MeResponse,
     pub maintainers: Vec<MeMaintainerOverview>,
@@ -74,13 +75,13 @@ pub struct MeOverviewResponse {
     pub summary: MeOverviewSummary,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct MeMaintainerOverview {
     pub maintainer: Maintainer,
     pub role: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct MeOverviewSummary {
     pub maintainers: usize,
     pub services: usize,
@@ -91,7 +92,7 @@ pub struct MeOverviewSummary {
     pub failed_connector_runs: usize,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct MeOperationsStatus {
     pub worker_status: String,
     pub active_workers: usize,

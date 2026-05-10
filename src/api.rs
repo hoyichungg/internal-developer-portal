@@ -5,20 +5,21 @@ use rocket::response::status::Custom;
 use rocket::response::{self, Responder};
 use rocket::serde::json::Json;
 use rocket::serde::Serialize;
+use utoipa::ToSchema;
 
 use crate::validation::FieldViolation;
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct ApiResponse<T> {
     pub data: T,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct ApiErrorResponse {
     pub error: ApiErrorBody,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct ApiErrorBody {
     pub code: &'static str,
     pub message: &'static str,

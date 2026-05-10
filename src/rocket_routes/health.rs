@@ -1,8 +1,9 @@
 use rocket::serde::Serialize;
+use utoipa::ToSchema;
 
 use crate::api::{ok, ApiResult};
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct HealthResponse {
     pub status: &'static str,
     pub service: &'static str,

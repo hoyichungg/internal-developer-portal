@@ -16,8 +16,9 @@ use rocket::serde::json::Json;
 use rocket::serde::Serialize;
 use rocket_db_pools::Connection;
 use serde_json::json;
+use utoipa::ToSchema;
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct ServiceOverview {
     pub service: Service,
     pub owner: ServiceOwner,
@@ -30,21 +31,21 @@ pub struct ServiceOverview {
     pub links: ServiceLinks,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct ServiceOwner {
     pub id: i32,
     pub display_name: String,
     pub email: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct ServiceHealthOverview {
     pub status: String,
     pub lifecycle_status: String,
     pub last_checked_at: Option<chrono::NaiveDateTime>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct ServiceLinks {
     pub repository_url: Option<String>,
     pub dashboard_url: Option<String>,

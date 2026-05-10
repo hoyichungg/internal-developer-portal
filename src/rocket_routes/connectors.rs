@@ -5,6 +5,7 @@ use rocket::serde::{Deserialize, Serialize};
 use rocket_db_pools::Connection;
 use serde_json::{json, Value};
 use std::time::{Duration as StdDuration, Instant};
+use utoipa::ToSchema;
 
 use crate::api::{created, ok, ApiError, ApiResult, CreatedApiResult};
 use crate::auth::{require_admin, AuthenticatedUser};
@@ -41,7 +42,7 @@ const DEFAULT_RETENTION_CLEANUP_INTERVAL_SECONDS: u64 = 60 * 60;
 const DEFAULT_WORKER_HEARTBEAT_INTERVAL_SECONDS: u64 = 15;
 pub(crate) const DEFAULT_WORKER_STALE_AFTER_SECONDS: i64 = 45;
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct ConnectorRunExecutionResponse {
     pub source: String,
     pub target: String,
@@ -54,7 +55,7 @@ pub struct ConnectorRunExecutionResponse {
     pub item_errors: Vec<ConnectorRunItemError>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct ConnectorRunDetail {
     pub run: ConnectorRun,
     pub items: Vec<ConnectorRunItem>,
@@ -62,14 +63,14 @@ pub struct ConnectorRunDetail {
     pub health_checks: Vec<ServiceHealthCheck>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct ConnectorOperationsResponse {
     pub stale_after_seconds: i64,
     pub workers: Vec<ConnectorWorkerStatus>,
     pub maintenance_runs: Vec<MaintenanceRun>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct ConnectorWorkerStatus {
     pub id: i32,
     pub worker_id: String,
@@ -85,7 +86,7 @@ pub struct ConnectorWorkerStatus {
     pub is_stale: bool,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct ConnectorConfigResponse {
     pub id: i32,
     pub source: String,
@@ -101,14 +102,14 @@ pub struct ConnectorConfigResponse {
     pub last_scheduled_run_id: Option<i32>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct ConnectorImportError {
     pub external_id: Option<String>,
     pub message: String,
     pub raw_item: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct ManualConnectorRunRequest {
     #[serde(default = "default_run_mode")]
     pub mode: String,
@@ -138,54 +139,81 @@ impl Validate for ManualConnectorRunRequest {
     }
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize, Serialize, ToSchema)]
 pub struct WorkCardImportRequest {
+    /// Work card records to import. Items are upserted by `(source, external_id)`.
     pub items: Vec<WorkCardImportItem>,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize, Serialize, ToSchema)]
 pub struct WorkCardImportItem {
+    /// Stable id from the external work tracking system.
     pub external_id: String,
+    /// Work item title displayed on the dashboard.
     pub title: String,
+    /// Supported values: `todo`, `in_progress`, `blocked`, `done`.
     pub status: String,
+    /// Supported values: `low`, `medium`, `high`, `urgent`.
     pub priority: String,
+    /// Optional assignee display name or email.
     pub assignee: Option<String>,
+    /// Optional due date/time in local NaiveDateTime JSON format.
     pub due_at: Option<NaiveDateTime>,
+    /// Optional absolute URL back to the source system.
     pub url: Option<String>,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize, Serialize, ToSchema)]
 pub struct NotificationImportRequest {
+    /// Notification records to import. Items are upserted by `(source, external_id)`.
     pub items: Vec<NotificationImportItem>,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize, Serialize, ToSchema)]
 pub struct NotificationImportItem {
+    /// Stable id from the external notification source.
     pub external_id: String,
+    /// Notification title displayed in the portal.
     pub title: String,
+    /// Optional notification body.
     pub body: Option<String>,
+    /// Supported values: `info`, `warning`, `critical`.
     pub severity: String,
+    /// Initial read state.
     pub is_read: bool,
+    /// Optional absolute URL back to the source system.
     pub url: Option<String>,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize, Serialize, ToSchema)]
 pub struct ServiceHealthImportRequest {
+    /// Service health records to import. Each item upserts a service and appends a health check.
     pub items: Vec<ServiceHealthImportItem>,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize, Serialize, ToSchema)]
 pub struct ServiceHealthImportItem {
+    /// Stable id from the external monitoring source.
     pub external_id: String,
+    /// Existing maintainer/team id that owns the imported service.
     pub maintainer_id: i32,
+    /// Stable portal service slug.
     pub slug: String,
+    /// Human-friendly service name.
     pub name: String,
+    /// Supported values: `active`, `deprecated`, `archived`.
     pub lifecycle_status: String,
+    /// Supported values: `healthy`, `degraded`, `down`, `unknown`.
     pub health_status: String,
+    /// Optional service description.
     pub description: Option<String>,
+    /// Optional absolute repository URL.
     pub repository_url: Option<String>,
+    /// Optional absolute dashboard URL.
     pub dashboard_url: Option<String>,
+    /// Optional absolute runbook URL.
     pub runbook_url: Option<String>,
+    /// Optional source check time. RFC3339 strings and `%Y-%m-%d %H:%M:%S` are accepted.
     pub last_checked_at: Option<String>,
 }
 

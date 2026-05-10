@@ -1,11 +1,15 @@
+use rocket::figment::Figment;
 use rocket::fs::FileServer;
 use rocket::{Build, Rocket};
 use rocket_db_pools::Database;
+use std::env;
 
 use crate::{api, config::AppConfig, rocket_routes};
 
+const DEFAULT_LOCAL_DATABASE_URL: &str = "postgres://postgres:postgres@localhost:5432/app_db";
+
 pub fn build(app_config: AppConfig) -> Rocket<Build> {
-    rocket::build()
+    rocket::custom(figment_with_database_url_fallback())
         .manage(app_config)
         .register(
             "/",
@@ -25,6 +29,7 @@ pub fn build(app_config: AppConfig) -> Rocket<Build> {
                 rocket_routes::authorization::me,
                 rocket_routes::authorization::me_overview,
                 rocket_routes::authorization::logout,
+                crate::openapi::openapi_json,
                 rocket_routes::audit_logs::get_audit_logs,
                 rocket_routes::connectors::get_connectors,
                 rocket_routes::connectors::get_connector_operations,
@@ -76,4 +81,22 @@ pub fn build(app_config: AppConfig) -> Rocket<Build> {
         )
         .mount("/", FileServer::from("frontend/dist"))
         .attach(rocket_routes::DbConn::init())
+}
+
+fn figment_with_database_url_fallback() -> Figment {
+    let figment = rocket::Config::figment();
+
+    if env::var("ROCKET_DATABASES").is_ok() {
+        return figment;
+    }
+
+    match env::var("DATABASE_URL") {
+        Ok(database_url) => figment.merge(("databases.postgres.url", database_url)),
+        Err(_)
+            if env::var("APP_ENV").unwrap_or_else(|_| "development".to_owned()) != "production" =>
+        {
+            figment.merge(("databases.postgres.url", DEFAULT_LOCAL_DATABASE_URL))
+        }
+        Err(_) => figment,
+    }
 }

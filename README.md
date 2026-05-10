@@ -142,6 +142,17 @@ real Rocket server, and the integration tests against PostgreSQL 16.
 
 ## API Shape
 
+The generated OpenAPI 3.1 document is available from the running backend:
+
+```text
+GET /openapi.json
+```
+
+The spec is generated with `utoipa` from the Rust API/request/response types.
+Connector registry, config, run history, manual run, retry, and direct import
+endpoints are tagged under `Connectors`, including the three import payloads:
+`service-health`, `work-cards`, and `notifications`.
+
 Successful JSON responses use a consistent wrapper:
 
 ```json
@@ -213,6 +224,7 @@ Authorization: Bearer <token>
 ## API
 
 - `GET /`
+- `GET /openapi.json`
 - `GET /health`
 - `GET /dashboard`
 - `GET /dashboard?maintainer_id=<id>`
