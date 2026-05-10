@@ -109,6 +109,157 @@ fn test_dashboard_can_scope_catalog_and_service_health_by_maintainer() {
 }
 
 #[test]
+fn test_dashboard_priority_items_put_today_first() {
+    let client = Client::new();
+    let auth = common::create_admin_auth(&client);
+    let maintainer = common::create_test_maintainer(&client);
+    let source = common::unique_name("priority");
+    let checked_at = (Utc::now().naive_utc() - Duration::minutes(5))
+        .format("%Y-%m-%dT%H:%M:%S")
+        .to_string();
+
+    let response = client
+        .post(format!(
+            "{}/connectors/{}/service-health/import",
+            common::APP_HOST,
+            source.as_str()
+        ))
+        .bearer_auth(&auth.token)
+        .json(&json!({
+            "items": [{
+                "external_id": "priority-api",
+                "maintainer_id": maintainer["id"],
+                "slug": common::unique_name("priority-api"),
+                "name": "Priority API",
+                "lifecycle_status": "active",
+                "health_status": "down",
+                "description": "Priority dashboard service",
+                "repository_url": null,
+                "dashboard_url": "https://grafana.acme.test/d/priority",
+                "runbook_url": null,
+                "last_checked_at": format!("{checked_at}Z")
+            }]
+        }))
+        .send()
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let service: Value = response.json::<Value>().unwrap()["data"]["data"][0].clone();
+
+    let response = client
+        .post(format!("{}/work-cards", common::APP_HOST))
+        .bearer_auth(&auth.token)
+        .json(&json!({
+            "source": source.as_str(),
+            "external_id": common::unique_name("blocked"),
+            "title": "Unblock production rollout",
+            "status": "blocked",
+            "priority": "urgent",
+            "assignee": "platform-team",
+            "due_at": null,
+            "url": "https://dev.azure.test/work-items/priority-blocked"
+        }))
+        .send()
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let work_card: Value = response.json::<Value>().unwrap()["data"].clone();
+
+    let response = client
+        .post(format!("{}/notifications", common::APP_HOST))
+        .bearer_auth(&auth.token)
+        .json(&json!({
+            "source": source.as_str(),
+            "external_id": common::unique_name("critical"),
+            "title": "Critical deployment approval",
+            "body": "Approval is blocking today's release.",
+            "severity": "critical",
+            "is_read": false,
+            "url": "https://erp.acme.test/messages/priority"
+        }))
+        .send()
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let notification: Value = response.json::<Value>().unwrap()["data"].clone();
+
+    let response = client
+        .post(format!(
+            "{}/connectors/{}/work-cards/import",
+            common::APP_HOST,
+            source.as_str()
+        ))
+        .bearer_auth(&auth.token)
+        .json(&json!({
+            "items": [{
+                "external_id": "bad-priority-work",
+                "title": "Invalid priority work",
+                "status": "todo",
+                "priority": "not-a-priority",
+                "assignee": null,
+                "due_at": null,
+                "url": null
+            }]
+        }))
+        .send()
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let failed_run: Value = response.json::<Value>().unwrap()["data"]["run"].clone();
+    assert_eq!(failed_run["status"], "failed");
+
+    let response = client
+        .get(format!(
+            "{}/dashboard?source={}",
+            common::APP_HOST,
+            source.as_str()
+        ))
+        .bearer_auth(&auth.token)
+        .send()
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let dashboard: Value = response.json::<Value>().unwrap()["data"].clone();
+    let priorities = dashboard["priority_items"].as_array().unwrap();
+    let service_index = priority_index(priorities, "service", service["id"].as_i64().unwrap());
+    let work_index = priority_index(priorities, "work_card", work_card["id"].as_i64().unwrap());
+    let notification_index = priority_index(
+        priorities,
+        "notification",
+        notification["id"].as_i64().unwrap(),
+    );
+    let run_index = priority_index(
+        priorities,
+        "connector_run",
+        failed_run["id"].as_i64().unwrap(),
+    );
+
+    assert!(
+        service_index < work_index
+            && work_index < notification_index
+            && notification_index < run_index,
+        "priority order should be service, work, notification, connector run; got {priorities:?}"
+    );
+    assert_eq!(priorities[service_index]["severity"], "down");
+    assert_eq!(priorities[work_index]["severity"], "blocked");
+    assert_eq!(priorities[notification_index]["severity"], "critical");
+    assert_eq!(priorities[run_index]["severity"], "failed");
+
+    let response = client
+        .delete(format!(
+            "{}/connectors/{}",
+            common::APP_HOST,
+            source.as_str()
+        ))
+        .bearer_auth(&auth.token)
+        .send()
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+    common::delete_test_notification(&client, notification);
+    common::delete_test_work_card(&client, work_card);
+    common::delete_test_service(&client, service);
+    common::delete_test_maintainer(&client, maintainer);
+    common::delete_test_user(auth.user_id);
+}
+
+#[test]
 fn test_me_overview_returns_user_owned_operational_context() {
     let client = Client::new();
     let admin = common::create_admin_auth(&client);
@@ -205,7 +356,7 @@ fn test_me_overview_returns_user_owned_operational_context() {
             "external_id": common::unique_name("message"),
             "title": "ERP approval waiting on owned service",
             "body": "Deployment access needs review.",
-            "severity": "warning",
+            "severity": "critical",
             "is_read": false,
             "url": "https://erp.acme.test/messages/me-overview"
         }))
@@ -286,6 +437,15 @@ fn test_me_overview_returns_user_owned_operational_context() {
     assert!(overview["operations"]["latest_health_check_at"]
         .as_str()
         .is_some());
+    let priority_items = overview["priority_items"].as_array().unwrap();
+    assert_eq!(priority_items[0]["kind"], "service");
+    assert_eq!(priority_items[0]["severity"], "down");
+    assert_eq!(priority_items[1]["kind"], "work_card");
+    assert_eq!(priority_items[1]["severity"], "urgent");
+    assert_eq!(priority_items[2]["kind"], "notification");
+    assert_eq!(priority_items[2]["severity"], "critical");
+    assert_eq!(priority_items[3]["kind"], "connector_run");
+    assert_eq!(priority_items[3]["severity"], "failed");
 
     let response = client
         .delete(format!(
@@ -327,4 +487,13 @@ fn assert_not_contains_id(items: &Value, id: i64) {
             .any(|item| item["id"].as_i64() == Some(id)),
         "expected dashboard collection to exclude id {id}, got {items:?}"
     );
+}
+
+fn priority_index(items: &[Value], kind: &str, id: i64) -> usize {
+    items
+        .iter()
+        .position(|item| {
+            item["kind"].as_str() == Some(kind) && item["record_id"].as_i64() == Some(id)
+        })
+        .unwrap_or_else(|| panic!("expected priority item kind={kind} id={id}, got {items:?}"))
 }

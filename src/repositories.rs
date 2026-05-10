@@ -310,6 +310,26 @@ impl ConnectorRunRepository {
             .await
     }
 
+    pub async fn find_failed_scoped(
+        c: &mut AsyncPgConnection,
+        limit: i64,
+        source: Option<&str>,
+    ) -> QueryResult<Vec<ConnectorRun>> {
+        let mut query = connector_runs::table
+            .filter(connector_runs::status.eq_any(["failed", "partial_success"]))
+            .into_boxed();
+
+        if let Some(source) = source {
+            query = query.filter(connector_runs::source.eq(source));
+        }
+
+        query
+            .order(connector_runs::started_at.desc())
+            .limit(limit)
+            .get_results(c)
+            .await
+    }
+
     pub async fn create(
         c: &mut AsyncPgConnection,
         new_run: NewConnectorRun,

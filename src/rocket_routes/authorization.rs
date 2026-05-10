@@ -11,7 +11,9 @@ use crate::{
     },
     rocket_routes::connectors::connector_worker_stale_after_seconds,
     rocket_routes::dashboard::{
-        build_service_health_history, ServiceHealthHistory, HEALTH_HISTORY_WINDOW_HOURS,
+        build_dashboard_priority_items, build_service_health_history, summarize_workers,
+        DashboardPriorityContext, DashboardPriorityItem, ServiceHealthHistory,
+        HEALTH_HISTORY_WINDOW_HOURS, SERVICE_HEALTH_STALE_AFTER_HOURS,
     },
     rocket_routes::DbConn,
     validation::{required, FieldViolation, Validate},
@@ -27,8 +29,6 @@ use rocket_db_pools::Connection;
 use std::collections::{BTreeSet, HashMap};
 use utoipa::ToSchema;
 use uuid::Uuid;
-
-const SERVICE_HEALTH_STALE_AFTER_HOURS: i64 = 2;
 
 #[derive(serde::Deserialize, ToSchema)]
 pub struct Credentials {
@@ -70,6 +70,7 @@ pub struct MeOverviewResponse {
     pub open_work_cards: Vec<WorkCard>,
     pub unread_notifications: Vec<Notification>,
     pub failed_connector_runs: Vec<ConnectorRun>,
+    pub priority_items: Vec<DashboardPriorityItem>,
     pub health_history: ServiceHealthHistory,
     pub operations: MeOperationsStatus,
     pub summary: MeOverviewSummary,
@@ -212,22 +213,26 @@ pub async fn me_overview(
             .unwrap_or(true);
     let worker_stale_after_seconds = connector_worker_stale_after_seconds();
     let workers = ConnectorWorkerRepository::find_recent(&mut db, 20).await?;
-    let latest_worker_seen_at = workers.iter().map(|worker| worker.last_seen_at).max();
-    let active_workers = workers
-        .iter()
-        .filter(|worker| (now - worker.last_seen_at).num_seconds() <= worker_stale_after_seconds)
-        .count();
-    let stale_workers = workers.len().saturating_sub(active_workers);
-    let worker_status = if active_workers > 0 {
-        "healthy"
-    } else if workers.is_empty() {
-        "missing"
-    } else {
-        "stale"
-    }
-    .to_owned();
+    let (worker_status, active_workers, stale_workers, latest_worker_seen_at) =
+        summarize_workers(&workers, now, worker_stale_after_seconds);
     let latest_retention_cleanup =
         MaintenanceRunRepository::find_latest_success(&mut db, "retention_cleanup").await?;
+    let priority_items = build_dashboard_priority_items(
+        &services,
+        &open_work_cards,
+        &unread_notifications,
+        &failed_connector_runs,
+        DashboardPriorityContext {
+            worker_status: Some(worker_status.clone()),
+            active_workers,
+            stale_workers,
+            latest_worker_seen_at,
+            worker_stale_after_seconds,
+            health_data_stale,
+            latest_health_check_at,
+            health_stale_after_hours: SERVICE_HEALTH_STALE_AFTER_HOURS,
+        },
+    );
     let unhealthy_services = services
         .iter()
         .filter(|service| service.health_status != "healthy")
@@ -262,6 +267,7 @@ pub async fn me_overview(
         open_work_cards,
         unread_notifications,
         failed_connector_runs,
+        priority_items,
         health_history,
         operations: MeOperationsStatus {
             worker_status,
