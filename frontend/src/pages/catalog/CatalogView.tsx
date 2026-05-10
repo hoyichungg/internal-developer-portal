@@ -4,6 +4,7 @@ import { IconPencil, IconPlus } from "@tabler/icons-react";
 import { useMemo, useState } from "react";
 import type { FormEvent } from "react";
 
+import type { ApiClient } from "../../api/client";
 import { DataPanel } from "../../components/DataPanel";
 import { DataTable } from "../../components/DataTable";
 import { CatalogSkeleton } from "../../components/LoadingState";
@@ -11,25 +12,62 @@ import { LinkCell, StatusBadge } from "../../components/tableCells";
 import { ViewFrame } from "../../components/ViewFrame";
 import { useAsyncData } from "../../hooks/useAsyncData";
 import { useRefresh } from "../../hooks/useRefresh";
+import type {
+  ApiId,
+  CatalogResponse,
+  Maintainer,
+  NewMaintainerPayload,
+  NewPackagePayload,
+  NewServicePayload,
+  Package,
+  Service
+} from "../../types/api";
 import { showError } from "../../utils/notifications";
 
 const lifecycleOptions = ["active", "deprecated", "archived"];
 const healthOptions = ["healthy", "degraded", "down", "unknown"];
 
 type CatalogDialog =
-  | { type: "maintainer"; record?: any }
-  | { type: "service"; record?: any }
-  | { type: "package"; record?: any }
+  | { type: "maintainer"; record?: Maintainer }
+  | { type: "service"; record?: Service }
+  | { type: "package"; record?: Package }
   | null;
 
-export function CatalogView({ client }) {
+type SelectOption = {
+  value: string;
+  label: string;
+};
+
+type ServiceFormState = Omit<
+  NewServicePayload,
+  "maintainer_id" | "external_id" | "description" | "repository_url" | "dashboard_url" | "runbook_url" | "last_checked_at"
+> & {
+  maintainer_id: string;
+  external_id: string;
+  description: string;
+  repository_url: string;
+  dashboard_url: string;
+  runbook_url: string;
+};
+
+type PackageFormState = Omit<
+  NewPackagePayload,
+  "maintainer_id" | "description" | "repository_url" | "documentation_url"
+> & {
+  maintainer_id: string;
+  description: string;
+  repository_url: string;
+  documentation_url: string;
+};
+
+export function CatalogView({ client }: { client: ApiClient }) {
   const [dialog, setDialog] = useState<CatalogDialog>(null);
   const [saving, setSaving] = useState(false);
-  const [data, actions] = useAsyncData(async () => {
+  const [data, actions] = useAsyncData<CatalogResponse>(async () => {
     const [maintainers, services, packages] = await Promise.all([
-      client.get("/maintainers"),
-      client.get("/services"),
-      client.get("/packages")
+      client.get<Maintainer[]>("/maintainers"),
+      client.get<Service[]>("/services"),
+      client.get<Package[]>("/packages")
     ]);
     return { maintainers, services, packages };
   }, [client]);
@@ -46,7 +84,7 @@ export function CatalogView({ client }) {
     [catalog?.maintainers]
   );
   const maintainerById = useMemo(() => {
-    const lookup = new Map();
+    const lookup = new Map<ApiId, Maintainer>();
     (catalog?.maintainers || []).forEach((maintainer) => lookup.set(maintainer.id, maintainer));
     return lookup;
   }, [catalog?.maintainers]);
@@ -54,7 +92,7 @@ export function CatalogView({ client }) {
   const canManageOwnedRecords = maintainerOptions.length > 0;
   const dialogTitle = getDialogTitle(dialog);
 
-  async function saveMaintainer(payload) {
+  async function saveMaintainer(payload: NewMaintainerPayload) {
     if (!dialog || dialog.type !== "maintainer") {
       return;
     }
@@ -62,8 +100,8 @@ export function CatalogView({ client }) {
     setSaving(true);
     try {
       const maintainer = dialog.record
-        ? await client.put(`/maintainers/${encodeURIComponent(dialog.record.id)}`, payload)
-        : await client.post("/maintainers", payload);
+        ? await client.put<Maintainer>(`/maintainers/${encodeURIComponent(dialog.record.id)}`, payload)
+        : await client.post<Maintainer>("/maintainers", payload);
       await actions.reload();
       setDialog(null);
       notifications.show({
@@ -78,7 +116,7 @@ export function CatalogView({ client }) {
     }
   }
 
-  async function saveService(payload) {
+  async function saveService(payload: NewServicePayload) {
     if (!dialog || dialog.type !== "service") {
       return;
     }
@@ -86,8 +124,8 @@ export function CatalogView({ client }) {
     setSaving(true);
     try {
       const service = dialog.record
-        ? await client.put(`/services/${encodeURIComponent(dialog.record.id)}`, payload)
-        : await client.post("/services", payload);
+        ? await client.put<Service>(`/services/${encodeURIComponent(dialog.record.id)}`, payload)
+        : await client.post<Service>("/services", payload);
       await actions.reload();
       setDialog(null);
       notifications.show({
@@ -102,7 +140,7 @@ export function CatalogView({ client }) {
     }
   }
 
-  async function savePackage(payload) {
+  async function savePackage(payload: NewPackagePayload) {
     if (!dialog || dialog.type !== "package") {
       return;
     }
@@ -110,8 +148,8 @@ export function CatalogView({ client }) {
     setSaving(true);
     try {
       const packageRecord = dialog.record
-        ? await client.put(`/packages/${encodeURIComponent(dialog.record.id)}`, payload)
-        : await client.post("/packages", payload);
+        ? await client.put<Package>(`/packages/${encodeURIComponent(dialog.record.id)}`, payload)
+        : await client.post<Package>("/packages", payload);
       await actions.reload();
       setDialog(null);
       notifications.show({
@@ -126,26 +164,26 @@ export function CatalogView({ client }) {
     }
   }
 
-  const MaintainerActionCell = ({ row }) => (
+  const MaintainerActionCell = ({ row }: { row: Maintainer }) => (
     <EditAction
       label={`Edit maintainer ${row.display_name}`}
       onClick={() => setDialog({ type: "maintainer", record: row })}
     />
   );
-  const ServiceActionCell = ({ row }) => (
+  const ServiceActionCell = ({ row }: { row: Service }) => (
     <EditAction
       label={`Edit service ${row.name}`}
       onClick={() => setDialog({ type: "service", record: row })}
     />
   );
-  const PackageActionCell = ({ row }) => (
+  const PackageActionCell = ({ row }: { row: Package }) => (
     <EditAction
       label={`Edit package ${row.name}`}
       onClick={() => setDialog({ type: "package", record: row })}
     />
   );
-  const MaintainerCell = ({ value }) => {
-    const maintainer = maintainerById.get(value);
+  const MaintainerCell = ({ value }: { value?: unknown }) => {
+    const maintainer = maintainerById.get(Number(value));
     return <Text size="sm">{maintainer?.display_name || "-"}</Text>;
   };
 
@@ -267,6 +305,16 @@ function CatalogManagementModal({
   onSaveMaintainer,
   onSaveService,
   onSavePackage
+}: {
+  dialog: CatalogDialog;
+  title: string;
+  onClose: () => void;
+  maintainerOptions: SelectOption[];
+  defaultMaintainerId: string;
+  saving: boolean;
+  onSaveMaintainer: (payload: NewMaintainerPayload) => void | Promise<void>;
+  onSaveService: (payload: NewServicePayload) => void | Promise<void>;
+  onSavePackage: (payload: NewPackagePayload) => void | Promise<void>;
 }) {
   const opened = Boolean(dialog);
   const formKey = dialog ? `${dialog.type}-${dialog.record?.id || "new"}` : "closed";
@@ -308,13 +356,23 @@ function CatalogManagementModal({
   );
 }
 
-function MaintainerForm({ initialValue, submitting, onCancel, onSubmit }) {
-  const [form, setForm] = useState({
+function MaintainerForm({
+  initialValue,
+  submitting,
+  onCancel,
+  onSubmit
+}: {
+  initialValue?: Maintainer;
+  submitting: boolean;
+  onCancel: () => void;
+  onSubmit: (payload: NewMaintainerPayload) => void | Promise<void>;
+}) {
+  const [form, setForm] = useState<NewMaintainerPayload>({
     display_name: initialValue?.display_name || "",
     email: initialValue?.email || ""
   });
 
-  function update(field, value) {
+  function update(field: keyof NewMaintainerPayload, value: string) {
     setForm((current) => ({ ...current, [field]: value }));
   }
 
@@ -358,9 +416,18 @@ function ServiceForm({
   submitting,
   onCancel,
   onSubmit
+}: {
+  initialValue?: Service;
+  maintainerOptions: SelectOption[];
+  defaultMaintainerId: string;
+  submitting: boolean;
+  onCancel: () => void;
+  onSubmit: (payload: NewServicePayload) => void | Promise<void>;
 }) {
-  const [form, setForm] = useState({
-    maintainer_id: initialValue?.maintainer_id ? String(initialValue.maintainer_id) : defaultMaintainerId,
+  const [form, setForm] = useState<ServiceFormState>({
+    maintainer_id: initialValue?.maintainer_id
+      ? String(initialValue.maintainer_id)
+      : defaultMaintainerId,
     slug: initialValue?.slug || "",
     name: initialValue?.name || "",
     lifecycle_status: initialValue?.lifecycle_status || "active",
@@ -373,7 +440,7 @@ function ServiceForm({
     runbook_url: initialValue?.runbook_url || ""
   });
 
-  function update(field, value) {
+  function update(field: keyof ServiceFormState, value: string) {
     setForm((current) => ({ ...current, [field]: value }));
   }
 
@@ -505,9 +572,18 @@ function PackageForm({
   submitting,
   onCancel,
   onSubmit
+}: {
+  initialValue?: Package;
+  maintainerOptions: SelectOption[];
+  defaultMaintainerId: string;
+  submitting: boolean;
+  onCancel: () => void;
+  onSubmit: (payload: NewPackagePayload) => void | Promise<void>;
 }) {
-  const [form, setForm] = useState({
-    maintainer_id: initialValue?.maintainer_id ? String(initialValue.maintainer_id) : defaultMaintainerId,
+  const [form, setForm] = useState<PackageFormState>({
+    maintainer_id: initialValue?.maintainer_id
+      ? String(initialValue.maintainer_id)
+      : defaultMaintainerId,
     slug: initialValue?.slug || "",
     name: initialValue?.name || "",
     version: initialValue?.version || "",
@@ -517,7 +593,7 @@ function PackageForm({
     documentation_url: initialValue?.documentation_url || ""
   });
 
-  function update(field, value) {
+  function update(field: keyof PackageFormState, value: string) {
     setForm((current) => ({ ...current, [field]: value }));
   }
 
@@ -615,7 +691,15 @@ function PackageForm({
   );
 }
 
-function FormActions({ submitting, onCancel, submitLabel }) {
+function FormActions({
+  submitting,
+  onCancel,
+  submitLabel
+}: {
+  submitting: boolean;
+  onCancel: () => void;
+  submitLabel: string;
+}) {
   return (
     <Group justify="flex-end" mt="sm">
       <Button type="button" variant="default" onClick={onCancel}>
@@ -628,7 +712,7 @@ function FormActions({ submitting, onCancel, submitLabel }) {
   );
 }
 
-function EditAction({ label, onClick }) {
+function EditAction({ label, onClick }: { label: string; onClick: () => void }) {
   return (
     <Button
       variant="subtle"
@@ -643,7 +727,7 @@ function EditAction({ label, onClick }) {
   );
 }
 
-function SourceCell({ value }) {
+function SourceCell({ value }: { value?: unknown }) {
   if (!value) {
     return null;
   }
@@ -655,7 +739,7 @@ function SourceCell({ value }) {
   );
 }
 
-function getDialogTitle(dialog: CatalogDialog) {
+function getDialogTitle(dialog: CatalogDialog): string {
   if (!dialog) {
     return "";
   }
@@ -670,7 +754,7 @@ function getDialogTitle(dialog: CatalogDialog) {
   return `${action} package`;
 }
 
-function optionalText(value) {
+function optionalText(value: unknown): string | null {
   const trimmed = String(value || "").trim();
   return trimmed.length > 0 ? trimmed : null;
 }
