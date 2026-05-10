@@ -6,6 +6,16 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { FormEvent } from "react";
 
 import type { ApiClient } from "../../api/client";
+import type {
+  Connector,
+  ConnectorConfigForm,
+  ConnectorConfigResponse,
+  ConnectorOperationsResponse,
+  ConnectorRun,
+  ConnectorRunDetail,
+  ConnectorRunExecutionResponse,
+  NewConnectorPayload
+} from "../../types/api";
 import { ViewFrame } from "../../components/ViewFrame";
 import { ConnectorsSkeleton } from "../../components/LoadingState";
 import { useRefresh } from "../../hooks/useRefresh";
@@ -36,12 +46,12 @@ export function ConnectorsView({
   client: ApiClient;
   onOpenService: (serviceId: string | number) => void;
 }) {
-  const [connectors, setConnectors] = useState<any[]>([]);
-  const [operations, setOperations] = useState(null);
+  const [connectors, setConnectors] = useState<Connector[]>([]);
+  const [operations, setOperations] = useState<ConnectorOperationsResponse | null>(null);
   const [selectedSource, setSelectedSource] = useState("");
-  const [config, setConfig] = useState(defaultConnectorConfig);
-  const [runs, setRuns] = useState<any[]>([]);
-  const [runDetail, setRunDetail] = useState(null);
+  const [config, setConfig] = useState<ConnectorConfigForm>(defaultConnectorConfig);
+  const [runs, setRuns] = useState<ConnectorRun[]>([]);
+  const [runDetail, setRunDetail] = useState<ConnectorRunDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -76,8 +86,10 @@ export function ConnectorsView({
           setRunDetail(null);
         }
         const [configResponse, runResponse] = await Promise.all([
-          client.get(`/connectors/${encodeURIComponent(source)}/config`).catch(() => null),
-          client.get(`/connectors/runs?source=${encodeURIComponent(source)}`)
+          client
+            .get<ConnectorConfigResponse>(`/connectors/${encodeURIComponent(source)}/config`)
+            .catch(() => null),
+          client.get<ConnectorRun[]>(`/connectors/runs?source=${encodeURIComponent(source)}`)
         ]);
         if (requestSeq !== detailsRequestSeqRef.current) {
           return;
@@ -95,7 +107,7 @@ export function ConnectorsView({
 
   const loadOperations = useCallback(async () => {
     try {
-      const nextOperations = await client.get("/connectors/operations");
+      const nextOperations = await client.get<ConnectorOperationsResponse>("/connectors/operations");
       setOperations(nextOperations);
     } catch (error) {
       showError(error);
@@ -107,7 +119,9 @@ export function ConnectorsView({
       const requestSeq = ++runDetailRequestSeqRef.current;
       setRunDetailLoading(true);
       try {
-        const detail = await client.get(`/connectors/runs/${encodeURIComponent(runId)}`);
+        const detail = await client.get<ConnectorRunDetail>(
+          `/connectors/runs/${encodeURIComponent(runId)}`
+        );
         const expectedSource = options.source || selectedSourceRef.current;
         if (requestSeq !== runDetailRequestSeqRef.current) {
           return;
@@ -134,8 +148,8 @@ export function ConnectorsView({
     setLoading(true);
     try {
       const [nextConnectors, nextOperations] = await Promise.all([
-        client.get("/connectors"),
-        client.get("/connectors/operations")
+        client.get<Connector[]>("/connectors"),
+        client.get<ConnectorOperationsResponse>("/connectors/operations")
       ]);
       if (requestSeq !== reloadRequestSeqRef.current) {
         return;
@@ -206,12 +220,13 @@ export function ConnectorsView({
     const form = new FormData(event.currentTarget);
     setCreating(true);
     try {
-      const connector = await client.post("/connectors", {
-        source: form.get("source"),
-        kind: form.get("kind"),
-        display_name: form.get("display_name"),
-        status: form.get("status")
-      });
+      const payload: NewConnectorPayload = {
+        source: String(form.get("source") || ""),
+        kind: String(form.get("kind") || ""),
+        display_name: String(form.get("display_name") || ""),
+        status: String(form.get("status") || "active")
+      };
+      const connector = await client.post<Connector>("/connectors", payload);
       event.currentTarget.reset();
       createModal.close();
       await reload(connector.source);
@@ -232,7 +247,7 @@ export function ConnectorsView({
     try {
       JSON.parse(config.config);
       JSON.parse(config.sample_payload);
-      await client.put(`/connectors/${encodeURIComponent(selected.source)}/config`, {
+      await client.put<ConnectorConfigResponse>(`/connectors/${encodeURIComponent(selected.source)}/config`, {
         target: config.target,
         enabled: config.enabled,
         schedule_cron: config.schedule_cron || null,
@@ -256,9 +271,10 @@ export function ConnectorsView({
     const runSource = selected.source;
     setRunLoading(true);
     try {
-      const response = await client.post(`/connectors/${encodeURIComponent(runSource)}/runs`, {
-        mode
-      });
+      const response = await client.post<ConnectorRunExecutionResponse>(
+        `/connectors/${encodeURIComponent(runSource)}/runs`,
+        { mode }
+      );
       notifications.show({
         title: `Run ${response.run.status}`,
         message: `${response.source} / ${response.target}`,
@@ -275,14 +291,17 @@ export function ConnectorsView({
     }
   }
 
-  async function retryRun(run: any) {
+  async function retryRun(run: ConnectorRun) {
     if (!run) {
       return;
     }
     const runSource = run.source;
     setRetryingRunId(run.id);
     try {
-      const response = await client.post(`/connectors/runs/${encodeURIComponent(run.id)}/retry`, {});
+      const response = await client.post<ConnectorRunExecutionResponse>(
+        `/connectors/runs/${encodeURIComponent(run.id)}/retry`,
+        {}
+      );
       notifications.show({
         title: "Retry queued",
         message: `${response.source} / ${response.target}`,
@@ -340,8 +359,8 @@ export function ConnectorsView({
       <Stack gap="md">
         <ConnectorOperationsPanel operations={operations} />
 
-        <Grid>
-          <Grid.Col span={{ base: 12, md: 4 }}>
+        <Grid align="stretch" className="connectorWorkspaceGrid">
+          <Grid.Col span={{ base: 12, md: 4 }} className="connectorRegistryCol">
             <ConnectorRegistry
               connectors={connectors}
               selectedSource={selectedSource}
@@ -349,8 +368,8 @@ export function ConnectorsView({
             />
           </Grid.Col>
 
-          <Grid.Col span={{ base: 12, md: 8 }}>
-            <Stack gap="md">
+          <Grid.Col span={{ base: 12, md: 8 }} className="connectorWorkspaceMain">
+            <Stack gap="md" className="connectorWorkspaceStack">
               <ConnectorConfigEditor
                 selected={selected}
                 config={config}

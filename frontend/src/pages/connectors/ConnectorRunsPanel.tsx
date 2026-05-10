@@ -18,6 +18,11 @@ import { DataTable } from "../../components/DataTable";
 import { EmptyText } from "../../components/EmptyText";
 import { DateCell, StatusBadge } from "../../components/tableCells";
 import { prettyJson } from "../../utils/format";
+import type { ApiId, ConnectorRun, ConnectorRunDetail } from "../../types/api";
+
+type RunDetailOptions = {
+  source?: string;
+};
 
 export function ConnectorRunsPanel({
   runs,
@@ -27,6 +32,14 @@ export function ConnectorRunsPanel({
   onRetryRun,
   retryingRunId,
   onOpenService
+}: {
+  runs: ConnectorRun[];
+  runDetail: ConnectorRunDetail | null;
+  runDetailLoading: boolean;
+  onSelectRun: (runId: string | number, options?: RunDetailOptions) => void | Promise<void>;
+  onRetryRun: (run: ConnectorRun) => void | Promise<void>;
+  retryingRunId: ApiId | string | null;
+  onOpenService: (serviceId: string | number) => void;
 }) {
   return (
     <Stack gap="md">
@@ -61,17 +74,21 @@ export function ConnectorRunsPanel({
             [
               "id",
               "Details",
-              ({ value }) => (
-                <Button
-                  size="compact-sm"
-                  variant={runDetail?.run?.id === value ? "light" : "subtle"}
-                  rightSection={<IconArrowRight size={14} />}
-                  loading={runDetailLoading && runDetail?.run?.id === value}
-                  onClick={() => onSelectRun(value)}
-                >
-                  Details
-                </Button>
-              )
+              ({ value }) => {
+                const runId = Number(value);
+
+                return (
+                  <Button
+                    size="compact-sm"
+                    variant={runDetail?.run?.id === runId ? "light" : "subtle"}
+                    rightSection={<IconArrowRight size={14} />}
+                    loading={runDetailLoading && runDetail?.run?.id === runId}
+                    onClick={() => onSelectRun(runId)}
+                  >
+                    Details
+                  </Button>
+                );
+              }
             ]
           ]}
         />
@@ -90,7 +107,19 @@ export function ConnectorRunsPanel({
   );
 }
 
-function RunDetail({ detail, loading, onRetryRun, retryingRunId, onOpenService }) {
+function RunDetail({
+  detail,
+  loading,
+  onRetryRun,
+  retryingRunId,
+  onOpenService
+}: {
+  detail: ConnectorRunDetail | null;
+  loading: boolean;
+  onRetryRun: (run: ConnectorRun) => void | Promise<void>;
+  retryingRunId: ApiId | string | null;
+  onOpenService: (serviceId: string | number) => void;
+}) {
   if (loading && !detail) {
     return (
       <Box className="runDetailLoader">
@@ -136,10 +165,14 @@ function RunDetail({ detail, loading, onRetryRun, retryingRunId, onOpenService }
       </Group>
 
       <SimpleGrid cols={{ base: 2, sm: 4 }} className="runDetailMetrics">
-        <RunMetric label="Imported" value={run.success_count} />
-        <RunMetric label="Failed" value={run.failure_count} tone={run.failure_count > 0 ? "failed" : ""} />
-        <RunMetric label="Run items" value={runItems.length} />
-        <RunMetric label="Duration" value={`${run.duration_ms} ms`} />
+        <RunMetric label="Imported" value={run.success_count} tone="imported" />
+        <RunMetric
+          label="Failed"
+          value={run.failure_count}
+          tone={run.failure_count > 0 ? "failed" : "clean"}
+        />
+        <RunMetric label="Run items" value={runItems.length} tone="items" />
+        <RunMetric label="Duration" value={`${run.duration_ms} ms`} tone="duration" />
       </SimpleGrid>
 
       {run.error_message && (
@@ -159,19 +192,22 @@ function RunDetail({ detail, loading, onRetryRun, retryingRunId, onOpenService }
             [
               "record_id",
               "Record",
-              ({ value, row }) =>
-                value && row.target === "service_health" && onOpenService ? (
+              ({ value, row }) => {
+                const recordId = value ? Number(value) : null;
+
+                return recordId && row.target === "service_health" && onOpenService ? (
                   <Button
                     size="compact-sm"
                     variant="subtle"
                     rightSection={<IconArrowRight size={14} />}
-                    onClick={() => onOpenService(value)}
+                    onClick={() => onOpenService(recordId)}
                   >
-                    #{value}
+                    #{recordId}
                   </Button>
                 ) : (
-                  value ? `#${value}` : ""
-                )
+                  recordId ? `#${recordId}` : ""
+                );
+              }
             ],
             ["target", "Target"],
             ["external_id", "External ID"],
@@ -190,19 +226,22 @@ function RunDetail({ detail, loading, onRetryRun, retryingRunId, onOpenService }
             [
               "service_id",
               "Service",
-              ({ value }) =>
-                onOpenService ? (
+              ({ value }) => {
+                const serviceId = Number(value);
+
+                return onOpenService ? (
                   <Button
                     size="compact-sm"
                     variant="subtle"
                     rightSection={<IconArrowRight size={14} />}
-                    onClick={() => onOpenService(value)}
+                    onClick={() => onOpenService(serviceId)}
                   >
-                    #{value}
+                    #{serviceId}
                   </Button>
                 ) : (
-                  value
-                )
+                  String(value)
+                );
+              }
             ],
             ["external_id", "External ID"],
             ["health_status", "Health", StatusBadge],
@@ -228,8 +267,8 @@ function RunDetail({ detail, loading, onRetryRun, retryingRunId, onOpenService }
   );
 }
 
-function canRetry(run?: { status?: string }) {
-  return ["failed", "partial_success"].includes(run?.status);
+function canRetry(run?: Pick<ConnectorRun, "status"> | null) {
+  return Boolean(run?.status && ["failed", "partial_success"].includes(run.status));
 }
 
 function RunMetric({

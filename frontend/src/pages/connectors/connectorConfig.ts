@@ -1,6 +1,16 @@
 import { prettyJson } from "../../utils/format";
+import type { ConnectorConfigForm, ConnectorConfigResponse, JsonValue } from "../../types/api";
 
-export const defaultConnectorConfig = {
+type ConnectorTemplate = {
+  id: string;
+  label: string;
+  target: string;
+  schedule_cron: string;
+  config: JsonValue;
+  sample_payload: JsonValue;
+};
+
+export const defaultConnectorConfig: ConnectorConfigForm = {
   target: "work_cards",
   enabled: true,
   schedule_cron: "",
@@ -8,7 +18,7 @@ export const defaultConnectorConfig = {
   sample_payload: JSON.stringify({ items: [] }, null, 2)
 };
 
-export const connectorTemplates = [
+export const connectorTemplates: ConnectorTemplate[] = [
   {
     id: "monitoring_service_health",
     label: "Monitoring service health",
@@ -158,7 +168,9 @@ export const connectorTemplates = [
   }
 ];
 
-export function connectorConfigFromResponse(response) {
+export function connectorConfigFromResponse(
+  response: ConnectorConfigResponse | null
+): ConnectorConfigForm {
   if (!response) {
     return defaultConnectorConfig;
   }
@@ -172,7 +184,7 @@ export function connectorConfigFromResponse(response) {
   };
 }
 
-export function connectorConfigFromTemplate(templateId) {
+export function connectorConfigFromTemplate(templateId: string): ConnectorConfigForm | null {
   const template = connectorTemplates.find((item) => item.id === templateId);
 
   if (!template) {

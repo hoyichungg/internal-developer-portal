@@ -319,7 +319,7 @@ body {
 }
 
 .operationMetric.is-health {
-  border-left-color: var(--mantine-color-teal-6);
+  border-left-color: var(--mantine-color-lime-6);
 }
 
 .operationMetric.is-runs {
@@ -334,6 +334,19 @@ body {
 .operationMetricValue {
   font-size: 24px;
   line-height: 1.1;
+}
+
+.operationMetric.is-health .operationMetricValue {
+  color: var(--mantine-color-lime-3);
+}
+
+.operationMetric.is-runs .operationMetricValue {
+  color: var(--mantine-color-blue-3);
+}
+
+.operationMetric.is-audit .operationMetricValue,
+.operationMetric.is-threshold .operationMetricValue {
+  color: var(--mantine-color-orange-3);
 }
 
 .healthTimeline {
@@ -581,9 +594,116 @@ body {
   min-width: 0;
 }
 
+.connectorWorkspaceGrid {
+  min-width: 0;
+}
+
+.connectorWorkspaceGrid :where(.mantine-Grid-inner) {
+  align-items: stretch;
+}
+
+.connectorRegistryCol,
+.connectorWorkspaceMain {
+  display: flex;
+  min-width: 0;
+}
+
+.connectorWorkspaceStack {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.connectorRegistryPanel {
+  contain: size layout;
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.connectorRegistryScroll {
+  flex: 1 1 auto;
+  max-height: 100%;
+  min-height: 0;
+}
+
+.connectorRegistryList {
+  min-width: 0;
+  padding-right: 6px;
+}
+
+.connectorRegistryItem {
+  min-height: 44px;
+  border-radius: var(--mantine-radius-sm);
+}
+
+.connectorRegistryItem :where(.mantine-NavLink-body) {
+  min-width: 0;
+}
+
+.connectorRegistryItem :where(.mantine-NavLink-section) {
+  flex: 0 0 auto;
+}
+
+.connectorRegistryTitle,
+.connectorRegistryMeta {
+  display: block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.auditLogPanel {
+  min-width: 0;
+  overflow: hidden;
+}
+
+.auditLogTableFrame {
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: visible;
+}
+
+.auditLogTableFrame :where(table) {
+  min-width: 960px;
+  table-layout: fixed;
+}
+
+.auditLogTableFrame :where(th:nth-child(1), td:nth-child(1)) {
+  width: 180px;
+}
+
+.auditLogTableFrame :where(th:nth-child(2), td:nth-child(2)) {
+  width: 68px;
+}
+
+.auditLogTableFrame :where(th:nth-child(3), td:nth-child(3)) {
+  width: 120px;
+}
+
+.auditLogTableFrame :where(th:nth-child(4), td:nth-child(4)) {
+  width: 140px;
+}
+
+.auditLogTableFrame :where(th:nth-child(5), td:nth-child(5)) {
+  width: 210px;
+}
+
+.auditCompactCell {
+  display: block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .metadataSummaryCell {
-  min-width: 260px;
-  max-width: 420px;
+  min-width: 220px;
+  max-width: 320px;
 }
 
 .metadataSummary {
@@ -658,16 +778,58 @@ body {
 .runDetailMetric {
   min-width: 0;
   border-left: 3px solid var(--mantine-color-default-border);
-  padding-left: 12px;
+  border-radius: var(--mantine-radius-sm);
+  padding: 6px 0 6px 12px;
+}
+
+.runDetailMetric.is-imported {
+  border-left-color: var(--mantine-color-green-6);
+  background: color-mix(in srgb, var(--mantine-color-green-8) 12%, transparent);
+}
+
+.runDetailMetric.is-clean {
+  border-left-color: var(--mantine-color-teal-6);
+  background: color-mix(in srgb, var(--mantine-color-teal-8) 10%, transparent);
 }
 
 .runDetailMetric.is-failed {
   border-left-color: var(--mantine-color-red-6);
+  background: color-mix(in srgb, var(--mantine-color-red-8) 12%, transparent);
+}
+
+.runDetailMetric.is-items {
+  border-left-color: var(--mantine-color-blue-5);
+  background: color-mix(in srgb, var(--mantine-color-blue-8) 10%, transparent);
+}
+
+.runDetailMetric.is-duration {
+  border-left-color: var(--mantine-color-yellow-5);
+  background: color-mix(in srgb, var(--mantine-color-yellow-8) 10%, transparent);
 }
 
 .runDetailMetricValue {
   font-size: 24px;
   line-height: 1.1;
+}
+
+.runDetailMetric.is-imported .runDetailMetricValue {
+  color: var(--mantine-color-green-3);
+}
+
+.runDetailMetric.is-clean .runDetailMetricValue {
+  color: var(--mantine-color-teal-3);
+}
+
+.runDetailMetric.is-failed .runDetailMetricValue {
+  color: var(--mantine-color-red-3);
+}
+
+.runDetailMetric.is-items .runDetailMetricValue {
+  color: var(--mantine-color-blue-3);
+}
+
+.runDetailMetric.is-duration .runDetailMetricValue {
+  color: var(--mantine-color-yellow-3);
 }
 
 .runDetailError {
@@ -769,6 +931,7 @@ body {
     min-width: 220px;
     max-width: 72vw;
   }
+
 }
 
 @media (max-width: 30em) {

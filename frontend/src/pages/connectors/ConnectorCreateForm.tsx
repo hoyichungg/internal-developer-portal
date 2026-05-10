@@ -1,7 +1,16 @@
 import { Button, Group, Select, Stack, TextInput } from "@mantine/core";
 import { IconPlugConnected } from "@tabler/icons-react";
+import type { FormEvent } from "react";
 
-export function ConnectorCreateForm({ onCreate, onCancel, submitting }) {
+export function ConnectorCreateForm({
+  onCreate,
+  onCancel,
+  submitting
+}: {
+  onCreate: (event: FormEvent<HTMLFormElement>) => void | Promise<void>;
+  onCancel: () => void;
+  submitting: boolean;
+}) {
   return (
     <form onSubmit={onCreate}>
       <Stack>

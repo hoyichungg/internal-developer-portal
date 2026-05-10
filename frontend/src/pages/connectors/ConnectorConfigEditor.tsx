@@ -13,7 +13,9 @@ import {
   Title
 } from "@mantine/core";
 import { IconBolt, IconPlayerPlay, IconTemplate } from "@tabler/icons-react";
+import type { Dispatch, FormEvent, SetStateAction } from "react";
 
+import type { Connector, ConnectorConfigForm } from "../../types/api";
 import { connectorTemplates } from "./connectorConfig";
 
 const templateOptions = connectorTemplates.map((template) => ({
@@ -30,8 +32,17 @@ export function ConnectorConfigEditor({
   onApplyTemplate,
   runLoading,
   saving
+}: {
+  selected?: Connector;
+  config: ConnectorConfigForm;
+  onConfigChange: Dispatch<SetStateAction<ConnectorConfigForm>>;
+  onRun: (mode: string) => void | Promise<void>;
+  onSave: (event: FormEvent<HTMLFormElement>) => void | Promise<void>;
+  onApplyTemplate: (templateId: string) => void;
+  runLoading: boolean;
+  saving: boolean;
 }) {
-  function updateConfig(field, value) {
+  function updateConfig<K extends keyof ConnectorConfigForm>(field: K, value: ConnectorConfigForm[K]) {
     onConfigChange((current) => ({ ...current, [field]: value }));
   }
 
@@ -87,7 +98,7 @@ export function ConnectorConfigEditor({
               <Select
                 label="Target"
                 value={config.target}
-                onChange={(target) => updateConfig("target", target)}
+                onChange={(target) => updateConfig("target", target || "")}
                 data={["work_cards", "notifications", "service_health"]}
               />
             </Grid.Col>

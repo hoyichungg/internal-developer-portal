@@ -4,8 +4,13 @@ import { DataPanel } from "../../components/DataPanel";
 import { DataTable } from "../../components/DataTable";
 import { EmptyText } from "../../components/EmptyText";
 import { DateCell, StatusBadge } from "../../components/tableCells";
+import type { ConnectorOperationsResponse } from "../../types/api";
 
-export function ConnectorOperationsPanel({ operations }) {
+export function ConnectorOperationsPanel({
+  operations
+}: {
+  operations?: ConnectorOperationsResponse | null;
+}) {
   const workers = operations?.workers || [];
   const maintenanceRuns = operations?.maintenance_runs || [];
   const activeWorkers = workers.filter((worker) => !worker.is_stale).length;
@@ -73,7 +78,17 @@ export function ConnectorOperationsPanel({ operations }) {
   );
 }
 
-function OperationMetric({ label, value, tone, badge = false }) {
+function OperationMetric({
+  label,
+  value,
+  tone,
+  badge = false
+}: {
+  label: string;
+  value: string | number | boolean | null | undefined;
+  tone?: string;
+  badge?: boolean;
+}) {
   return (
     <Box className={`operationMetric${tone ? ` is-${tone}` : ""}`}>
       <Text size="xs" c="dimmed" fw={700} tt="uppercase">
@@ -90,18 +105,18 @@ function OperationMetric({ label, value, tone, badge = false }) {
   );
 }
 
-function BooleanCell({ value }) {
+function BooleanCell({ value }: { value?: unknown }) {
   return <StatusBadge value={value ? "active" : "paused"} />;
 }
 
-function RunIdCell({ value }) {
+function RunIdCell({ value }: { value?: unknown }) {
   if (!value) {
     return <Text c="dimmed">None</Text>;
   }
 
   return (
     <Group gap={4} wrap="nowrap">
-      <Text size="sm">#{value}</Text>
+      <Text size="sm">#{String(value)}</Text>
     </Group>
   );
 }

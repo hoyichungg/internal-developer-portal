@@ -12,17 +12,24 @@ import {
 } from "@mantine/core";
 import { IconEye } from "@tabler/icons-react";
 import { useState } from "react";
+import type { ReactNode } from "react";
 
-export function AuditMetadataCell({ value }) {
+type ParsedMetadata = {
+  parsed: unknown;
+  pretty: string;
+};
+
+export function AuditMetadataCell({ value }: { value?: unknown }) {
   const [opened, setOpened] = useState(false);
 
   if (!value) {
     return <Text c="dimmed">No metadata</Text>;
   }
 
-  const metadata = parseMetadata(value);
-  const entries = metadataEntries(metadata.parsed);
-  const previewEntries = entries.slice(0, 3);
+  const previewMetadata = metadataEntries(parseMetadataValue(value));
+  const previewEntries = previewMetadata.slice(0, 3);
+  const metadata = opened ? parseMetadata(value) : null;
+  const entries = metadata ? metadataEntries(metadata.parsed) : [];
 
   return (
     <>
@@ -38,9 +45,9 @@ export function AuditMetadataCell({ value }) {
               </Text>
             </Box>
           ))}
-          {entries.length > previewEntries.length && (
+          {previewMetadata.length > previewEntries.length && (
             <Badge variant="light" color="gray" size="xs" w="fit-content">
-              +{entries.length - previewEntries.length} fields
+              +{previewMetadata.length - previewEntries.length} fields
             </Badge>
           )}
         </Stack>
@@ -57,56 +64,70 @@ export function AuditMetadataCell({ value }) {
         </Tooltip>
       </Group>
 
-      <Modal
-        opened={opened}
-        onClose={() => setOpened(false)}
-        title="Audit metadata"
-        size="xl"
-        centered
-      >
-        <Stack gap="md">
-          <Box className="metadataDetailTable">
-            <Table verticalSpacing="sm" striped>
-              <Table.Thead>
-                <Table.Tr>
-                  <Table.Th>Field</Table.Th>
-                  <Table.Th>Value</Table.Th>
-                </Table.Tr>
-              </Table.Thead>
-              <Table.Tbody>
-                {entries.map(([key, entryValue]) => (
-                  <Table.Tr key={key}>
-                    <Table.Td>
-                      <Code>{key}</Code>
-                    </Table.Td>
-                    <Table.Td className="metadataDetailValue">
-                      {detailValue(entryValue)}
-                    </Table.Td>
+      {opened && metadata && (
+        <Modal
+          opened={opened}
+          onClose={() => setOpened(false)}
+          title="Audit metadata"
+          size="xl"
+          centered
+        >
+          <Stack gap="md">
+            <Box className="metadataDetailTable">
+              <Table verticalSpacing="sm" striped>
+                <Table.Thead>
+                  <Table.Tr>
+                    <Table.Th>Field</Table.Th>
+                    <Table.Th>Value</Table.Th>
                   </Table.Tr>
-                ))}
-              </Table.Tbody>
-            </Table>
-          </Box>
+                </Table.Thead>
+                <Table.Tbody>
+                  {entries.map(([key, entryValue]) => (
+                    <Table.Tr key={key}>
+                      <Table.Td>
+                        <Code>{key}</Code>
+                      </Table.Td>
+                      <Table.Td className="metadataDetailValue">
+                        {detailValue(entryValue)}
+                      </Table.Td>
+                    </Table.Tr>
+                  ))}
+                </Table.Tbody>
+              </Table>
+            </Box>
 
-          <Box>
-            <Text size="sm" fw={700} mb="xs">
-              Raw JSON
-            </Text>
-            <Code block className="metadataRawJson">
-              {metadata.pretty}
-            </Code>
-          </Box>
-        </Stack>
-      </Modal>
+            <Box>
+              <Text size="sm" fw={700} mb="xs">
+                Raw JSON
+              </Text>
+              <Code block className="metadataRawJson">
+                {metadata.pretty}
+              </Code>
+            </Box>
+          </Stack>
+        </Modal>
+      )}
     </>
   );
 }
 
-function parseMetadata(value) {
+function parseMetadataValue(value: unknown): unknown {
+  if (typeof value !== "string") {
+    return value;
+  }
+
+  try {
+    return JSON.parse(value);
+  } catch {
+    return { value };
+  }
+}
+
+function parseMetadata(value: unknown): ParsedMetadata {
   if (typeof value !== "string") {
     return {
       parsed: value,
-      pretty: JSON.stringify(value, null, 2)
+      pretty: JSON.stringify(value, null, 2) || String(value)
     };
   }
 
@@ -124,19 +145,19 @@ function parseMetadata(value) {
   }
 }
 
-function metadataEntries(value) {
+function metadataEntries(value: unknown): [string, unknown][] {
   if (Array.isArray(value)) {
     return value.map((entry, index) => [`[${index}]`, entry]);
   }
 
   if (value && typeof value === "object") {
-    return Object.entries(value);
+    return Object.entries(value as Record<string, unknown>);
   }
 
   return [["value", value]];
 }
 
-function compactValue(value) {
+function compactValue(value: unknown): string {
   if (value === null) {
     return "null";
   }
@@ -149,7 +170,7 @@ function compactValue(value) {
   return String(value);
 }
 
-function detailValue(value) {
+function detailValue(value: unknown): ReactNode {
   if (value && typeof value === "object") {
     return (
       <Code block className="metadataInlineJson">
