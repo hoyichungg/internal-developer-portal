@@ -2,7 +2,10 @@ use crate::{
     api::{ok, ApiError, ApiResult},
     auth::AuthenticatedUser,
     config::AppConfig,
-    models::{ConnectorRun, Maintainer, MaintenanceRun, Notification, Package, Service, WorkCard},
+    models::{
+        ConnectorRun, Maintainer, MaintenanceRun, Notification, Package, Service, User, UserRole,
+        WorkCard,
+    },
     repositories::{
         ConnectorRunRepository, ConnectorWorkerRepository, MaintainerMemberRepository,
         MaintainerRepository, MaintenanceRunRepository, NotificationRepository, PackageRepository,
@@ -59,6 +62,14 @@ pub struct MeResponse {
     pub id: i32,
     pub username: String,
     pub roles: Vec<String>,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct UserSummary {
+    pub id: i32,
+    pub username: String,
+    pub roles: Vec<String>,
+    pub created_at: NaiveDateTime,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -152,6 +163,22 @@ pub async fn me(auth: AuthenticatedUser) -> ApiResult<MeResponse> {
         username: auth.user.username,
         roles: auth.roles.into_iter().map(|role| role.code).collect(),
     })
+}
+
+#[rocket::get("/users")]
+pub async fn users(
+    mut db: Connection<DbConn>,
+    _auth: AuthenticatedUser,
+) -> ApiResult<Vec<UserSummary>> {
+    let mut users = UserRepository::find_with_roles(&mut db)
+        .await?
+        .into_iter()
+        .map(user_summary)
+        .collect::<Vec<_>>();
+
+    users.sort_by(|left, right| left.username.cmp(&right.username));
+
+    ok(users)
 }
 
 #[rocket::get("/me/overview")]
@@ -304,4 +331,13 @@ pub async fn logout(
 
 fn generate_token() -> String {
     format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple())
+}
+
+fn user_summary((user, roles): (User, Vec<(UserRole, crate::models::Role)>)) -> UserSummary {
+    UserSummary {
+        id: user.id,
+        username: user.username,
+        roles: roles.into_iter().map(|(_, role)| role.code).collect(),
+        created_at: user.created_at,
+    }
 }

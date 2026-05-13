@@ -24,6 +24,7 @@ import { ViewFrame } from "../../components/ViewFrame";
 import { useAsyncData } from "../../hooks/useAsyncData";
 import { useRefresh } from "../../hooks/useRefresh";
 import type {
+  ConnectorDrillTarget,
   DashboardPriorityItem,
   DateTimeString,
   MeOperationsStatus,
@@ -35,10 +36,12 @@ import type {
 
 export function DashboardView({
   client,
-  onOpenService
+  onOpenService,
+  onOpenConnector
 }: {
   client: ApiClient;
   onOpenService: (serviceId: string | number) => void;
+  onOpenConnector: (target: ConnectorDrillTarget) => void;
 }) {
   const [data, actions] = useAsyncData<MeOverviewResponse>(
     () => client.get<MeOverviewResponse>("/me/overview"),
@@ -72,7 +75,11 @@ export function DashboardView({
           <Grid>
             <Grid.Col span={{ base: 12, lg: 6 }}>
               <DataPanel title="Today first">
-                <AttentionQueue overview={overview} onOpenService={onOpenService} />
+                <AttentionQueue
+                  overview={overview}
+                  onOpenService={onOpenService}
+                  onOpenConnector={onOpenConnector}
+                />
               </DataPanel>
             </Grid.Col>
 
@@ -368,10 +375,12 @@ function MessageList({ notifications }: { notifications?: Notification[] }) {
 
 function AttentionQueue({
   overview,
-  onOpenService
+  onOpenService,
+  onOpenConnector
 }: {
   overview: MeOverviewResponse;
   onOpenService: (serviceId: string | number) => void;
+  onOpenConnector: (target: ConnectorDrillTarget) => void;
 }) {
   const items = overview.priority_items?.length
     ? overview.priority_items
@@ -384,7 +393,7 @@ function AttentionQueue({
   return (
     <Stack gap={0} className="attentionList">
       {items.map((item) => {
-        const serviceId = item.service_id ?? item.serviceId;
+        const action = attentionAction(item);
 
         return (
           <Group key={item.key} justify="space-between" align="center" wrap="nowrap" className="attentionRow">
@@ -400,34 +409,103 @@ function AttentionQueue({
               </Box>
             </Group>
 
-            {serviceId && (
-              <Button
-                size="compact-sm"
-                variant="subtle"
-                rightSection={<IconArrowRight size={14} />}
-                onClick={() => onOpenService(serviceId)}
-              >
-                Overview
-              </Button>
-            )}
-            {item.url && (
-              <Button
-                component="a"
-                href={item.url}
-                target="_blank"
-                rel="noreferrer"
-                size="compact-sm"
-                variant="subtle"
-                rightSection={<IconExternalLink size={14} />}
-              >
-                Open
-              </Button>
-            )}
+            <AttentionActionButton
+              action={action}
+              onOpenService={onOpenService}
+              onOpenConnector={onOpenConnector}
+            />
           </Group>
         );
       })}
     </Stack>
   );
+}
+
+type AttentionAction =
+  | { type: "service"; label: string; serviceId: string | number }
+  | { type: "connector"; label: string; target: ConnectorDrillTarget }
+  | { type: "external"; label: string; url: string };
+
+function AttentionActionButton({
+  action,
+  onOpenService,
+  onOpenConnector
+}: {
+  action: AttentionAction;
+  onOpenService: (serviceId: string | number) => void;
+  onOpenConnector: (target: ConnectorDrillTarget) => void;
+}) {
+  if (action.type === "external") {
+    return (
+      <Button
+        component="a"
+        href={action.url}
+        target="_blank"
+        rel="noreferrer"
+        size="compact-sm"
+        variant="subtle"
+        rightSection={<IconExternalLink size={14} />}
+      >
+        {action.label}
+      </Button>
+    );
+  }
+
+  return (
+    <Button
+      size="compact-sm"
+      variant="subtle"
+      rightSection={<IconArrowRight size={14} />}
+      onClick={() =>
+        action.type === "service"
+          ? onOpenService(action.serviceId)
+          : onOpenConnector(action.target)
+      }
+    >
+      {action.label}
+    </Button>
+  );
+}
+
+function attentionAction(item: DashboardPriorityItem): AttentionAction {
+  const serviceId = item.service_id ?? item.serviceId;
+
+  if (serviceId) {
+    return { type: "service", label: "Overview", serviceId };
+  }
+
+  if (item.kind === "connector_run" && item.record_id) {
+    return {
+      type: "connector",
+      label: "Run detail",
+      target: drillTarget(item, { runId: item.record_id })
+    };
+  }
+
+  if (item.url) {
+    return { type: "external", label: "Open", url: item.url };
+  }
+
+  if (item.source || item.target) {
+    return {
+      type: "connector",
+      label: item.source ? "Source" : "Operations",
+      target: drillTarget(item)
+    };
+  }
+
+  return { type: "connector", label: "Operations", target: {} };
+}
+
+function drillTarget(
+  item: DashboardPriorityItem,
+  overrides: Partial<ConnectorDrillTarget> = {}
+): ConnectorDrillTarget {
+  return {
+    source: item.source ?? undefined,
+    target: item.target ?? undefined,
+    ...overrides
+  };
 }
 
 function attentionCount(overview: MeOverviewResponse): number {
@@ -443,7 +521,7 @@ function buildAttentionItems(overview: MeOverviewResponse): DashboardPriorityIte
   if (overview.operations?.worker_status && overview.operations.worker_status !== "healthy") {
     operationItems.push({
       key: "operations-worker",
-      kind: "operations",
+      kind: "worker",
       severity: overview.operations.worker_status,
       title:
         overview.operations.worker_status === "missing"
@@ -451,18 +529,20 @@ function buildAttentionItems(overview: MeOverviewResponse): DashboardPriorityIte
           : "Connector worker heartbeat is stale",
       detail: overview.operations.latest_worker_seen_at
         ? `Last seen at ${formatCheckTime(overview.operations.latest_worker_seen_at)}`
-        : "No connector worker has checked in"
+        : "No connector worker has checked in",
+      target: "worker"
     });
   }
   if (overview.operations?.health_data_stale) {
     operationItems.push({
       key: "operations-health-data",
-      kind: "operations",
+      kind: "health_data",
       severity: "stale",
       title: "Service health data is stale",
       detail: overview.operations.latest_health_check_at
         ? `Latest health check was ${formatCheckTime(overview.operations.latest_health_check_at)}`
-        : "No service health checks are available"
+        : "No service health checks are available",
+      target: "service_health"
     });
   }
 
@@ -474,6 +554,9 @@ function buildAttentionItems(overview: MeOverviewResponse): DashboardPriorityIte
       severity: service.health_status === "down" ? "down" : "degraded",
       title: service.name,
       detail: `${service.health_status} - ${service.source}`,
+      source: service.source,
+      target: "service_health",
+      record_id: service.id,
       serviceId: service.id
     }));
 
@@ -481,10 +564,13 @@ function buildAttentionItems(overview: MeOverviewResponse): DashboardPriorityIte
     .filter((card) => card.priority === "urgent" || card.status === "blocked")
     .map((card) => ({
       key: `work-${card.id}`,
-      kind: "work",
+      kind: "work_card",
       severity: card.status === "blocked" ? "blocked" : "urgent",
       title: card.title,
       detail: [card.priority, card.assignee, card.source].filter(Boolean).join(" - "),
+      source: card.source,
+      target: "work_cards",
+      record_id: card.id,
       url: card.url
     }));
 
@@ -496,6 +582,9 @@ function buildAttentionItems(overview: MeOverviewResponse): DashboardPriorityIte
       severity: notification.severity,
       title: notification.title,
       detail: notification.source,
+      source: notification.source,
+      target: "notifications",
+      record_id: notification.id,
       url: notification.url
     }));
 
@@ -504,7 +593,10 @@ function buildAttentionItems(overview: MeOverviewResponse): DashboardPriorityIte
     kind: "connector_run",
     severity: run.status,
     title: `${run.source} / ${run.target}`,
-    detail: run.error_message || `${run.failure_count} failed item(s)`
+    detail: run.error_message || `${run.failure_count} failed item(s)`,
+    source: run.source,
+    target: run.target,
+    record_id: run.id
   }));
 
   return [...operationItems, ...services, ...workCards, ...notifications, ...runs].slice(0, 8);

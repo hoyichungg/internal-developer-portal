@@ -7,9 +7,11 @@ import type { FormEvent } from "react";
 
 import type { ApiClient } from "../../api/client";
 import type {
+  ApiId,
   Connector,
   ConnectorConfigForm,
   ConnectorConfigResponse,
+  ConnectorDrillTarget,
   ConnectorOperationsResponse,
   ConnectorRun,
   ConnectorRunDetail,
@@ -39,11 +41,29 @@ type RunDetailOptions = {
   source?: string;
 };
 
+type ReloadOptions = {
+  runId?: ApiId | string | null;
+};
+
+function connectorDrillKey(target?: ConnectorDrillTarget | null): string {
+  if (!target) {
+    return "";
+  }
+
+  return [target.source || "", target.target || "", target.runId || ""].join("|");
+}
+
+function hasConnectorDrillTarget(target?: ConnectorDrillTarget | null): boolean {
+  return Boolean(target?.source || target?.target || target?.runId);
+}
+
 export function ConnectorsView({
   client,
+  drillTarget,
   onOpenService
 }: {
   client: ApiClient;
+  drillTarget?: ConnectorDrillTarget | null;
   onOpenService: (serviceId: string | number) => void;
 }) {
   const [connectors, setConnectors] = useState<Connector[]>([]);
@@ -64,6 +84,8 @@ export function ConnectorsView({
   const reloadRequestSeqRef = useRef(0);
   const runDetailRequestSeqRef = useRef(0);
   const refreshTimeoutRef = useRef<number | null>(null);
+  const initialLoadStartedRef = useRef(false);
+  const appliedDrillTargetKeyRef = useRef("");
   const selected = connectors.find((connector) => connector.source === selectedSource);
   const initialLoading = loading && connectors.length === 0;
 
@@ -143,7 +165,7 @@ export function ConnectorsView({
     [client]
   );
 
-  const reload = useCallback(async (preferredSource?: string) => {
+  const reload = useCallback(async (preferredSource?: string, options: ReloadOptions = {}) => {
     const requestSeq = ++reloadRequestSeqRef.current;
     setLoading(true);
     try {
@@ -164,7 +186,10 @@ export function ConnectorsView({
       selectedSourceRef.current = nextSource;
       setSelectedSource(nextSource);
       if (nextSource) {
-        await loadConnectorDetails(nextSource);
+        await loadConnectorDetails(nextSource, { preserveRunDetail: Boolean(options.runId) });
+        if (options.runId) {
+          await loadRunDetail(options.runId, { source: nextSource });
+        }
       } else {
         detailsRequestSeqRef.current += 1;
         runDetailRequestSeqRef.current += 1;
@@ -181,11 +206,29 @@ export function ConnectorsView({
         setLoading(false);
       }
     }
-  }, [client, loadConnectorDetails]);
+  }, [client, loadConnectorDetails, loadRunDetail]);
 
   useEffect(() => {
-    reload();
+    const drillKey = connectorDrillKey(drillTarget);
+    initialLoadStartedRef.current = true;
+    appliedDrillTargetKeyRef.current = drillKey;
+    reload(drillTarget?.source || undefined, { runId: drillTarget?.runId });
   }, []);
+
+  useEffect(() => {
+    if (!initialLoadStartedRef.current || !hasConnectorDrillTarget(drillTarget)) {
+      return;
+    }
+
+    const drillKey = connectorDrillKey(drillTarget);
+    if (appliedDrillTargetKeyRef.current === drillKey) {
+      return;
+    }
+
+    appliedDrillTargetKeyRef.current = drillKey;
+    reload(drillTarget?.source || undefined, { runId: drillTarget?.runId });
+  }, [drillTarget, reload]);
+
   useRefresh(() => reload());
 
   async function selectConnector(source: string) {

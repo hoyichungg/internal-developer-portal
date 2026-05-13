@@ -28,6 +28,7 @@ pub fn build(app_config: AppConfig) -> Rocket<Build> {
                 rocket_routes::authorization::login,
                 rocket_routes::authorization::me,
                 rocket_routes::authorization::me_overview,
+                rocket_routes::authorization::users,
                 rocket_routes::authorization::logout,
                 crate::openapi::openapi_json,
                 rocket_routes::audit_logs::get_audit_logs,

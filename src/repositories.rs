@@ -526,26 +526,45 @@ impl MaintenanceRunRepository {
 
 pub struct AuditLogRepository;
 
+pub struct AuditLogFilters<'a> {
+    pub resource_type: Option<&'a str>,
+    pub resource_id: Option<&'a str>,
+    pub actor_user_id: Option<i32>,
+    pub action: Option<&'a str>,
+    pub created_from: Option<NaiveDateTime>,
+    pub created_to: Option<NaiveDateTime>,
+}
+
 impl AuditLogRepository {
     pub async fn find_multiple(
         c: &mut AsyncPgConnection,
         limit: i64,
-        resource_type: Option<&str>,
-        resource_id: Option<&str>,
-        actor_user_id: Option<i32>,
+        filters: AuditLogFilters<'_>,
     ) -> QueryResult<Vec<AuditLog>> {
         let mut query = audit_logs::table.into_boxed();
 
-        if let Some(resource_type) = resource_type {
+        if let Some(resource_type) = filters.resource_type {
             query = query.filter(audit_logs::resource_type.eq(resource_type));
         }
 
-        if let Some(resource_id) = resource_id {
+        if let Some(resource_id) = filters.resource_id {
             query = query.filter(audit_logs::resource_id.eq(resource_id));
         }
 
-        if let Some(actor_user_id) = actor_user_id {
+        if let Some(actor_user_id) = filters.actor_user_id {
             query = query.filter(audit_logs::actor_user_id.eq(actor_user_id));
+        }
+
+        if let Some(action) = filters.action {
+            query = query.filter(audit_logs::action.eq(action));
+        }
+
+        if let Some(created_from) = filters.created_from {
+            query = query.filter(audit_logs::created_at.ge(created_from));
+        }
+
+        if let Some(created_to) = filters.created_to {
+            query = query.filter(audit_logs::created_at.le(created_to));
         }
 
         query

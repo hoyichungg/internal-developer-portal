@@ -13,7 +13,7 @@ use crate::models::{
     Service, ServiceHealthCheck, WorkCard,
 };
 use crate::rocket_routes::authorization::{
-    Credentials, LoginResponse, MeOverviewResponse, MeResponse,
+    Credentials, LoginResponse, MeOverviewResponse, MeResponse, UserSummary,
 };
 use crate::rocket_routes::connectors::{
     ConnectorConfigResponse, ConnectorImportError, ConnectorOperationsResponse, ConnectorRunDetail,
@@ -45,6 +45,7 @@ use crate::validation::FieldViolation;
         login_doc,
         logout_doc,
         me_doc,
+        list_users_doc,
         me_overview_doc,
         dashboard_doc,
         list_connectors_doc,
@@ -122,6 +123,7 @@ use crate::validation::FieldViolation;
         ApiResponse<Vec<Notification>>,
         ApiResponse<Vec<Package>>,
         ApiResponse<Vec<Service>>,
+        ApiResponse<Vec<UserSummary>>,
         ApiResponse<Vec<WorkCard>>,
         AuditLog,
         Connector,
@@ -169,6 +171,7 @@ use crate::validation::FieldViolation;
         ServiceLinks,
         ServiceOverview,
         ServiceOwner,
+        UserSummary,
         WorkCard,
         WorkCardImportItem,
         WorkCardImportRequest
@@ -265,6 +268,19 @@ fn logout_doc() {}
     )
 )]
 fn me_doc() {}
+
+#[utoipa::path(
+    get,
+    path = "/users",
+    tag = "Auth",
+    operation_id = "listUsers",
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "Authenticated user directory for membership assignment. Password hashes are never returned.", body = ApiResponse<Vec<UserSummary>>),
+        (status = 401, description = "Authentication is required.", body = ApiErrorResponse)
+    )
+)]
+fn list_users_doc() {}
 
 #[utoipa::path(
     get,
@@ -621,7 +637,10 @@ fn delete_notification_doc() {}
     params(
         ("resource_type" = Option<String>, Query, description = "Optional resource type filter."),
         ("resource_id" = Option<String>, Query, description = "Optional resource id filter."),
-        ("actor_user_id" = Option<i32>, Query, description = "Optional actor user id filter.")
+        ("actor_user_id" = Option<i32>, Query, description = "Optional actor user id filter."),
+        ("action" = Option<String>, Query, description = "Optional audit action filter."),
+        ("created_from" = Option<String>, Query, description = "Optional inclusive created-at lower bound, as YYYY-MM-DD or YYYY-MM-DDTHH:MM."),
+        ("created_to" = Option<String>, Query, description = "Optional inclusive created-at upper bound, as YYYY-MM-DD or YYYY-MM-DDTHH:MM.")
     ),
     responses(
         (status = 200, description = "Recent audit log entries.", body = ApiResponse<Vec<AuditLog>>),

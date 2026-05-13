@@ -26,6 +26,13 @@ export type MeResponse = {
   roles: string[];
 };
 
+export type UserSummary = {
+  id: ApiId;
+  username: string;
+  roles: string[];
+  created_at: DateTimeString;
+};
+
 export type LoginRequest = {
   username: string;
   password: string;
@@ -294,6 +301,12 @@ export type DashboardPriorityItem = {
   occurred_at?: DateTimeString | null;
 };
 
+export type ConnectorDrillTarget = {
+  source?: string | null;
+  target?: string | null;
+  runId?: ApiId | null;
+};
+
 export type MeOperationsStatus = {
   worker_status: string;
   active_workers: number;
@@ -339,6 +352,7 @@ export type CatalogResponse = {
   maintainers: Maintainer[];
   services: Service[];
   packages: Package[];
+  users: UserSummary[];
 };
 
 export type ServiceOverviewResponse = {
@@ -401,6 +415,11 @@ export type NewConnectorPayload = {
   kind: string;
   display_name: string;
   status: string;
+};
+
+export type MaintainerMemberPayload = {
+  user_id: ApiId;
+  role: string;
 };
 
 export type ConnectorConfigForm = {

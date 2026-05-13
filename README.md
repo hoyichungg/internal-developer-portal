@@ -121,25 +121,23 @@ The demo seed is idempotent and uses the `demo-workday` connector source.
 
 ## Tests
 
-Build the frontend before starting the backend when running from a clean
-checkout:
+For the normal local loop, use the validation script. It avoids the Windows
+`server.exe` / `worker.exe` file-lock issue that can make `cargo test` fail
+before tests start.
 
-```sh
-pnpm --dir frontend install --frozen-lockfile
-pnpm --dir frontend build
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\local-validate.ps1 -Mode Fast
 ```
 
-Integration tests expect the server to be running on `127.0.0.1:8000`.
-Tests that cover queued connector runs also expect the worker to be running.
+Before larger changes or commits, run the full workflow:
 
-```sh
-cargo run --bin server
-cargo run --bin worker
-cargo test
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\local-validate.ps1 -Mode Full
 ```
 
-The CI workflow runs formatting, build checks, Clippy, Diesel migrations, a
-real Rocket server, and the integration tests against PostgreSQL 16.
+See `docs/local-validation.md` for details. The CI workflow runs formatting,
+build checks, Clippy, Diesel migrations, a real Rocket server, and the
+integration tests against PostgreSQL 16.
 
 ## API Shape
 

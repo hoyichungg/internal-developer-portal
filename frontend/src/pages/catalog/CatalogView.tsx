@@ -1,14 +1,14 @@
 import { Button, Grid, Group, Modal, Select, Stack, Text, Textarea, TextInput } from "@mantine/core";
 import { notifications } from "@mantine/notifications";
-import { IconPencil, IconPlus } from "@tabler/icons-react";
-import { useMemo, useState } from "react";
+import { IconPencil, IconPlus, IconTrash, IconUserPlus, IconUsers } from "@tabler/icons-react";
+import { useEffect, useMemo, useState } from "react";
 import type { FormEvent } from "react";
 
 import type { ApiClient } from "../../api/client";
 import { DataPanel } from "../../components/DataPanel";
 import { DataTable } from "../../components/DataTable";
 import { CatalogSkeleton } from "../../components/LoadingState";
-import { LinkCell, StatusBadge } from "../../components/tableCells";
+import { DateCell, LinkCell, StatusBadge } from "../../components/tableCells";
 import { ViewFrame } from "../../components/ViewFrame";
 import { useAsyncData } from "../../hooks/useAsyncData";
 import { useRefresh } from "../../hooks/useRefresh";
@@ -16,21 +16,26 @@ import type {
   ApiId,
   CatalogResponse,
   Maintainer,
+  MaintainerMember,
+  MaintainerMemberPayload,
   NewMaintainerPayload,
   NewPackagePayload,
   NewServicePayload,
   Package,
-  Service
+  Service,
+  UserSummary
 } from "../../types/api";
 import { showError } from "../../utils/notifications";
 
 const lifecycleOptions = ["active", "deprecated", "archived"];
 const healthOptions = ["healthy", "degraded", "down", "unknown"];
+const memberRoleOptions = ["owner", "maintainer", "viewer"];
 
 type CatalogDialog =
   | { type: "maintainer"; record?: Maintainer }
   | { type: "service"; record?: Service }
   | { type: "package"; record?: Package }
+  | { type: "member"; maintainerId: ApiId; record?: MaintainerMember }
   | null;
 
 type SelectOption = {
@@ -60,19 +65,38 @@ type PackageFormState = Omit<
   documentation_url: string;
 };
 
+type MemberFormState = {
+  user_id: string;
+  role: string;
+};
+
 export function CatalogView({ client }: { client: ApiClient }) {
   const [dialog, setDialog] = useState<CatalogDialog>(null);
+  const [selectedMaintainerId, setSelectedMaintainerId] = useState("");
+  const [removingMember, setRemovingMember] = useState<MaintainerMember | null>(null);
   const [saving, setSaving] = useState(false);
+  const [removing, setRemoving] = useState(false);
   const [data, actions] = useAsyncData<CatalogResponse>(async () => {
-    const [maintainers, services, packages] = await Promise.all([
+    const [maintainers, services, packages, users] = await Promise.all([
       client.get<Maintainer[]>("/maintainers"),
       client.get<Service[]>("/services"),
-      client.get<Package[]>("/packages")
+      client.get<Package[]>("/packages"),
+      client.get<UserSummary[]>("/users")
     ]);
-    return { maintainers, services, packages };
+    return { maintainers, services, packages, users };
   }, [client]);
+  const [membersData, memberActions] = useAsyncData<MaintainerMember[]>(
+    async () =>
+      selectedMaintainerId
+        ? client.get<MaintainerMember[]>(
+            `/maintainers/${encodeURIComponent(selectedMaintainerId)}/members`
+          )
+        : [],
+    [client, selectedMaintainerId]
+  );
 
   useRefresh(actions.reload);
+  useRefresh(memberActions.reload);
 
   const catalog = data.value;
   const maintainerOptions = useMemo(
@@ -88,9 +112,41 @@ export function CatalogView({ client }: { client: ApiClient }) {
     (catalog?.maintainers || []).forEach((maintainer) => lookup.set(maintainer.id, maintainer));
     return lookup;
   }, [catalog?.maintainers]);
+  const userOptions = useMemo(
+    () =>
+      (catalog?.users || []).map((user) => ({
+        value: String(user.id),
+        label: `${user.username} (#${user.id})`
+      })),
+    [catalog?.users]
+  );
+  const userById = useMemo(() => {
+    const lookup = new Map<ApiId, UserSummary>();
+    (catalog?.users || []).forEach((user) => lookup.set(user.id, user));
+    return lookup;
+  }, [catalog?.users]);
   const defaultMaintainerId = maintainerOptions[0]?.value || "";
+  const selectedMaintainer = maintainerById.get(Number(selectedMaintainerId)) || null;
   const canManageOwnedRecords = maintainerOptions.length > 0;
+  const canManageMembers = Boolean(selectedMaintainer && userOptions.length > 0);
   const dialogTitle = getDialogTitle(dialog);
+  const removingMemberUser = removingMember ? userById.get(removingMember.user_id) : undefined;
+  const removingMemberMaintainer = removingMember
+    ? maintainerById.get(removingMember.maintainer_id)
+    : undefined;
+
+  useEffect(() => {
+    if (!catalog) {
+      return;
+    }
+
+    const selectedStillExists = catalog.maintainers.some(
+      (maintainer) => String(maintainer.id) === selectedMaintainerId
+    );
+    if (!selectedStillExists) {
+      setSelectedMaintainerId(defaultMaintainerId);
+    }
+  }, [catalog, defaultMaintainerId, selectedMaintainerId]);
 
   async function saveMaintainer(payload: NewMaintainerPayload) {
     if (!dialog || dialog.type !== "maintainer") {
@@ -164,11 +220,70 @@ export function CatalogView({ client }: { client: ApiClient }) {
     }
   }
 
+  async function saveMember(payload: MaintainerMemberPayload) {
+    if (!dialog || dialog.type !== "member") {
+      return;
+    }
+
+    setSaving(true);
+    try {
+      const member = await client.post<MaintainerMember>(
+        `/maintainers/${encodeURIComponent(dialog.maintainerId)}/members`,
+        payload
+      );
+      await memberActions.reload();
+      setDialog(null);
+      notifications.show({
+        title: dialog.record ? "Member role updated" : "Member added",
+        message: `${userById.get(member.user_id)?.username || `User ${member.user_id}`} - ${
+          member.role
+        }`,
+        color: "teal"
+      });
+    } catch (error) {
+      showError(error);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function removeMember(member: MaintainerMember) {
+    setRemoving(true);
+    try {
+      await client.delete(
+        `/maintainers/${encodeURIComponent(member.maintainer_id)}/members/${encodeURIComponent(
+          member.user_id
+        )}`
+      );
+      await memberActions.reload();
+      setRemovingMember(null);
+      notifications.show({
+        title: "Member removed",
+        message: userById.get(member.user_id)?.username || `User ${member.user_id}`,
+        color: "teal"
+      });
+    } catch (error) {
+      showError(error);
+    } finally {
+      setRemoving(false);
+    }
+  }
+
   const MaintainerActionCell = ({ row }: { row: Maintainer }) => (
-    <EditAction
-      label={`Edit maintainer ${row.display_name}`}
-      onClick={() => setDialog({ type: "maintainer", record: row })}
-    />
+    <Group gap="xs" wrap="nowrap">
+      <Button
+        variant="subtle"
+        size="compact-sm"
+        leftSection={<IconUsers size={16} />}
+        onClick={() => setSelectedMaintainerId(String(row.id))}
+      >
+        Members
+      </Button>
+      <EditAction
+        label={`Edit maintainer ${row.display_name}`}
+        onClick={() => setDialog({ type: "maintainer", record: row })}
+      />
+    </Group>
   );
   const ServiceActionCell = ({ row }: { row: Service }) => (
     <EditAction
@@ -186,6 +301,44 @@ export function CatalogView({ client }: { client: ApiClient }) {
     const maintainer = maintainerById.get(Number(value));
     return <Text size="sm">{maintainer?.display_name || "-"}</Text>;
   };
+  const MemberUserCell = ({ value }: { value?: unknown }) => {
+    const user = userById.get(Number(value));
+
+    return (
+      <Stack gap={0}>
+        <Text size="sm" fw={700}>
+          {user?.username || `User ${value}`}
+        </Text>
+        <Text size="xs" c="dimmed">
+          #{String(value)}
+          {user?.roles?.length ? ` - ${user.roles.join(", ")}` : ""}
+        </Text>
+      </Stack>
+    );
+  };
+  const MemberActionCell = ({ row }: { row: MaintainerMember }) => (
+    <Group gap="xs" wrap="nowrap">
+      <Button
+        variant="subtle"
+        size="compact-sm"
+        leftSection={<IconPencil size={16} />}
+        onClick={() =>
+          setDialog({ type: "member", maintainerId: row.maintainer_id, record: row })
+        }
+      >
+        Role
+      </Button>
+      <Button
+        color="red"
+        variant="subtle"
+        size="compact-sm"
+        leftSection={<IconTrash size={16} />}
+        onClick={() => setRemovingMember(row)}
+      >
+        Remove
+      </Button>
+    </Group>
+  );
 
   return (
     <ViewFrame
@@ -203,10 +356,27 @@ export function CatalogView({ client }: { client: ApiClient }) {
             onClose={() => setDialog(null)}
             maintainerOptions={maintainerOptions}
             defaultMaintainerId={defaultMaintainerId}
+            userOptions={userOptions}
             saving={saving}
             onSaveMaintainer={saveMaintainer}
             onSaveService={saveService}
             onSavePackage={savePackage}
+            onSaveMember={saveMember}
+          />
+
+          <RemoveMemberModal
+            member={removingMember}
+            userLabel={
+              removingMemberUser
+                ? `${removingMemberUser.username} (#${removingMemberUser.id})`
+                : removingMember
+                  ? `User ${removingMember.user_id}`
+                  : ""
+            }
+            maintainerLabel={removingMemberMaintainer?.display_name || ""}
+            removing={removing}
+            onCancel={() => setRemovingMember(null)}
+            onConfirm={removeMember}
           />
 
           <Stack gap="lg">
@@ -230,6 +400,54 @@ export function CatalogView({ client }: { client: ApiClient }) {
                   ["_actions", "Actions", MaintainerActionCell]
                 ]}
               />
+            </DataPanel>
+
+            <DataPanel
+              title="Maintainer members"
+              actions={
+                <Button
+                  leftSection={<IconUserPlus size={16} />}
+                  size="compact-sm"
+                  disabled={!canManageMembers}
+                  onClick={() =>
+                    selectedMaintainer &&
+                    setDialog({ type: "member", maintainerId: selectedMaintainer.id })
+                  }
+                >
+                  Add member
+                </Button>
+              }
+            >
+              <Stack gap="md">
+                <Select
+                  label="Maintainer"
+                  data={maintainerOptions}
+                  value={selectedMaintainerId}
+                  onChange={(value) => setSelectedMaintainerId(value || "")}
+                  disabled={maintainerOptions.length === 0}
+                  searchable
+                />
+                {membersData.error && (
+                  <Text size="sm" c="red">
+                    {membersData.error.message}
+                  </Text>
+                )}
+                {membersData.loading && !membersData.value ? (
+                  <Text size="sm" c="dimmed">
+                    Loading members...
+                  </Text>
+                ) : (
+                  <DataTable
+                    rows={membersData.value || []}
+                    columns={[
+                      ["user_id", "User", MemberUserCell],
+                      ["role", "Role", StatusBadge],
+                      ["created_at", "Added", DateCell],
+                      ["_actions", "Actions", MemberActionCell]
+                    ]}
+                  />
+                )}
+              </Stack>
             </DataPanel>
 
             <Grid>
@@ -301,20 +519,24 @@ function CatalogManagementModal({
   onClose,
   maintainerOptions,
   defaultMaintainerId,
+  userOptions,
   saving,
   onSaveMaintainer,
   onSaveService,
-  onSavePackage
+  onSavePackage,
+  onSaveMember
 }: {
   dialog: CatalogDialog;
   title: string;
   onClose: () => void;
   maintainerOptions: SelectOption[];
   defaultMaintainerId: string;
+  userOptions: SelectOption[];
   saving: boolean;
   onSaveMaintainer: (payload: NewMaintainerPayload) => void | Promise<void>;
   onSaveService: (payload: NewServicePayload) => void | Promise<void>;
   onSavePackage: (payload: NewPackagePayload) => void | Promise<void>;
+  onSaveMember: (payload: MaintainerMemberPayload) => void | Promise<void>;
 }) {
   const opened = Boolean(dialog);
   const formKey = dialog ? `${dialog.type}-${dialog.record?.id || "new"}` : "closed";
@@ -352,7 +574,118 @@ function CatalogManagementModal({
           onSubmit={onSavePackage}
         />
       )}
+      {dialog?.type === "member" && (
+        <MaintainerMemberForm
+          key={formKey}
+          initialValue={dialog.record}
+          userOptions={userOptions}
+          submitting={saving}
+          onCancel={onClose}
+          onSubmit={onSaveMember}
+        />
+      )}
     </Modal>
+  );
+}
+
+function RemoveMemberModal({
+  member,
+  userLabel,
+  maintainerLabel,
+  removing,
+  onCancel,
+  onConfirm
+}: {
+  member: MaintainerMember | null;
+  userLabel: string;
+  maintainerLabel: string;
+  removing: boolean;
+  onCancel: () => void;
+  onConfirm: (member: MaintainerMember) => void | Promise<void>;
+}) {
+  return (
+    <Modal opened={Boolean(member)} onClose={onCancel} title="Remove member" size="sm" centered>
+      <Stack>
+        <Text size="sm">
+          Remove {userLabel || "this user"} from {maintainerLabel || "this maintainer"}?
+        </Text>
+        <Group justify="flex-end">
+          <Button type="button" variant="default" onClick={onCancel} disabled={removing}>
+            Cancel
+          </Button>
+          <Button
+            color="red"
+            loading={removing}
+            onClick={() => {
+              if (member) {
+                onConfirm(member);
+              }
+            }}
+          >
+            Remove
+          </Button>
+        </Group>
+      </Stack>
+    </Modal>
+  );
+}
+
+function MaintainerMemberForm({
+  initialValue,
+  userOptions,
+  submitting,
+  onCancel,
+  onSubmit
+}: {
+  initialValue?: MaintainerMember;
+  userOptions: SelectOption[];
+  submitting: boolean;
+  onCancel: () => void;
+  onSubmit: (payload: MaintainerMemberPayload) => void | Promise<void>;
+}) {
+  const [form, setForm] = useState<MemberFormState>({
+    user_id: initialValue?.user_id ? String(initialValue.user_id) : userOptions[0]?.value || "",
+    role: initialValue?.role || "maintainer"
+  });
+
+  function update(field: keyof MemberFormState, value: string) {
+    setForm((current) => ({ ...current, [field]: value }));
+  }
+
+  function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    onSubmit({
+      user_id: Number(form.user_id),
+      role: form.role
+    });
+  }
+
+  return (
+    <form onSubmit={submit}>
+      <Stack>
+        <Select
+          label="User"
+          data={userOptions}
+          value={form.user_id}
+          onChange={(value) => update("user_id", value || "")}
+          disabled={Boolean(initialValue)}
+          searchable
+          required
+        />
+        <Select
+          label="Role"
+          data={memberRoleOptions}
+          value={form.role}
+          onChange={(value) => update("role", value || "maintainer")}
+          required
+        />
+        <FormActions
+          submitting={submitting}
+          onCancel={onCancel}
+          submitLabel={initialValue ? "Save role" : "Add member"}
+        />
+      </Stack>
+    </form>
   );
 }
 
@@ -751,7 +1084,10 @@ function getDialogTitle(dialog: CatalogDialog): string {
   if (dialog.type === "service") {
     return `${action} service`;
   }
-  return `${action} package`;
+  if (dialog.type === "package") {
+    return `${action} package`;
+  }
+  return dialog.record ? "Edit member role" : "Add member";
 }
 
 function optionalText(value: unknown): string | null {

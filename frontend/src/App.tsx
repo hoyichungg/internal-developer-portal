@@ -12,15 +12,62 @@ import { ConnectorsView } from "./pages/connectors/ConnectorsView";
 import { DashboardView } from "./pages/dashboard/DashboardView";
 import { LoginScreen } from "./pages/login/LoginScreen";
 import { ServiceOverviewView } from "./pages/services/ServiceOverviewView";
-import type { ApiId, LoginRequest, LoginResponse, MeResponse } from "./types/api";
+import type {
+  ApiId,
+  ConnectorDrillTarget,
+  LoginRequest,
+  LoginResponse,
+  MeResponse
+} from "./types/api";
 
 const TOP_LEVEL_VIEWS = new Set(["dashboard", "connectors", "catalog", "audit"]);
 type AppView = "dashboard" | "connectors" | "catalog" | "audit" | "service-overview";
 
 function viewFromHash(): AppView {
-  const hash = window.location.hash.replace(/^#\/?/, "");
+  return routeFromHash().view;
+}
 
-  return TOP_LEVEL_VIEWS.has(hash) ? (hash as AppView) : "dashboard";
+function routeFromHash(): { view: AppView; params: URLSearchParams } {
+  const hash = window.location.hash.replace(/^#\/?/, "");
+  const [viewPart, query = ""] = hash.split("?");
+  const view = TOP_LEVEL_VIEWS.has(viewPart) ? (viewPart as AppView) : "dashboard";
+
+  return { view, params: new URLSearchParams(query) };
+}
+
+function connectorTargetFromParams(params: URLSearchParams): ConnectorDrillTarget | null {
+  const source = params.get("source");
+  const target = params.get("target");
+  const runParam = params.get("runId") || params.get("run_id");
+  const runNumber = runParam ? Number(runParam) : null;
+  const runId = runNumber !== null && Number.isFinite(runNumber) ? runNumber : null;
+
+  if (!source && !target && !runId) {
+    return null;
+  }
+
+  return {
+    source,
+    target,
+    runId
+  };
+}
+
+function connectorHash(target?: ConnectorDrillTarget | null): string {
+  const params = new URLSearchParams();
+
+  if (target?.source) {
+    params.set("source", target.source);
+  }
+  if (target?.target) {
+    params.set("target", target.target);
+  }
+  if (target?.runId) {
+    params.set("runId", String(target.runId));
+  }
+
+  const query = params.toString();
+  return query ? `#connectors?${query}` : "#connectors";
 }
 
 export default function App() {
@@ -28,6 +75,11 @@ export default function App() {
   const [user, setUser] = useState<MeResponse | null>(null);
   const [view, setView] = useState(viewFromHash);
   const [selectedServiceId, setSelectedServiceId] = useState<ApiId | null>(null);
+  const [connectorDrillTarget, setConnectorDrillTarget] =
+    useState<ConnectorDrillTarget | null>(() => {
+      const route = routeFromHash();
+      return route.view === "connectors" ? connectorTargetFromParams(route.params) : null;
+    });
   const [booting, setBooting] = useState(true);
   const restoredTokenRef = useRef<string | null>(null);
 
@@ -35,8 +87,12 @@ export default function App() {
 
   useEffect(() => {
     function syncViewFromHash() {
-      setView(viewFromHash());
+      const route = routeFromHash();
+      setView(route.view);
       setSelectedServiceId(null);
+      setConnectorDrillTarget(
+        route.view === "connectors" ? connectorTargetFromParams(route.params) : null
+      );
     }
 
     window.addEventListener("hashchange", syncViewFromHash);
@@ -94,6 +150,7 @@ export default function App() {
     setBooting(true);
     setUser(null);
     setSelectedServiceId(null);
+    setConnectorDrillTarget(null);
     setToken(login.token);
     handleViewChange("dashboard");
     notifications.show({
@@ -111,12 +168,14 @@ export default function App() {
     }
     setUser(null);
     setSelectedServiceId(null);
+    setConnectorDrillTarget(null);
     setToken(null);
   }
 
   function handleViewChange(nextView: AppView) {
     setView(nextView);
     setSelectedServiceId(null);
+    setConnectorDrillTarget(null);
 
     if (TOP_LEVEL_VIEWS.has(nextView)) {
       const nextHash = `#${nextView}`;
@@ -128,7 +187,19 @@ export default function App() {
 
   function openServiceOverview(serviceId: string | number) {
     setSelectedServiceId(Number(serviceId));
+    setConnectorDrillTarget(null);
     setView("service-overview");
+  }
+
+  function openConnectorDrill(target: ConnectorDrillTarget) {
+    const nextHash = connectorHash(target);
+    setSelectedServiceId(null);
+    setConnectorDrillTarget(target);
+    setView("connectors");
+
+    if (window.location.hash !== nextHash) {
+      window.location.hash = nextHash;
+    }
   }
 
   if (booting) {
@@ -150,7 +221,11 @@ export default function App() {
       onLogout={handleLogout}
     >
       {view === "dashboard" && (
-        <DashboardView client={client} onOpenService={openServiceOverview} />
+        <DashboardView
+          client={client}
+          onOpenService={openServiceOverview}
+          onOpenConnector={openConnectorDrill}
+        />
       )}
       {view === "service-overview" && selectedServiceId && (
         <ServiceOverviewView
@@ -160,7 +235,11 @@ export default function App() {
         />
       )}
       {view === "connectors" && (
-        <ConnectorsView client={client} onOpenService={openServiceOverview} />
+        <ConnectorsView
+          client={client}
+          drillTarget={connectorDrillTarget}
+          onOpenService={openServiceOverview}
+        />
       )}
       {view === "catalog" && <CatalogView client={client} />}
       {view === "audit" && <AuditView client={client} />}
