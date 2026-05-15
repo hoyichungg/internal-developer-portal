@@ -11,6 +11,8 @@ import { CatalogView } from "./pages/catalog/CatalogView";
 import { ConnectorsView } from "./pages/connectors/ConnectorsView";
 import { DashboardView } from "./pages/dashboard/DashboardView";
 import { LoginScreen } from "./pages/login/LoginScreen";
+import { NotificationDetailView } from "./pages/records/NotificationDetailView";
+import { WorkCardDetailView } from "./pages/records/WorkCardDetailView";
 import { ServiceOverviewView } from "./pages/services/ServiceOverviewView";
 import type {
   ApiId,
@@ -21,18 +23,70 @@ import type {
 } from "./types/api";
 
 const TOP_LEVEL_VIEWS = new Set(["dashboard", "connectors", "catalog", "audit"]);
-type AppView = "dashboard" | "connectors" | "catalog" | "audit" | "service-overview";
+type AppView =
+  | "dashboard"
+  | "connectors"
+  | "catalog"
+  | "audit"
+  | "service-overview"
+  | "work-card-detail"
+  | "notification-detail";
 
-function viewFromHash(): AppView {
-  return routeFromHash().view;
-}
+type AppRoute = {
+  view: AppView;
+  params: URLSearchParams;
+  recordId: ApiId | null;
+};
 
-function routeFromHash(): { view: AppView; params: URLSearchParams } {
+function routeFromHash(): AppRoute {
   const hash = window.location.hash.replace(/^#\/?/, "");
   const [viewPart, query = ""] = hash.split("?");
+  const params = new URLSearchParams(query);
+
+  if (viewPart.startsWith("work-cards/")) {
+    const recordId = numericId(viewPart.replace("work-cards/", ""));
+    return {
+      view: recordId ? "work-card-detail" : "dashboard",
+      params,
+      recordId
+    };
+  }
+
+  if (viewPart.startsWith("notifications/")) {
+    const recordId = numericId(viewPart.replace("notifications/", ""));
+    return {
+      view: recordId ? "notification-detail" : "dashboard",
+      params,
+      recordId
+    };
+  }
+
+  if (viewPart === "work-cards") {
+    const recordId = numericId(params.get("id"));
+    return {
+      view: recordId ? "work-card-detail" : "dashboard",
+      params,
+      recordId
+    };
+  }
+
+  if (viewPart === "notifications") {
+    const recordId = numericId(params.get("id"));
+    return {
+      view: recordId ? "notification-detail" : "dashboard",
+      params,
+      recordId
+    };
+  }
+
   const view = TOP_LEVEL_VIEWS.has(viewPart) ? (viewPart as AppView) : "dashboard";
 
-  return { view, params: new URLSearchParams(query) };
+  return { view, params, recordId: null };
+}
+
+function numericId(value?: string | null): ApiId | null {
+  const id = value ? Number(value) : NaN;
+  return Number.isInteger(id) && id > 0 ? id : null;
 }
 
 function connectorTargetFromParams(params: URLSearchParams): ConnectorDrillTarget | null {
@@ -71,14 +125,20 @@ function connectorHash(target?: ConnectorDrillTarget | null): string {
 }
 
 export default function App() {
+  const initialRoute = useMemo(() => routeFromHash(), []);
   const [token, setToken] = useStoredToken();
   const [user, setUser] = useState<MeResponse | null>(null);
-  const [view, setView] = useState(viewFromHash);
+  const [view, setView] = useState(() => initialRoute.view);
   const [selectedServiceId, setSelectedServiceId] = useState<ApiId | null>(null);
+  const [selectedWorkCardId, setSelectedWorkCardId] = useState<ApiId | null>(() =>
+    initialRoute.view === "work-card-detail" ? initialRoute.recordId : null
+  );
+  const [selectedNotificationId, setSelectedNotificationId] = useState<ApiId | null>(() =>
+    initialRoute.view === "notification-detail" ? initialRoute.recordId : null
+  );
   const [connectorDrillTarget, setConnectorDrillTarget] =
     useState<ConnectorDrillTarget | null>(() => {
-      const route = routeFromHash();
-      return route.view === "connectors" ? connectorTargetFromParams(route.params) : null;
+      return initialRoute.view === "connectors" ? connectorTargetFromParams(initialRoute.params) : null;
     });
   const [booting, setBooting] = useState(true);
   const restoredTokenRef = useRef<string | null>(null);
@@ -90,6 +150,8 @@ export default function App() {
       const route = routeFromHash();
       setView(route.view);
       setSelectedServiceId(null);
+      setSelectedWorkCardId(route.view === "work-card-detail" ? route.recordId : null);
+      setSelectedNotificationId(route.view === "notification-detail" ? route.recordId : null);
       setConnectorDrillTarget(
         route.view === "connectors" ? connectorTargetFromParams(route.params) : null
       );
@@ -150,6 +212,8 @@ export default function App() {
     setBooting(true);
     setUser(null);
     setSelectedServiceId(null);
+    setSelectedWorkCardId(null);
+    setSelectedNotificationId(null);
     setConnectorDrillTarget(null);
     setToken(login.token);
     handleViewChange("dashboard");
@@ -168,6 +232,8 @@ export default function App() {
     }
     setUser(null);
     setSelectedServiceId(null);
+    setSelectedWorkCardId(null);
+    setSelectedNotificationId(null);
     setConnectorDrillTarget(null);
     setToken(null);
   }
@@ -175,6 +241,8 @@ export default function App() {
   function handleViewChange(nextView: AppView) {
     setView(nextView);
     setSelectedServiceId(null);
+    setSelectedWorkCardId(null);
+    setSelectedNotificationId(null);
     setConnectorDrillTarget(null);
 
     if (TOP_LEVEL_VIEWS.has(nextView)) {
@@ -187,6 +255,8 @@ export default function App() {
 
   function openServiceOverview(serviceId: string | number) {
     setSelectedServiceId(Number(serviceId));
+    setSelectedWorkCardId(null);
+    setSelectedNotificationId(null);
     setConnectorDrillTarget(null);
     setView("service-overview");
   }
@@ -194,9 +264,47 @@ export default function App() {
   function openConnectorDrill(target: ConnectorDrillTarget) {
     const nextHash = connectorHash(target);
     setSelectedServiceId(null);
+    setSelectedWorkCardId(null);
+    setSelectedNotificationId(null);
     setConnectorDrillTarget(target);
     setView("connectors");
 
+    if (window.location.hash !== nextHash) {
+      window.location.hash = nextHash;
+    }
+  }
+
+  function openWorkCardDetail(workCardId: string | number) {
+    const id = Number(workCardId);
+    if (!Number.isInteger(id) || id <= 0) {
+      return;
+    }
+
+    setSelectedServiceId(null);
+    setSelectedWorkCardId(id);
+    setSelectedNotificationId(null);
+    setConnectorDrillTarget(null);
+    setView("work-card-detail");
+
+    const nextHash = `#work-cards/${id}`;
+    if (window.location.hash !== nextHash) {
+      window.location.hash = nextHash;
+    }
+  }
+
+  function openNotificationDetail(notificationId: string | number) {
+    const id = Number(notificationId);
+    if (!Number.isInteger(id) || id <= 0) {
+      return;
+    }
+
+    setSelectedServiceId(null);
+    setSelectedWorkCardId(null);
+    setSelectedNotificationId(id);
+    setConnectorDrillTarget(null);
+    setView("notification-detail");
+
+    const nextHash = `#notifications/${id}`;
     if (window.location.hash !== nextHash) {
       window.location.hash = nextHash;
     }
@@ -217,7 +325,13 @@ export default function App() {
   return (
     <PortalShell
       user={user}
-      view={view === "service-overview" ? "dashboard" : view}
+      view={
+        view === "service-overview" ||
+        view === "work-card-detail" ||
+        view === "notification-detail"
+          ? "dashboard"
+          : view
+      }
       onLogout={handleLogout}
     >
       {view === "dashboard" && (
@@ -225,6 +339,8 @@ export default function App() {
           client={client}
           onOpenService={openServiceOverview}
           onOpenConnector={openConnectorDrill}
+          onOpenWorkCard={openWorkCardDetail}
+          onOpenNotification={openNotificationDetail}
         />
       )}
       {view === "service-overview" && selectedServiceId && (
@@ -232,6 +348,22 @@ export default function App() {
           client={client}
           serviceId={selectedServiceId}
           onBack={() => handleViewChange("dashboard")}
+        />
+      )}
+      {view === "work-card-detail" && selectedWorkCardId && (
+        <WorkCardDetailView
+          client={client}
+          workCardId={selectedWorkCardId}
+          onBack={() => handleViewChange("dashboard")}
+          onOpenConnector={openConnectorDrill}
+        />
+      )}
+      {view === "notification-detail" && selectedNotificationId && (
+        <NotificationDetailView
+          client={client}
+          notificationId={selectedNotificationId}
+          onBack={() => handleViewChange("dashboard")}
+          onOpenConnector={openConnectorDrill}
         />
       )}
       {view === "connectors" && (

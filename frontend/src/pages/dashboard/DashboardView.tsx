@@ -37,11 +37,15 @@ import type {
 export function DashboardView({
   client,
   onOpenService,
-  onOpenConnector
+  onOpenConnector,
+  onOpenWorkCard,
+  onOpenNotification
 }: {
   client: ApiClient;
   onOpenService: (serviceId: string | number) => void;
   onOpenConnector: (target: ConnectorDrillTarget) => void;
+  onOpenWorkCard: (workCardId: string | number) => void;
+  onOpenNotification: (notificationId: string | number) => void;
 }) {
   const [data, actions] = useAsyncData<MeOverviewResponse>(
     () => client.get<MeOverviewResponse>("/me/overview"),
@@ -79,6 +83,8 @@ export function DashboardView({
                   overview={overview}
                   onOpenService={onOpenService}
                   onOpenConnector={onOpenConnector}
+                  onOpenWorkCard={onOpenWorkCard}
+                  onOpenNotification={onOpenNotification}
                 />
               </DataPanel>
             </Grid.Col>
@@ -93,7 +99,10 @@ export function DashboardView({
           <Grid>
             <Grid.Col span={{ base: 12, lg: 5 }}>
               <DataPanel title="Messages">
-                <MessageList notifications={overview.unread_notifications} />
+                <MessageList
+                  notifications={overview.unread_notifications}
+                  onOpenNotification={onOpenNotification}
+                />
               </DataPanel>
             </Grid.Col>
 
@@ -135,7 +144,21 @@ export function DashboardView({
                     ["status", "Status", StatusBadge],
                     ["priority", "Priority", StatusBadge],
                     ["assignee", "Assignee"],
-                    ["url", "Link", WorkLinkCell]
+                    [
+                      "id",
+                      "Details",
+                      ({ row }) => (
+                        <Button
+                          size="compact-sm"
+                          variant="subtle"
+                          rightSection={<IconArrowRight size={14} />}
+                          onClick={() => onOpenWorkCard(row.id)}
+                        >
+                          Details
+                        </Button>
+                      )
+                    ],
+                    ["url", "External", WorkLinkCell]
                   ]}
                 />
               </DataPanel>
@@ -322,7 +345,13 @@ function TrendStat({ label, value, tone }: { label: string; value: number; tone?
   );
 }
 
-function MessageList({ notifications }: { notifications?: Notification[] }) {
+function MessageList({
+  notifications,
+  onOpenNotification
+}: {
+  notifications?: Notification[];
+  onOpenNotification: (notificationId: string | number) => void;
+}) {
   if (!notifications || notifications.length === 0) {
     return <EmptyText>No unread messages</EmptyText>;
   }
@@ -354,19 +383,29 @@ function MessageList({ notifications }: { notifications?: Notification[] }) {
             )}
           </Box>
 
-          {notification.url && (
+          <Group gap="xs" wrap="nowrap" className="messageActions">
             <Button
-              component="a"
-              href={notification.url}
-              target="_blank"
-              rel="noreferrer"
               size="compact-sm"
               variant="subtle"
-              rightSection={<IconExternalLink size={14} />}
+              rightSection={<IconArrowRight size={14} />}
+              onClick={() => onOpenNotification(notification.id)}
             >
-              Open
+              Details
             </Button>
-          )}
+            {notification.url && (
+              <Button
+                component="a"
+                href={notification.url}
+                target="_blank"
+                rel="noreferrer"
+                size="compact-sm"
+                variant="subtle"
+                rightSection={<IconExternalLink size={14} />}
+              >
+                Open
+              </Button>
+            )}
+          </Group>
         </Group>
       ))}
     </Stack>
@@ -376,11 +415,15 @@ function MessageList({ notifications }: { notifications?: Notification[] }) {
 function AttentionQueue({
   overview,
   onOpenService,
-  onOpenConnector
+  onOpenConnector,
+  onOpenWorkCard,
+  onOpenNotification
 }: {
   overview: MeOverviewResponse;
   onOpenService: (serviceId: string | number) => void;
   onOpenConnector: (target: ConnectorDrillTarget) => void;
+  onOpenWorkCard: (workCardId: string | number) => void;
+  onOpenNotification: (notificationId: string | number) => void;
 }) {
   const items = overview.priority_items?.length
     ? overview.priority_items
@@ -413,6 +456,8 @@ function AttentionQueue({
               action={action}
               onOpenService={onOpenService}
               onOpenConnector={onOpenConnector}
+              onOpenWorkCard={onOpenWorkCard}
+              onOpenNotification={onOpenNotification}
             />
           </Group>
         );
@@ -424,16 +469,22 @@ function AttentionQueue({
 type AttentionAction =
   | { type: "service"; label: string; serviceId: string | number }
   | { type: "connector"; label: string; target: ConnectorDrillTarget }
+  | { type: "work-card"; label: string; workCardId: string | number }
+  | { type: "notification"; label: string; notificationId: string | number }
   | { type: "external"; label: string; url: string };
 
 function AttentionActionButton({
   action,
   onOpenService,
-  onOpenConnector
+  onOpenConnector,
+  onOpenWorkCard,
+  onOpenNotification
 }: {
   action: AttentionAction;
   onOpenService: (serviceId: string | number) => void;
   onOpenConnector: (target: ConnectorDrillTarget) => void;
+  onOpenWorkCard: (workCardId: string | number) => void;
+  onOpenNotification: (notificationId: string | number) => void;
 }) {
   if (action.type === "external") {
     return (
@@ -459,7 +510,11 @@ function AttentionActionButton({
       onClick={() =>
         action.type === "service"
           ? onOpenService(action.serviceId)
-          : onOpenConnector(action.target)
+          : action.type === "work-card"
+            ? onOpenWorkCard(action.workCardId)
+            : action.type === "notification"
+              ? onOpenNotification(action.notificationId)
+              : onOpenConnector(action.target)
       }
     >
       {action.label}
@@ -480,6 +535,14 @@ function attentionAction(item: DashboardPriorityItem): AttentionAction {
       label: "Run detail",
       target: drillTarget(item, { runId: item.record_id })
     };
+  }
+
+  if (item.kind === "work_card" && item.record_id) {
+    return { type: "work-card", label: "Details", workCardId: item.record_id };
+  }
+
+  if (item.kind === "notification" && item.record_id) {
+    return { type: "notification", label: "Details", notificationId: item.record_id };
   }
 
   if (item.url) {
