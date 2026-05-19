@@ -7,7 +7,7 @@ import type { ApiClient } from "../../api/client";
 import { DataPanel } from "../../components/DataPanel";
 import { DataTable } from "../../components/DataTable";
 import { AuditSkeleton } from "../../components/LoadingState";
-import { DateCell, StatusBadge } from "../../components/tableCells";
+import { DateCell } from "../../components/tableCells";
 import { ViewFrame } from "../../components/ViewFrame";
 import { useAsyncData } from "../../hooks/useAsyncData";
 import { useRefresh } from "../../hooks/useRefresh";
@@ -88,11 +88,11 @@ export function AuditView({ client }: { client: ApiClient }) {
     const user = userById.get(Number(value));
 
     return (
-      <Stack gap={0}>
-        <Text size="sm" fw={700}>
+      <Stack gap={0} className="auditActorCell">
+        <Text size="sm" fw={700} className="auditActorName" title={user?.username || `User ${String(value)}`}>
           {user?.username || `User ${String(value)}`}
         </Text>
-        <Text size="xs" c="dimmed">
+        <Text size="xs" c="dimmed" className="auditActorId">
           #{String(value)}
         </Text>
       </Stack>
@@ -206,7 +206,7 @@ export function AuditView({ client }: { client: ApiClient }) {
                 columns={[
                   ["created_at", "Created", DateCell],
                   ["actor_user_id", "Actor", ActorCell],
-                  ["action", "Action", StatusBadge],
+                  ["action", "Action", AuditActionCell],
                   ["resource_type", "Resource", AuditCompactCell],
                   ["resource_id", "ID", AuditCompactCell],
                   ["metadata", "Metadata", AuditMetadataCell]
@@ -252,6 +252,20 @@ function AuditCompactCell({ value }: { value?: unknown }) {
   return (
     <Text size="sm" className="auditCompactCell" title={String(value)}>
       {String(value)}
+    </Text>
+  );
+}
+
+function AuditActionCell({ value }: { value?: unknown }) {
+  if (!value) {
+    return null;
+  }
+
+  const action = String(value);
+
+  return (
+    <Text size="sm" fw={700} className="auditActionCell" title={action}>
+      {action.replaceAll("_", " ")}
     </Text>
   );
 }

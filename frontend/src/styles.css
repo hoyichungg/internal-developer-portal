@@ -723,47 +723,74 @@ body {
 }
 
 .auditLogTableFrame {
+  width: 100%;
+  max-width: 100%;
   min-width: 0;
   overflow-x: auto;
   overflow-y: visible;
 }
 
+.auditLogTableFrame :where(.mantine-ScrollArea-root) {
+  max-width: 100%;
+  min-width: 0;
+}
+
 .auditLogTableFrame :where(table) {
-  min-width: 960px;
+  width: 100%;
+  min-width: 880px;
   table-layout: fixed;
 }
 
+.auditLogTableFrame :where(th, td) {
+  overflow: hidden;
+  vertical-align: top;
+}
+
 .auditLogTableFrame :where(th:nth-child(1), td:nth-child(1)) {
-  width: 180px;
+  width: 172px;
 }
 
 .auditLogTableFrame :where(th:nth-child(2), td:nth-child(2)) {
-  width: 68px;
+  width: 136px;
 }
 
 .auditLogTableFrame :where(th:nth-child(3), td:nth-child(3)) {
-  width: 120px;
+  width: 156px;
 }
 
 .auditLogTableFrame :where(th:nth-child(4), td:nth-child(4)) {
-  width: 140px;
+  width: 124px;
 }
 
 .auditLogTableFrame :where(th:nth-child(5), td:nth-child(5)) {
-  width: 210px;
+  width: 96px;
 }
 
+.auditActorCell,
+.auditActionCell,
+.auditCompactCell {
+  max-width: 100%;
+  min-width: 0;
+}
+
+.auditActorName,
+.auditActorId,
+.auditActionCell,
 .auditCompactCell {
   display: block;
-  max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
+.auditCompactCell {
+  font-family: "Cascadia Mono", "SFMono-Regular", Consolas, monospace;
+}
+
 .metadataSummaryCell {
-  min-width: 220px;
-  max-width: 320px;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .metadataSummary {
@@ -773,7 +800,7 @@ body {
 
 .metadataKv {
   display: grid;
-  grid-template-columns: minmax(72px, 36%) minmax(0, 1fr);
+  grid-template-columns: minmax(64px, 34%) minmax(0, 1fr);
   gap: 8px;
   min-width: 0;
 }
@@ -985,11 +1012,6 @@ body {
 
   .serviceCardFooter .quickLinks {
     justify-content: flex-start;
-  }
-
-  .metadataSummaryCell {
-    min-width: 220px;
-    max-width: 72vw;
   }
 
 }
