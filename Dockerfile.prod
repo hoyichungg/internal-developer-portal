@@ -1,0 +1,54 @@
+FROM node:20-bookworm AS frontend-build
+
+WORKDIR /app/frontend
+
+RUN corepack enable
+
+COPY frontend/package.json frontend/pnpm-lock.yaml ./
+RUN pnpm install --frozen-lockfile
+
+COPY frontend ./
+RUN pnpm build
+
+FROM rust:1.81-bookworm AS rust-build
+
+WORKDIR /app
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates libpq-dev pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY Cargo.toml Cargo.lock ./
+COPY src ./src
+
+RUN cargo build --release --bin server --bin worker --bin cli
+RUN cargo install diesel_cli --version 2.1.1 --locked --no-default-features --features postgres --root /app/diesel-cli
+
+FROM debian:bookworm-slim AS runtime
+
+WORKDIR /app
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl libpq5 \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --system portal \
+    && useradd --system --gid portal --home-dir /app portal
+
+COPY --from=rust-build /app/target/release/server /app/server
+COPY --from=rust-build /app/target/release/worker /app/worker
+COPY --from=rust-build /app/target/release/cli /app/cli
+COPY --from=rust-build /app/diesel-cli/bin/diesel /usr/local/bin/diesel
+COPY --from=frontend-build /app/frontend/dist /app/frontend/dist
+COPY migrations ./migrations
+
+RUN chown -R portal:portal /app
+
+USER portal
+
+ENV APP_ENV=production \
+    ROCKET_ADDRESS=0.0.0.0 \
+    ROCKET_PORT=8000
+
+EXPOSE 8000
+
+CMD ["/app/server"]

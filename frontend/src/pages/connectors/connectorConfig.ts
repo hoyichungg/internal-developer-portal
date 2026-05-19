@@ -76,6 +76,33 @@ export const connectorTemplates: ConnectorTemplate[] = [
     }
   },
   {
+    id: "microsoft_graph_calendar",
+    label: "Microsoft Graph calendar",
+    target: "notifications",
+    schedule_cron: "@every 15m",
+    config: {
+      adapter: "microsoft_graph_calendar",
+      user_id: "me",
+      access_token: "",
+      time_zone: "UTC",
+      lookahead_hours: 24,
+      top: 25,
+      timeout_seconds: 15
+    },
+    sample_payload: {
+      items: [
+        {
+          external_id: "evt-standup",
+          title: "Calendar: Platform standup",
+          body: "Organizer: Taylor Lin | Location: Teams | Starts: 2026-05-19T09:30:00 UTC",
+          severity: "info",
+          is_read: false,
+          url: "https://outlook.office.com/calendar/item/evt-standup"
+        }
+      ]
+    }
+  },
+  {
     id: "calendar_notifications",
     label: "Calendar notifications",
     target: "notifications",

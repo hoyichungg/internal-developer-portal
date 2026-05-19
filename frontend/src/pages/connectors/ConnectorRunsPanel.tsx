@@ -63,6 +63,7 @@ export function ConnectorRunsPanel({
                   <Button
                     size="compact-sm"
                     variant="subtle"
+                    aria-label={`Retry run #${row.id}`}
                     leftSection={<IconRefresh size={14} />}
                     loading={retryingRunId === row.id}
                     onClick={() => onRetryRun(row)}
@@ -81,6 +82,7 @@ export function ConnectorRunsPanel({
                   <Button
                     size="compact-sm"
                     variant={runDetail?.run?.id === runId ? "light" : "subtle"}
+                    aria-label={`Inspect run #${runId}`}
                     rightSection={<IconArrowRight size={14} />}
                     loading={runDetailLoading && runDetail?.run?.id === runId}
                     onClick={() => onSelectRun(runId)}
@@ -199,6 +201,7 @@ function RunDetail({
                   <Button
                     size="compact-sm"
                     variant="subtle"
+                    aria-label={`Open service #${recordId} from run item`}
                     rightSection={<IconArrowRight size={14} />}
                     onClick={() => onOpenService(recordId)}
                   >
@@ -233,6 +236,7 @@ function RunDetail({
                   <Button
                     size="compact-sm"
                     variant="subtle"
+                    aria-label={`Open service #${serviceId} from health check`}
                     rightSection={<IconArrowRight size={14} />}
                     onClick={() => onOpenService(serviceId)}
                   >

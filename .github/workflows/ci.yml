@@ -66,6 +66,9 @@ jobs:
           pnpm --dir frontend install --frozen-lockfile
           pnpm --dir frontend build
 
+      - name: Run frontend regression tests
+        run: pnpm --dir frontend test:run
+
       - name: Check formatting
         run: cargo fmt --check
 

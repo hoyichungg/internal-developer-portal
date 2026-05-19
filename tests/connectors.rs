@@ -798,6 +798,219 @@ fn test_sample_notification_adapters_import_product_core_feeds() {
 }
 
 #[test]
+fn test_microsoft_graph_calendar_adapter_fetches_and_normalizes_events() {
+    let client = Client::new();
+    let auth = common::create_admin_auth(&client);
+    let source = common::unique_name("graph_calendar_adapter");
+    let mock = start_monitoring_mock(json!({
+        "value": [{
+            "id": "evt-standup",
+            "subject": "Platform standup",
+            "bodyPreview": "Daily sync with platform owners.",
+            "importance": "normal",
+            "webLink": "https://outlook.office.test/calendar/item/evt-standup",
+            "organizer": {
+                "emailAddress": {
+                    "name": "Taylor Lin",
+                    "address": "taylor@example.test"
+                }
+            },
+            "location": {
+                "displayName": "Teams"
+            },
+            "start": {
+                "dateTime": "2026-05-19T09:30:00.0000000",
+                "timeZone": "Taipei Standard Time"
+            },
+            "end": {
+                "dateTime": "2026-05-19T10:00:00.0000000",
+                "timeZone": "Taipei Standard Time"
+            }
+        }, {
+            "id": "evt-incident-review",
+            "subject": "Incident review",
+            "bodyPreview": "Production incident follow-up.",
+            "importance": "high",
+            "organizer": {
+                "emailAddress": {
+                    "name": "Ops Lead",
+                    "address": "ops@example.test"
+                }
+            },
+            "location": {
+                "displayName": "War room"
+            },
+            "start": {
+                "dateTime": "2026-05-19T14:00:00",
+                "timeZone": "Taipei Standard Time"
+            },
+            "end": {
+                "dateTime": "2026-05-19T14:45:00",
+                "timeZone": "Taipei Standard Time"
+            },
+            "onlineMeeting": {
+                "joinUrl": "https://teams.example.test/join/incident-review"
+            }
+        }]
+    }));
+
+    let response = client
+        .post(format!("{}/connectors", common::APP_HOST))
+        .bearer_auth(&auth.token)
+        .json(&json!({
+            "source": source.clone(),
+            "kind": "microsoft_graph_calendar",
+            "display_name": "Microsoft Graph Calendar",
+            "status": "active"
+        }))
+        .send()
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    let adapter_config = json!({
+        "adapter": "microsoft_graph_calendar",
+        "calendar_view_url": format!("{}/me/calendarView", mock.base_url),
+        "start_at": "2026-05-19T00:00:00Z",
+        "end_at": "2026-05-20T00:00:00Z",
+        "access_token": "graph-calendar-token",
+        "time_zone": "Taipei Standard Time",
+        "top": 10,
+        "timeout_seconds": 5
+    })
+    .to_string();
+
+    let response = client
+        .put(format!("{}/connectors/{}/config", common::APP_HOST, source))
+        .bearer_auth(&auth.token)
+        .json(&json!({
+            "target": "notifications",
+            "enabled": true,
+            "schedule_cron": null,
+            "config": adapter_config,
+            "sample_payload": "{\"items\":[]}"
+        }))
+        .send()
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let config_response = response.json::<Value>().unwrap()["data"].clone();
+    assert!(
+        !config_response["config"]
+            .as_str()
+            .unwrap()
+            .contains("graph-calendar-token"),
+        "connector config response must not expose Microsoft Graph access token"
+    );
+    assert!(
+        config_response["config"]
+            .as_str()
+            .unwrap()
+            .contains("***redacted***"),
+        "connector config response should redact Microsoft Graph secrets"
+    );
+
+    let response = client
+        .post(format!("{}/connectors/{}/runs", common::APP_HOST, source))
+        .bearer_auth(&auth.token)
+        .json(&json!({}))
+        .send()
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    let execution = response.json::<Value>().unwrap()["data"].clone();
+    assert_eq!(execution["source"].as_str().unwrap(), source);
+    assert_eq!(execution["target"], "notifications");
+    assert_eq!(execution["imported"], 2, "execution: {execution:#}");
+    assert_eq!(execution["failed"], 0);
+    assert_eq!(execution["run"]["status"], "success");
+
+    let notifications = execution["data"].as_array().unwrap();
+    let standup = notifications
+        .iter()
+        .find(|item| item["external_id"].as_str() == Some("evt-standup"))
+        .cloned()
+        .expect("Graph calendar adapter should import standup event");
+    let incident = notifications
+        .iter()
+        .find(|item| item["external_id"].as_str() == Some("evt-incident-review"))
+        .cloned()
+        .expect("Graph calendar adapter should import incident review event");
+
+    assert_eq!(standup["title"], "Calendar: Platform standup");
+    assert_eq!(standup["severity"], "info");
+    assert_eq!(
+        standup["url"],
+        "https://outlook.office.test/calendar/item/evt-standup"
+    );
+    assert!(standup["body"]
+        .as_str()
+        .unwrap()
+        .contains("Organizer: Taylor Lin"));
+    assert!(standup["body"]
+        .as_str()
+        .unwrap()
+        .contains("Starts: 2026-05-19T09:30:00 Taipei Standard Time"));
+    assert_eq!(incident["title"], "Calendar: Incident review");
+    assert_eq!(incident["severity"], "warning");
+    assert_eq!(
+        incident["url"],
+        "https://teams.example.test/join/incident-review"
+    );
+
+    let dashboard = client
+        .get(format!("{}/dashboard?source={}", common::APP_HOST, source))
+        .bearer_auth(&auth.token)
+        .send()
+        .unwrap()
+        .json::<Value>()
+        .unwrap()["data"]
+        .clone();
+    assert_contains_id(&dashboard["notifications"], standup["id"].as_i64().unwrap());
+    assert_contains_id(
+        &dashboard["notifications"],
+        incident["id"].as_i64().unwrap(),
+    );
+
+    let requests = mock.join();
+    assert_eq!(requests.len(), 1);
+    let request = &requests[0];
+    assert!(
+        request.starts_with("GET /me/calendarView?"),
+        "adapter should call calendarView endpoint: {requests:?}"
+    );
+    assert!(
+        request.contains("startDateTime=2026-05-19T00%3A00%3A00Z"),
+        "adapter should include the configured startDateTime: {requests:?}"
+    );
+    assert!(
+        request.contains("endDateTime=2026-05-20T00%3A00%3A00Z"),
+        "adapter should include the configured endDateTime: {requests:?}"
+    );
+    assert!(
+        request.contains("%24top=10"),
+        "adapter should apply the configured page size: {requests:?}"
+    );
+    let lower_request = request.to_ascii_lowercase();
+    assert!(
+        lower_request.contains("authorization: bearer graph-calendar-token"),
+        "adapter should send Microsoft Graph bearer token: {requests:?}"
+    );
+    assert!(
+        lower_request.contains("prefer: outlook.timezone=\"taipei standard time\""),
+        "adapter should send Microsoft Graph timezone preference: {requests:?}"
+    );
+
+    let response = client
+        .delete(format!("{}/connectors/{}", common::APP_HOST, source))
+        .bearer_auth(&auth.token)
+        .send()
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    common::delete_test_notification(&client, standup);
+    common::delete_test_notification(&client, incident);
+    common::delete_test_user(auth.user_id);
+}
+
+#[test]
 fn test_azure_devops_adapter_fetches_and_normalizes_work_items() {
     let client = Client::new();
     let auth = common::create_admin_auth(&client);

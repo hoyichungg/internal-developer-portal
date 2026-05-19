@@ -1,5 +1,7 @@
 use crate::api::{created, ok, ApiError, ApiResult, CreatedApiResult};
-use crate::auth::{require_maintainer_write_access, AuthenticatedUser};
+use crate::auth::{
+    can_view_maintainer_members, require_maintainer_write_access, AuthenticatedUser,
+};
 use crate::models::{
     Connector, ConnectorRun, Maintainer, MaintainerMember, NewService, Package, Service,
 };
@@ -74,7 +76,7 @@ pub async fn view_service(
 #[rocket::get("/services/<id>/overview")]
 pub async fn service_overview(
     mut db: Connection<DbConn>,
-    _auth: AuthenticatedUser,
+    auth: AuthenticatedUser,
     id: i32,
 ) -> ApiResult<ServiceOverview> {
     let service = ServiceRepository::find(&mut db, id).await?;
@@ -82,8 +84,11 @@ pub async fn service_overview(
     let source = service.source.clone();
 
     let maintainer = MaintainerRepository::find(&mut db, maintainer_id).await?;
-    let maintainer_members =
-        MaintainerMemberRepository::find_by_maintainer(&mut db, maintainer_id).await?;
+    let maintainer_members = if can_view_maintainer_members(&mut db, &auth, maintainer_id).await? {
+        MaintainerMemberRepository::find_by_maintainer(&mut db, maintainer_id).await?
+    } else {
+        Vec::new()
+    };
     let packages =
         PackageRepository::find_recent_for_maintainer(&mut db, 20, Some(maintainer_id)).await?;
     let connector = match ConnectorRepository::find_by_source(&mut db, &source).await {

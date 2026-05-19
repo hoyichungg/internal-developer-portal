@@ -319,6 +319,7 @@ try {
     if ($Mode -eq "Fast") {
         Invoke-CommandStep -Name "Rust format check" -FilePath "cargo" -Arguments @("fmt", "--check")
         Invoke-CommandStep -Name "Frontend build" -FilePath "pnpm" -Arguments @("--dir", "frontend", "build")
+        Invoke-CommandStep -Name "Frontend regression tests" -FilePath "pnpm" -Arguments @("--dir", "frontend", "test:run")
         Invoke-CommandStep -Name "Rust Clippy" -FilePath "cargo" -Arguments @("clippy", "--all-targets", "--", "-D", "warnings")
         Invoke-CommandStep `
             -Name "Rust library tests" `
@@ -349,6 +350,7 @@ try {
 
         Invoke-CommandStep -Name "Rust format check" -FilePath "cargo" -Arguments @("fmt", "--check")
         Invoke-CommandStep -Name "Frontend build" -FilePath "pnpm" -Arguments @("--dir", "frontend", "build")
+        Invoke-CommandStep -Name "Frontend regression tests" -FilePath "pnpm" -Arguments @("--dir", "frontend", "test:run")
         Invoke-CommandStep -Name "Rust Clippy" -FilePath "cargo" -Arguments @("clippy", "--all-targets", "--", "-D", "warnings")
         Build-IsolatedServices
         $isolatedProcesses = @(Start-IsolatedServices)

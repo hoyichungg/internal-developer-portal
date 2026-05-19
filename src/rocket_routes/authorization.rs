@@ -1,6 +1,6 @@
 use crate::{
     api::{ok, ApiError, ApiResult},
-    auth::AuthenticatedUser,
+    auth::{require_user_directory_access, AuthenticatedUser},
     config::AppConfig,
     models::{
         ConnectorRun, Maintainer, MaintenanceRun, Notification, Package, Service, User, UserRole,
@@ -168,8 +168,9 @@ pub async fn me(auth: AuthenticatedUser) -> ApiResult<MeResponse> {
 #[rocket::get("/users")]
 pub async fn users(
     mut db: Connection<DbConn>,
-    _auth: AuthenticatedUser,
+    auth: AuthenticatedUser,
 ) -> ApiResult<Vec<UserSummary>> {
+    require_user_directory_access(&mut db, &auth).await?;
     let mut users = UserRepository::find_with_roles(&mut db)
         .await?
         .into_iter()

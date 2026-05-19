@@ -454,6 +454,7 @@ function AttentionQueue({
 
             <AttentionActionButton
               action={action}
+              itemTitle={item.title}
               onOpenService={onOpenService}
               onOpenConnector={onOpenConnector}
               onOpenWorkCard={onOpenWorkCard}
@@ -475,12 +476,14 @@ type AttentionAction =
 
 function AttentionActionButton({
   action,
+  itemTitle,
   onOpenService,
   onOpenConnector,
   onOpenWorkCard,
   onOpenNotification
 }: {
   action: AttentionAction;
+  itemTitle: string;
   onOpenService: (serviceId: string | number) => void;
   onOpenConnector: (target: ConnectorDrillTarget) => void;
   onOpenWorkCard: (workCardId: string | number) => void;
@@ -495,6 +498,7 @@ function AttentionActionButton({
         rel="noreferrer"
         size="compact-sm"
         variant="subtle"
+        aria-label={`${action.label} ${itemTitle}`}
         rightSection={<IconExternalLink size={14} />}
       >
         {action.label}
@@ -506,6 +510,7 @@ function AttentionActionButton({
     <Button
       size="compact-sm"
       variant="subtle"
+      aria-label={`${action.label} ${itemTitle}`}
       rightSection={<IconArrowRight size={14} />}
       onClick={() =>
         action.type === "service"

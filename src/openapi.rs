@@ -276,8 +276,9 @@ fn me_doc() {}
     operation_id = "listUsers",
     security(("bearer_auth" = [])),
     responses(
-        (status = 200, description = "Authenticated user directory for membership assignment. Password hashes are never returned.", body = ApiResponse<Vec<UserSummary>>),
-        (status = 401, description = "Authentication is required.", body = ApiErrorResponse)
+        (status = 200, description = "Admin and maintainer-owner user directory for membership assignment. Password hashes are never returned.", body = ApiResponse<Vec<UserSummary>>),
+        (status = 401, description = "Authentication is required.", body = ApiErrorResponse),
+        (status = 403, description = "Admin or maintainer owner access is required.", body = ApiErrorResponse)
     )
 )]
 fn list_users_doc() {}

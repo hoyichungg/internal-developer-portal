@@ -54,6 +54,39 @@ username: admin
 password: admin123
 ```
 
+## Production Compose
+
+The default `Dockerfile` and `docker-compose.yml` are development-oriented:
+they run `cargo watch`, mount the source tree, seed demo data, and use local
+development credentials. Use the production files when you want a release-style
+container:
+
+```sh
+cp .env.production.example .env.production
+```
+
+Edit `.env.production` so `POSTGRES_PASSWORD`, `DATABASE_URL`,
+`CONNECTOR_SECRET_KEY`, and the optional seed admin credentials are real
+environment-specific secrets. Then build and start the production stack:
+
+```sh
+docker compose --env-file .env.production -f docker-compose.prod.yml up --build -d
+```
+
+The production image builds release binaries for `server`, `worker`, and `cli`,
+copies the built `frontend/dist` assets into the runtime image, runs as a
+non-root user, and uses `/app/server` instead of `cargo watch`. The production
+Compose file runs migrations as a one-shot `migrate` service and keeps the HTTP
+server and connector worker as separate long-running services.
+
+Create or update an initial admin account only when needed:
+
+```sh
+docker compose --env-file .env.production -f docker-compose.prod.yml --profile seed-admin run --rm seed-admin
+```
+
+The production stack does not seed demo data.
+
 ## Environment
 
 Copy `.env.example` to `.env` when running tools directly on the host. The
@@ -135,9 +168,10 @@ Before larger changes or commits, run the full workflow:
 powershell -ExecutionPolicy Bypass -File .\scripts\local-validate.ps1 -Mode Full
 ```
 
-See `docs/local-validation.md` for details. The CI workflow runs formatting,
-build checks, Clippy, Diesel migrations, a real Rocket server, and the
-integration tests against PostgreSQL 16.
+See `docs/local-validation.md` for details. The CI workflow runs frontend
+builds and regression tests, formatting, build checks, Clippy, Diesel
+migrations, a real Rocket server, and the integration tests against PostgreSQL
+16.
 
 ## API Shape
 
@@ -301,10 +335,14 @@ creates queued runs when `next_run_at` is due. Supported schedule values are
 `@every <n>s`, `@every <n>m`, `@every <n>h`, `@hourly`, and `@daily`.
 
 Connector configs can also select a real adapter. Supported adapters include
-`azure_devops` for the `work_cards` target and `monitoring` for the
-`service_health` target. When `config` contains `"adapter": "azure_devops"`,
-the worker calls Azure DevOps WIQL and work item batch APIs, then normalizes
-work items into the existing `work_cards` payload.
+`azure_devops` for the `work_cards` target, `monitoring` for the
+`service_health` target, and `microsoft_graph_calendar` for the `notifications`
+target. When `config` contains `"adapter": "azure_devops"`, the worker calls
+Azure DevOps WIQL and work item batch APIs, then normalizes work items into the
+existing `work_cards` payload. When `config` contains
+`"adapter": "microsoft_graph_calendar"`, the worker calls Microsoft Graph
+Calendar View for the configured time window and normalizes Outlook events into
+morning homepage notifications.
 For product walkthroughs and local development, three notification adapters are
 available without external credentials: `calendar_sample`, `outlook_mail_sample`,
 and `erp_messages_sample`. These target `notifications` and normalize sample
@@ -353,6 +391,30 @@ The monitoring response can be `{ "items": [...] }`, `{ "services": [...] }`,
 or a top-level array. Items are normalized into service health records using
 common fields such as `id`, `name`, `status`, `health`, `summary`,
 `dashboard_url`, `repository_url`, and `runbook_url`.
+
+Microsoft Graph Calendar adapter config:
+
+```json
+{
+  "adapter": "microsoft_graph_calendar",
+  "user_id": "me",
+  "access_token": "...",
+  "time_zone": "Taipei Standard Time",
+  "lookahead_hours": 24,
+  "top": 25,
+  "timeout_seconds": 15
+}
+```
+
+By default the adapter calls
+`https://graph.microsoft.com/v1.0/me/calendarView`. Set `user_id` to a user
+principal name to call `/users/<user_id>/calendarView`, or set
+`calendar_view_url` for a custom proxy or mock server. `start_at` and `end_at`
+can be provided explicitly; otherwise the adapter imports the next
+`lookahead_hours` hours from the current time. Events are normalized into
+notification records with `Calendar: ...` titles, organizer/location/time
+details, importance-derived severity, and Outlook or Teams join links when
+available.
 
 Sample notification adapter configs:
 

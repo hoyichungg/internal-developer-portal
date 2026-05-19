@@ -199,12 +199,12 @@ The project already has:
 - Audit logs.
 - Azure DevOps work card adapter.
 - Generic monitoring service health adapter.
+- Microsoft Graph Calendar adapter for Outlook calendar events.
 - Service health check history for homepage trend and incident summaries.
 - Frontend dashboard, catalog, connectors, audit, and service overview views.
 
 Future improvements can include:
 
-- Calendar connector.
 - Outlook mail connector.
 - ERP private message connector.
 - More complete home page aggregation.

@@ -50,6 +50,43 @@ pub async fn require_maintainer_owner_access(
     require_maintainer_member_role(db, auth, maintainer_id, &["owner"]).await
 }
 
+pub async fn require_user_directory_access(
+    db: &mut Connection<DbConn>,
+    auth: &AuthenticatedUser,
+) -> Result<(), ApiError> {
+    if auth.is_admin() {
+        return Ok(());
+    }
+
+    if MaintainerMemberRepository::find_by_user(db, auth.user.id)
+        .await?
+        .iter()
+        .any(|member| member.role == "owner")
+    {
+        Ok(())
+    } else {
+        Err(ApiError::Forbidden)
+    }
+}
+
+pub async fn can_view_maintainer_members(
+    db: &mut Connection<DbConn>,
+    auth: &AuthenticatedUser,
+    maintainer_id: i32,
+) -> Result<bool, ApiError> {
+    if auth.is_admin() {
+        return Ok(true);
+    }
+
+    match MaintainerMemberRepository::find_by_maintainer_and_user(db, maintainer_id, auth.user.id)
+        .await
+    {
+        Ok(_) => Ok(true),
+        Err(diesel::result::Error::NotFound) => Ok(false),
+        Err(error) => Err(error.into()),
+    }
+}
+
 async fn require_maintainer_member_role(
     db: &mut Connection<DbConn>,
     auth: &AuthenticatedUser,

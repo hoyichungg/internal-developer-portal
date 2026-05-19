@@ -19,6 +19,7 @@ Fast mode runs:
 ```text
 cargo fmt --check
 pnpm --dir frontend build
+pnpm --dir frontend test:run
 cargo clippy --all-targets -- -D warnings
 cargo test --lib
 ```
@@ -40,7 +41,7 @@ Full mode:
 2. Stops them so Cargo can update `target\debug`.
 3. Stops running Docker Compose `app` / `worker` services so an older container
    cannot claim port `8000` while validation is running.
-4. Runs formatting, frontend build, and Clippy.
+4. Runs formatting, frontend build, frontend regression tests, and Clippy.
 5. Builds server and worker into `target\local-services`.
 6. Starts those isolated binaries for integration tests.
 7. Runs `cargo test`.
