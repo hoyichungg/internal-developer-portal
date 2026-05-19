@@ -5,7 +5,7 @@ use serde_json::Value;
 
 use crate::api::ApiError;
 use crate::connector_adapters::fetch_connector_payload;
-use crate::crypto::{decrypt_connector_config, sanitized_json_snapshot};
+use crate::crypto::{decrypt_connector_config, encrypt_connector_config, sanitized_json_snapshot};
 use crate::models::{
     ConnectorRun, ConnectorRunStateUpdate, NewConnectorRun, NewConnectorRunItem,
     NewConnectorRunItemError, NewNotification, NewService, NewWorkCard,
@@ -66,8 +66,20 @@ async fn load_payload_for_claimed_run(
         .map_err(|error| validation_error_dynamic("config", error))?;
 
     match fetch_connector_payload(&run.target, &config_json).await {
-        Ok(Some(payload)) => Ok(payload),
-        Ok(None) => Ok(parse_json_payload(&config.sample_payload)),
+        Ok(adapter_result) => {
+            if let Some(updated_config) = adapter_result.updated_config {
+                let encrypted_config = encrypt_connector_config(&updated_config)
+                    .map_err(|error| validation_error_dynamic("config", error))?;
+                ConnectorConfigRepository::update_config(db, &run.source, encrypted_config)
+                    .await
+                    .map_err(ApiError::from)?;
+            }
+
+            match adapter_result.payload {
+                Some(payload) => Ok(payload),
+                None => Ok(parse_json_payload(&config.sample_payload)),
+            }
+        }
         Err(error) => Err(validation_error_dynamic("config", error)),
     }
 }

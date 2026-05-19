@@ -18,8 +18,9 @@ use crate::rocket_routes::authorization::{
 use crate::rocket_routes::connectors::{
     ConnectorConfigResponse, ConnectorImportError, ConnectorOperationsResponse, ConnectorRunDetail,
     ConnectorRunExecutionResponse, ConnectorWorkerStatus, ManualConnectorRunRequest,
-    NotificationImportItem, NotificationImportRequest, ServiceHealthImportItem,
-    ServiceHealthImportRequest, WorkCardImportItem, WorkCardImportRequest,
+    MicrosoftOAuthAuthorizeRequest, MicrosoftOAuthAuthorizeResponse, MicrosoftOAuthCallbackRequest,
+    MicrosoftOAuthCallbackResponse, NotificationImportItem, NotificationImportRequest,
+    ServiceHealthImportItem, ServiceHealthImportRequest, WorkCardImportItem, WorkCardImportRequest,
 };
 use crate::rocket_routes::dashboard::{
     DashboardResponse, DashboardScope, DashboardSummary, ServiceHealthHistory,
@@ -56,6 +57,8 @@ use crate::validation::FieldViolation;
         delete_connector_doc,
         get_connector_config_doc,
         upsert_connector_config_doc,
+        start_microsoft_oauth_doc,
+        finish_microsoft_oauth_doc,
         list_connector_runs_doc,
         get_connector_run_doc,
         retry_connector_run_doc,
@@ -110,6 +113,8 @@ use crate::validation::FieldViolation;
         ApiResponse<MaintainerMember>,
         ApiResponse<MeOverviewResponse>,
         ApiResponse<MeResponse>,
+        ApiResponse<MicrosoftOAuthAuthorizeResponse>,
+        ApiResponse<MicrosoftOAuthCallbackResponse>,
         ApiResponse<Notification>,
         ApiResponse<Package>,
         ApiResponse<Service>,
@@ -151,6 +156,10 @@ use crate::validation::FieldViolation;
         ManualConnectorRunRequest,
         MeOverviewResponse,
         MeResponse,
+        MicrosoftOAuthAuthorizeRequest,
+        MicrosoftOAuthAuthorizeResponse,
+        MicrosoftOAuthCallbackRequest,
+        MicrosoftOAuthCallbackResponse,
         NewConnector,
         NewMaintainer,
         NewNotification,
@@ -428,6 +437,39 @@ fn get_connector_config_doc() {}
     )
 )]
 fn upsert_connector_config_doc() {}
+
+#[utoipa::path(
+    post,
+    path = "/connectors/{source}/oauth/microsoft/authorize",
+    tag = "Connectors",
+    operation_id = "startMicrosoftOAuth",
+    security(("bearer_auth" = [])),
+    params(("source" = String, Path, description = "Connector source key.")),
+    request_body(content = MicrosoftOAuthAuthorizeRequest, description = "Redirect URI for Microsoft identity platform authorization-code flow.", content_type = "application/json"),
+    responses(
+        (status = 200, description = "Authorization URL and state for Microsoft OAuth connect.", body = ApiResponse<MicrosoftOAuthAuthorizeResponse>),
+        (status = 400, description = "Config is missing OAuth fields such as client_id or redirect_uri is invalid.", body = ApiErrorResponse),
+        (status = 403, description = "Admin role is required.", body = ApiErrorResponse),
+        (status = 404, description = "Connector or config was not found.", body = ApiErrorResponse)
+    )
+)]
+fn start_microsoft_oauth_doc() {}
+
+#[utoipa::path(
+    post,
+    path = "/connectors/oauth/microsoft/callback",
+    tag = "Connectors",
+    operation_id = "finishMicrosoftOAuth",
+    security(("bearer_auth" = [])),
+    request_body(content = MicrosoftOAuthCallbackRequest, description = "Authorization-code callback payload from the frontend. The backend validates state, exchanges code for tokens, and stores refreshed Graph credentials.", content_type = "application/json"),
+    responses(
+        (status = 200, description = "Connector config updated with encrypted Microsoft Graph access and refresh tokens.", body = ApiResponse<MicrosoftOAuthCallbackResponse>),
+        (status = 400, description = "State, redirect URI, provider error, or token exchange failed.", body = ApiErrorResponse),
+        (status = 403, description = "Admin role is required.", body = ApiErrorResponse),
+        (status = 404, description = "Connector or config was not found.", body = ApiErrorResponse)
+    )
+)]
+fn finish_microsoft_oauth_doc() {}
 
 #[utoipa::path(
     get,

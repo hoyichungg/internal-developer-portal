@@ -1,9 +1,11 @@
+mod oauth;
 mod routes;
 pub(crate) mod runtime;
 pub(crate) mod shared;
 pub(crate) mod types;
 pub(crate) mod worker;
 
+pub use oauth::{finish_microsoft_oauth, microsoft_oauth_callback_page, start_microsoft_oauth};
 pub use routes::{
     create_connector, delete_connector, get_connector_config, get_connector_operations,
     get_connector_run, get_connector_runs, get_connectors, import_notifications,
@@ -13,8 +15,9 @@ pub use routes::{
 pub use types::{
     ConnectorConfigResponse, ConnectorImportError, ConnectorOperationsResponse, ConnectorRunDetail,
     ConnectorRunExecutionResponse, ConnectorWorkerStatus, ManualConnectorRunRequest,
-    NotificationImportItem, NotificationImportRequest, ServiceHealthImportItem,
-    ServiceHealthImportRequest, WorkCardImportItem, WorkCardImportRequest,
+    MicrosoftOAuthAuthorizeRequest, MicrosoftOAuthAuthorizeResponse, MicrosoftOAuthCallbackRequest,
+    MicrosoftOAuthCallbackResponse, NotificationImportItem, NotificationImportRequest,
+    ServiceHealthImportItem, ServiceHealthImportRequest, WorkCardImportItem, WorkCardImportRequest,
 };
 pub(crate) use worker::connector_worker_stale_after_seconds;
 pub use worker::{run_connector_worker_forever, spawn_connector_background_worker};

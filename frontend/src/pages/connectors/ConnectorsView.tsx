@@ -12,6 +12,7 @@ import type {
   ConnectorConfigForm,
   ConnectorConfigResponse,
   ConnectorDrillTarget,
+  MicrosoftOAuthAuthorizeResponse,
   ConnectorOperationsResponse,
   ConnectorRun,
   ConnectorRunDetail,
@@ -76,6 +77,7 @@ export function ConnectorsView({
   const [creating, setCreating] = useState(false);
   const [saving, setSaving] = useState(false);
   const [runLoading, setRunLoading] = useState(false);
+  const [oauthLoading, setOauthLoading] = useState(false);
   const [retryingRunId, setRetryingRunId] = useState<string | number | null>(null);
   const [runDetailLoading, setRunDetailLoading] = useState(false);
   const [createOpened, createModal] = useDisclosure(false);
@@ -307,6 +309,40 @@ export function ConnectorsView({
     }
   }
 
+  async function saveSelectedConfig(selectedConnector: Connector) {
+    JSON.parse(config.config);
+    JSON.parse(config.sample_payload);
+    await client.put<ConnectorConfigResponse>(
+      `/connectors/${encodeURIComponent(selectedConnector.source)}/config`,
+      {
+        target: config.target,
+        enabled: config.enabled,
+        schedule_cron: config.schedule_cron || null,
+        config: config.config,
+        sample_payload: config.sample_payload
+      }
+    );
+  }
+
+  async function connectMicrosoft() {
+    if (!selected) {
+      return;
+    }
+    const source = selected.source;
+    setOauthLoading(true);
+    try {
+      await saveSelectedConfig(selected);
+      const response = await client.post<MicrosoftOAuthAuthorizeResponse>(
+        `/connectors/${encodeURIComponent(source)}/oauth/microsoft/authorize`,
+        { redirect_uri: microsoftOAuthRedirectUri() }
+      );
+      window.open(response.authorization_url, "_self", "noopener");
+    } catch (error) {
+      showError(error);
+      setOauthLoading(false);
+    }
+  }
+
   async function runConnector(mode: string) {
     if (!selected) {
       return;
@@ -419,8 +455,10 @@ export function ConnectorsView({
                 onConfigChange={setConfig}
                 onRun={runConnector}
                 onSave={saveConfig}
+                onConnectMicrosoft={connectMicrosoft}
                 onApplyTemplate={applyTemplate}
                 runLoading={runLoading}
+                oauthLoading={oauthLoading}
                 saving={saving}
               />
               <ConnectorRunsPanel
@@ -438,4 +476,8 @@ export function ConnectorsView({
       </Stack>
     </ViewFrame>
   );
+}
+
+function microsoftOAuthRedirectUri(): string {
+  return `${window.location.origin}/oauth/microsoft/callback`;
 }

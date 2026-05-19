@@ -74,6 +74,36 @@ pub struct ConnectorConfigResponse {
     pub last_scheduled_run_id: Option<i32>,
 }
 
+#[derive(Deserialize, ToSchema)]
+pub struct MicrosoftOAuthAuthorizeRequest {
+    pub redirect_uri: String,
+    pub prompt: Option<String>,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct MicrosoftOAuthAuthorizeResponse {
+    pub authorization_url: String,
+    pub state: String,
+    pub redirect_uri: String,
+    pub scope: String,
+    pub expires_at: NaiveDateTime,
+}
+
+#[derive(Deserialize, ToSchema)]
+pub struct MicrosoftOAuthCallbackRequest {
+    pub code: Option<String>,
+    pub state: String,
+    pub redirect_uri: String,
+    pub error: Option<String>,
+    pub error_description: Option<String>,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct MicrosoftOAuthCallbackResponse {
+    pub source: String,
+    pub config: ConnectorConfigResponse,
+}
+
 #[derive(Serialize, ToSchema)]
 pub struct ConnectorImportError {
     pub external_id: Option<String>,
@@ -87,6 +117,55 @@ pub struct ManualConnectorRunRequest {
     pub mode: String,
     pub target: Option<String>,
     pub payload: Option<Value>,
+}
+
+impl Validate for MicrosoftOAuthAuthorizeRequest {
+    fn validate(&self) -> Vec<FieldViolation> {
+        let mut errors = Vec::new();
+
+        crate::validation::required(&mut errors, "redirect_uri", &self.redirect_uri);
+        crate::validation::max_len(&mut errors, "redirect_uri", &self.redirect_uri, 512);
+        if !(self.redirect_uri.starts_with("http://") || self.redirect_uri.starts_with("https://"))
+        {
+            errors.push(FieldViolation::new(
+                "redirect_uri",
+                "must be an absolute HTTP URL",
+            ));
+        }
+        crate::validation::max_optional_len(&mut errors, "prompt", &self.prompt, 64);
+
+        errors
+    }
+}
+
+impl Validate for MicrosoftOAuthCallbackRequest {
+    fn validate(&self) -> Vec<FieldViolation> {
+        let mut errors = Vec::new();
+
+        crate::validation::required(&mut errors, "state", &self.state);
+        crate::validation::max_len(&mut errors, "state", &self.state, 1024);
+        crate::validation::required(&mut errors, "redirect_uri", &self.redirect_uri);
+        crate::validation::max_len(&mut errors, "redirect_uri", &self.redirect_uri, 512);
+        if !(self.redirect_uri.starts_with("http://") || self.redirect_uri.starts_with("https://"))
+        {
+            errors.push(FieldViolation::new(
+                "redirect_uri",
+                "must be an absolute HTTP URL",
+            ));
+        }
+        if let Some(code) = &self.code {
+            crate::validation::max_len(&mut errors, "code", code, 8192);
+        }
+        crate::validation::max_optional_len(&mut errors, "error", &self.error, 256);
+        crate::validation::max_optional_len(
+            &mut errors,
+            "error_description",
+            &self.error_description,
+            2048,
+        );
+
+        errors
+    }
 }
 
 impl Validate for ManualConnectorRunRequest {

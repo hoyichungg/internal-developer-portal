@@ -13,10 +13,15 @@ param(
 
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
+# Cargo and pnpm legitimately write progress to stderr. Keep native stderr from
+# becoming a terminating PowerShell error; Invoke-CommandStep still checks
+# $LASTEXITCODE for real command failures.
+$PSNativeCommandUseErrorActionPreference = $false
 
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $DefaultDatabaseUrl = "postgres://postgres:postgres@localhost:5432/app_db"
 $ServiceTargetDir = Join-Path $RepoRoot "target\local-services"
+$ClippyTargetDir = Join-Path $RepoRoot "target\validation-clippy"
 $LogDir = Join-Path $RepoRoot "target\local-validation-logs"
 
 if (-not $DatabaseUrl) {
@@ -320,7 +325,15 @@ try {
         Invoke-CommandStep -Name "Rust format check" -FilePath "cargo" -Arguments @("fmt", "--check")
         Invoke-CommandStep -Name "Frontend build" -FilePath "pnpm" -Arguments @("--dir", "frontend", "build")
         Invoke-CommandStep -Name "Frontend regression tests" -FilePath "pnpm" -Arguments @("--dir", "frontend", "test:run")
-        Invoke-CommandStep -Name "Rust Clippy" -FilePath "cargo" -Arguments @("clippy", "--all-targets", "--", "-D", "warnings")
+        Invoke-CommandStep `
+            -Name "Rust Clippy" `
+            -FilePath "cargo" `
+            -Arguments @("clippy", "--all-targets", "--", "-D", "warnings") `
+            -Environment @{
+                CARGO_TARGET_DIR = $ClippyTargetDir
+                DATABASE_URL = $DatabaseUrl
+                CONNECTOR_SECRET_KEY = $ConnectorSecretKey
+            }
         Invoke-CommandStep `
             -Name "Rust library tests" `
             -FilePath "cargo" `
@@ -351,7 +364,15 @@ try {
         Invoke-CommandStep -Name "Rust format check" -FilePath "cargo" -Arguments @("fmt", "--check")
         Invoke-CommandStep -Name "Frontend build" -FilePath "pnpm" -Arguments @("--dir", "frontend", "build")
         Invoke-CommandStep -Name "Frontend regression tests" -FilePath "pnpm" -Arguments @("--dir", "frontend", "test:run")
-        Invoke-CommandStep -Name "Rust Clippy" -FilePath "cargo" -Arguments @("clippy", "--all-targets", "--", "-D", "warnings")
+        Invoke-CommandStep `
+            -Name "Rust Clippy" `
+            -FilePath "cargo" `
+            -Arguments @("clippy", "--all-targets", "--", "-D", "warnings") `
+            -Environment @{
+                CARGO_TARGET_DIR = $ClippyTargetDir
+                DATABASE_URL = $DatabaseUrl
+                CONNECTOR_SECRET_KEY = $ConnectorSecretKey
+            }
         Build-IsolatedServices
         $isolatedProcesses = @(Start-IsolatedServices)
         Invoke-CommandStep `

@@ -1011,6 +1011,350 @@ fn test_microsoft_graph_calendar_adapter_fetches_and_normalizes_events() {
 }
 
 #[test]
+fn test_microsoft_graph_mail_adapter_refreshes_token_and_normalizes_messages() {
+    let client = Client::new();
+    let auth = common::create_admin_auth(&client);
+    let source = common::unique_name("graph_mail_adapter");
+    let mock = start_graph_mail_mock();
+
+    let response = client
+        .post(format!("{}/connectors", common::APP_HOST))
+        .bearer_auth(&auth.token)
+        .json(&json!({
+            "source": source.clone(),
+            "kind": "outlook",
+            "display_name": "Outlook Mail",
+            "status": "active"
+        }))
+        .send()
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    let adapter_config = json!({
+        "adapter": "microsoft_graph_mail",
+        "messages_url": format!("{}/me/mailFolders/Inbox/messages", mock.base_url),
+        "token_url": format!("{}/token", mock.base_url),
+        "client_id": "mail-client-id",
+        "client_secret": "mail-client-secret",
+        "refresh_token": "graph-mail-refresh-old",
+        "access_token_expires_at": "2000-01-01T00:00:00Z",
+        "received_after": "2026-05-19T00:00:00Z",
+        "unread_only": true,
+        "top": 10,
+        "timeout_seconds": 5
+    })
+    .to_string();
+
+    let response = client
+        .put(format!("{}/connectors/{}/config", common::APP_HOST, source))
+        .bearer_auth(&auth.token)
+        .json(&json!({
+            "target": "notifications",
+            "enabled": true,
+            "schedule_cron": null,
+            "config": adapter_config,
+            "sample_payload": "{\"items\":[]}"
+        }))
+        .send()
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let config_response = response.json::<Value>().unwrap()["data"].clone();
+    assert!(
+        !config_response["config"]
+            .as_str()
+            .unwrap()
+            .contains("graph-mail-refresh-old"),
+        "connector config response must not expose Graph refresh token"
+    );
+    assert!(
+        !config_response["config"]
+            .as_str()
+            .unwrap()
+            .contains("mail-client-secret"),
+        "connector config response must not expose Graph client secret"
+    );
+
+    let response = client
+        .post(format!("{}/connectors/{}/runs", common::APP_HOST, source))
+        .bearer_auth(&auth.token)
+        .json(&json!({}))
+        .send()
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    let execution = response.json::<Value>().unwrap()["data"].clone();
+    assert_eq!(execution["source"].as_str().unwrap(), source);
+    assert_eq!(execution["target"], "notifications");
+    assert_eq!(execution["imported"], 2, "execution: {execution:#}");
+    assert_eq!(execution["failed"], 0);
+    assert_eq!(execution["run"]["status"], "success");
+
+    let notifications = execution["data"].as_array().unwrap();
+    let release = notifications
+        .iter()
+        .find(|item| item["external_id"].as_str() == Some("mail-release-brief"))
+        .cloned()
+        .expect("Graph mail adapter should import release brief");
+    let digest = notifications
+        .iter()
+        .find(|item| item["external_id"].as_str() == Some("mail-security-digest"))
+        .cloned()
+        .expect("Graph mail adapter should import security digest");
+
+    assert_eq!(release["title"], "Mail: Release brief ready for review");
+    assert_eq!(release["severity"], "warning");
+    assert_eq!(
+        release["url"],
+        "https://outlook.office.test/mail/release-brief"
+    );
+    assert!(release["body"]
+        .as_str()
+        .unwrap()
+        .contains("From: Release Bot"));
+    assert!(release["body"]
+        .as_str()
+        .unwrap()
+        .contains("Received: 2026-05-19T00:30:00"));
+    assert_eq!(digest["title"], "Mail: Security digest");
+    assert_eq!(digest["severity"], "info");
+
+    let dashboard = client
+        .get(format!("{}/dashboard?source={}", common::APP_HOST, source))
+        .bearer_auth(&auth.token)
+        .send()
+        .unwrap()
+        .json::<Value>()
+        .unwrap()["data"]
+        .clone();
+    assert_contains_id(&dashboard["notifications"], release["id"].as_i64().unwrap());
+    assert_contains_id(&dashboard["notifications"], digest["id"].as_i64().unwrap());
+
+    let config_response = client
+        .get(format!("{}/connectors/{}/config", common::APP_HOST, source))
+        .bearer_auth(&auth.token)
+        .send()
+        .unwrap()
+        .json::<Value>()
+        .unwrap()["data"]
+        .clone();
+    let mut redacted_config: Value =
+        serde_json::from_str(config_response["config"].as_str().unwrap()).unwrap();
+    assert_eq!(redacted_config["access_token"], "***redacted***");
+    assert_eq!(redacted_config["refresh_token"], "***redacted***");
+    redacted_config["access_token_expires_at"] = json!("2000-01-01T00:00:00Z");
+
+    let response = client
+        .put(format!("{}/connectors/{}/config", common::APP_HOST, source))
+        .bearer_auth(&auth.token)
+        .json(&json!({
+            "target": "notifications",
+            "enabled": true,
+            "schedule_cron": null,
+            "config": redacted_config.to_string(),
+            "sample_payload": "{\"items\":[]}"
+        }))
+        .send()
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = client
+        .post(format!("{}/connectors/{}/runs", common::APP_HOST, source))
+        .bearer_auth(&auth.token)
+        .json(&json!({}))
+        .send()
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let second_execution = response.json::<Value>().unwrap()["data"].clone();
+    assert_eq!(second_execution["imported"], 2, "{second_execution:#}");
+    assert_eq!(second_execution["failed"], 0);
+
+    let requests = mock.join();
+    assert_eq!(requests.len(), 4);
+    assert!(
+        requests[0].starts_with("POST /token"),
+        "adapter should refresh before the first mail request: {requests:?}"
+    );
+    assert!(
+        requests[0].contains("grant_type=refresh_token")
+            && requests[0].contains("refresh_token=graph-mail-refresh-old")
+            && requests[0].contains("client_id=mail-client-id")
+            && requests[0].contains("client_secret=mail-client-secret"),
+        "token request should include OAuth refresh credentials: {requests:?}"
+    );
+    assert!(
+        requests[1].starts_with("GET /me/mailFolders/Inbox/messages?"),
+        "adapter should call messages endpoint: {requests:?}"
+    );
+    assert!(
+        requests[1].contains("%24top=10")
+            && requests[1].contains("receivedDateTime%20ge%202026-05-19T00%3A00%3A00Z")
+            && requests[1].contains("isRead%20eq%20false"),
+        "mail request should include configured Graph query params: {requests:?}"
+    );
+    assert!(
+        requests[1]
+            .to_ascii_lowercase()
+            .contains("authorization: bearer graph-mail-access-new"),
+        "mail request should use the refreshed access token: {requests:?}"
+    );
+    assert!(
+        requests[2].starts_with("POST /token")
+            && requests[2].contains("refresh_token=graph-mail-refresh-new"),
+        "redacted config round-trip should preserve the refreshed token: {requests:?}"
+    );
+    assert!(
+        requests[3]
+            .to_ascii_lowercase()
+            .contains("authorization: bearer graph-mail-access-newer"),
+        "second mail request should use the second refreshed access token: {requests:?}"
+    );
+
+    let response = client
+        .delete(format!("{}/connectors/{}", common::APP_HOST, source))
+        .bearer_auth(&auth.token)
+        .send()
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    common::delete_test_notification(&client, release);
+    common::delete_test_notification(&client, digest);
+    common::delete_test_user(auth.user_id);
+}
+
+#[test]
+fn test_microsoft_oauth_connect_flow_generates_authorize_url_and_stores_refresh_token() {
+    let client = Client::new();
+    let auth = common::create_admin_auth(&client);
+    let source = common::unique_name("graph_mail_oauth");
+    let mock = start_microsoft_oauth_token_mock();
+    let redirect_uri = "http://127.0.0.1:8000/oauth/microsoft/callback";
+
+    let response = client
+        .post(format!("{}/connectors", common::APP_HOST))
+        .bearer_auth(&auth.token)
+        .json(&json!({
+            "source": source.clone(),
+            "kind": "outlook",
+            "display_name": "Outlook OAuth",
+            "status": "active"
+        }))
+        .send()
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    let adapter_config = json!({
+        "adapter": "microsoft_graph_mail",
+        "authorization_url": format!("{}/authorize", mock.base_url),
+        "token_url": format!("{}/token", mock.base_url),
+        "client_id": "oauth-client-id",
+        "client_secret": "oauth-client-secret",
+        "scope": "https://graph.microsoft.com/Mail.Read offline_access",
+        "user_id": "me",
+        "mail_folder_id": "Inbox",
+        "timeout_seconds": 5
+    })
+    .to_string();
+
+    let response = client
+        .put(format!("{}/connectors/{}/config", common::APP_HOST, source))
+        .bearer_auth(&auth.token)
+        .json(&json!({
+            "target": "notifications",
+            "enabled": true,
+            "schedule_cron": null,
+            "config": adapter_config,
+            "sample_payload": "{\"items\":[]}"
+        }))
+        .send()
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = client
+        .post(format!(
+            "{}/connectors/{}/oauth/microsoft/authorize",
+            common::APP_HOST,
+            source
+        ))
+        .bearer_auth(&auth.token)
+        .json(&json!({ "redirect_uri": redirect_uri }))
+        .send()
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let authorize = response.json::<Value>().unwrap()["data"].clone();
+    let authorization_url = authorize["authorization_url"].as_str().unwrap();
+    let state = authorize["state"].as_str().unwrap();
+    assert!(
+        authorization_url.starts_with(&format!("{}/authorize?", mock.base_url)),
+        "OAuth should use configured Microsoft authorization URL: {authorization_url}"
+    );
+    assert!(
+        authorization_url.contains("client_id=oauth-client-id")
+            && authorization_url.contains("response_type=code")
+            && authorization_url.contains(
+                "redirect_uri=http%3A%2F%2F127.0.0.1%3A8000%2Foauth%2Fmicrosoft%2Fcallback"
+            )
+            && authorization_url
+                .contains("scope=https%3A%2F%2Fgraph.microsoft.com%2FMail.Read%20offline_access")
+            && authorization_url.contains("prompt=select_account"),
+        "OAuth authorize URL should contain Graph auth parameters: {authorization_url}"
+    );
+    assert!(!state.trim().is_empty());
+
+    let response = client
+        .post(format!(
+            "{}/connectors/oauth/microsoft/callback",
+            common::APP_HOST
+        ))
+        .bearer_auth(&auth.token)
+        .json(&json!({
+            "code": "oauth-code-123",
+            "state": state,
+            "redirect_uri": redirect_uri
+        }))
+        .send()
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let callback = response.json::<Value>().unwrap()["data"].clone();
+    assert_eq!(callback["source"], source);
+    let redacted_config = callback["config"]["config"].as_str().unwrap();
+    assert!(!redacted_config.contains("oauth-access-token"));
+    assert!(!redacted_config.contains("oauth-refresh-token"));
+    assert!(!redacted_config.contains("oauth-client-secret"));
+    assert!(redacted_config.contains("***redacted***"));
+    let redacted_config: Value = serde_json::from_str(redacted_config).unwrap();
+    assert_eq!(redacted_config["access_token"], "***redacted***");
+    assert_eq!(redacted_config["refresh_token"], "***redacted***");
+    assert_eq!(redacted_config["client_secret"], "***redacted***");
+    assert!(redacted_config.get("oauth_connected_at").is_some());
+    assert!(redacted_config.get("oauth_state").is_none());
+
+    let requests = mock.join();
+    assert_eq!(requests.len(), 1);
+    let token_request = &requests[0];
+    assert!(
+        token_request.starts_with("POST /token"),
+        "OAuth callback should exchange code at token endpoint: {requests:?}"
+    );
+    assert!(
+        token_request.contains("grant_type=authorization_code")
+            && token_request.contains("code=oauth-code-123")
+            && token_request.contains("client_id=oauth-client-id")
+            && token_request.contains("client_secret=oauth-client-secret")
+            && token_request.contains(
+                "redirect_uri=http%3A%2F%2F127.0.0.1%3A8000%2Foauth%2Fmicrosoft%2Fcallback"
+            ),
+        "OAuth token request should contain authorization code credentials: {requests:?}"
+    );
+
+    let response = client
+        .delete(format!("{}/connectors/{}", common::APP_HOST, source))
+        .bearer_auth(&auth.token)
+        .send()
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    common::delete_test_user(auth.user_id);
+}
+
+#[test]
 fn test_azure_devops_adapter_fetches_and_normalizes_work_items() {
     let client = Client::new();
     let auth = common::create_admin_auth(&client);
@@ -1697,6 +2041,28 @@ impl MonitoringMock {
     }
 }
 
+struct GraphMailMock {
+    base_url: String,
+    handle: thread::JoinHandle<Vec<String>>,
+}
+
+impl GraphMailMock {
+    fn join(self) -> Vec<String> {
+        self.handle.join().unwrap()
+    }
+}
+
+struct MicrosoftOAuthTokenMock {
+    base_url: String,
+    handle: thread::JoinHandle<Vec<String>>,
+}
+
+impl MicrosoftOAuthTokenMock {
+    fn join(self) -> Vec<String> {
+        self.handle.join().unwrap()
+    }
+}
+
 fn start_monitoring_mock(body: Value) -> MonitoringMock {
     let listener = TcpListener::bind("0.0.0.0:0").unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -1711,6 +2077,111 @@ fn start_monitoring_mock(body: Value) -> MonitoringMock {
     });
 
     MonitoringMock { base_url, handle }
+}
+
+fn start_graph_mail_mock() -> GraphMailMock {
+    let listener = TcpListener::bind("0.0.0.0:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let base_url = format!("http://{}:{}", local_mock_host(), port);
+
+    let handle = thread::spawn(move || {
+        let mut requests = Vec::new();
+        let mut token_calls = 0;
+
+        for _ in 0..4 {
+            let (mut stream, _) = listener.accept().unwrap();
+            let request = read_http_request(&mut stream);
+            let body = if request.starts_with("POST /token") {
+                token_calls += 1;
+                match token_calls {
+                    1 => json!({
+                        "access_token": "graph-mail-access-new",
+                        "refresh_token": "graph-mail-refresh-new",
+                        "token_type": "Bearer",
+                        "expires_in": 3600,
+                        "scope": "https://graph.microsoft.com/Mail.Read offline_access"
+                    }),
+                    _ => json!({
+                        "access_token": "graph-mail-access-newer",
+                        "refresh_token": "graph-mail-refresh-newer",
+                        "token_type": "Bearer",
+                        "expires_in": 3600,
+                        "scope": "https://graph.microsoft.com/Mail.Read offline_access"
+                    }),
+                }
+            } else if request.starts_with("GET /me/mailFolders/Inbox/messages?") {
+                json!({
+                    "value": [{
+                        "id": "mail-release-brief",
+                        "subject": "Release brief ready for review",
+                        "bodyPreview": "API deploy window moved to 15:30.",
+                        "importance": "high",
+                        "isRead": false,
+                        "webLink": "https://outlook.office.test/mail/release-brief",
+                        "receivedDateTime": "2026-05-19T00:30:00Z",
+                        "internetMessageId": "<release-brief@example.test>",
+                        "from": {
+                            "emailAddress": {
+                                "name": "Release Bot",
+                                "address": "release-bot@example.test"
+                            }
+                        },
+                        "flag": {
+                            "flagStatus": "notFlagged"
+                        }
+                    }, {
+                        "id": "mail-security-digest",
+                        "subject": "Security digest",
+                        "bodyPreview": "No action required.",
+                        "importance": "normal",
+                        "isRead": false,
+                        "webLink": "https://outlook.office.test/mail/security-digest",
+                        "receivedDateTime": "2026-05-19T01:00:00Z",
+                        "sender": {
+                            "emailAddress": {
+                                "name": "Security Bot",
+                                "address": "security@example.test"
+                            }
+                        }
+                    }]
+                })
+            } else {
+                json!({ "error": "unexpected request" })
+            };
+
+            requests.push(request);
+            write_http_json(&mut stream, &body);
+        }
+
+        requests
+    });
+
+    GraphMailMock { base_url, handle }
+}
+
+fn start_microsoft_oauth_token_mock() -> MicrosoftOAuthTokenMock {
+    let listener = TcpListener::bind("0.0.0.0:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let base_url = format!("http://{}:{}", local_mock_host(), port);
+
+    let handle = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let request = read_http_request(&mut stream);
+        write_http_json(
+            &mut stream,
+            &json!({
+                "access_token": "oauth-access-token",
+                "refresh_token": "oauth-refresh-token",
+                "token_type": "Bearer",
+                "expires_in": 3600,
+                "scope": "https://graph.microsoft.com/Mail.Read offline_access"
+            }),
+        );
+
+        vec![request]
+    });
+
+    MicrosoftOAuthTokenMock { base_url, handle }
 }
 
 fn start_azure_devops_mock() -> AzureDevOpsMock {
@@ -1798,10 +2269,35 @@ fn docker_compose_service_is_running(service: &str) -> bool {
 }
 
 fn read_http_request(stream: &mut std::net::TcpStream) -> String {
+    let mut request = Vec::new();
     let mut buffer = [0_u8; 8192];
     let bytes_read = stream.read(&mut buffer).unwrap();
+    request.extend_from_slice(&buffer[..bytes_read]);
 
-    String::from_utf8_lossy(&buffer[..bytes_read]).to_string()
+    let request_text = String::from_utf8_lossy(&request).to_string();
+    let Some(header_end) = request_text.find("\r\n\r\n") else {
+        return request_text;
+    };
+    let content_length = request_text[..header_end]
+        .lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("content-length")
+                .then(|| value.trim().parse::<usize>().ok())
+                .flatten()
+        })
+        .unwrap_or(0);
+    let body_start = header_end + 4;
+
+    while request.len().saturating_sub(body_start) < content_length {
+        let bytes_read = stream.read(&mut buffer).unwrap();
+        if bytes_read == 0 {
+            break;
+        }
+        request.extend_from_slice(&buffer[..bytes_read]);
+    }
+
+    String::from_utf8_lossy(&request).to_string()
 }
 
 fn write_http_json(stream: &mut std::net::TcpStream, body: &Value) {

@@ -336,13 +336,28 @@ creates queued runs when `next_run_at` is due. Supported schedule values are
 
 Connector configs can also select a real adapter. Supported adapters include
 `azure_devops` for the `work_cards` target, `monitoring` for the
-`service_health` target, and `microsoft_graph_calendar` for the `notifications`
-target. When `config` contains `"adapter": "azure_devops"`, the worker calls
+`service_health` target, and `microsoft_graph_calendar` /
+`microsoft_graph_mail` for the `notifications` target. When `config` contains
+`"adapter": "azure_devops"`, the worker calls
 Azure DevOps WIQL and work item batch APIs, then normalizes work items into the
 existing `work_cards` payload. When `config` contains
 `"adapter": "microsoft_graph_calendar"`, the worker calls Microsoft Graph
 Calendar View for the configured time window and normalizes Outlook events into
-morning homepage notifications.
+morning homepage notifications. When `config` contains
+`"adapter": "microsoft_graph_mail"`, the worker calls Microsoft Graph messages
+and normalizes Outlook mail into the same notification feed. Microsoft Graph
+adapters can use either a short-lived `access_token` or OAuth refresh
+credentials; when a refresh token is configured and the access token is missing,
+expired, or near expiry, the worker refreshes the access token and stores the
+rotated token values back into the encrypted connector config.
+For Microsoft Graph adapters, admins can use the Connect Microsoft or Reconnect
+Microsoft button in the connector config editor after setting `tenant_id`,
+`client_id`, optional `client_secret`, and `scope`. Register
+`<portal origin>/oauth/microsoft/callback` as the redirect URI in the Microsoft
+Entra app. The backend creates the authorize URL, validates callback state,
+exchanges the authorization code, and stores the returned access and refresh
+tokens in the encrypted connector config. `authorization_url` and `token_url`
+can be overridden for local mocks or proxy testing.
 For product walkthroughs and local development, three notification adapters are
 available without external credentials: `calendar_sample`, `outlook_mail_sample`,
 and `erp_messages_sample`. These target `notifications` and normalize sample
@@ -351,8 +366,8 @@ payload accepted by `POST /connectors/<source>/notifications/import`. The ERP
 adapter is intentionally a mock/sample adapter, so it does not require a real ERP
 instance.
 Config responses redact secret-looking keys such as `personal_access_token`,
-`pat`, `token`, `password`, `secret`, `client_secret`, `bearer_token`, and
-`api_key`.
+`pat`, `token`, `password`, `secret`, `client_secret`, `bearer_token`,
+`access_token`, `refresh_token`, and `api_key`.
 Those secret values are encrypted before they are stored in
 `connector_configs.config`; the worker decrypts them only while preparing an
 adapter request. Set `CONNECTOR_SECRET_KEY` to a stable high-entropy value in
@@ -398,7 +413,11 @@ Microsoft Graph Calendar adapter config:
 {
   "adapter": "microsoft_graph_calendar",
   "user_id": "me",
-  "access_token": "...",
+  "tenant_id": "organizations",
+  "client_id": "...",
+  "client_secret": "...",
+  "refresh_token": "",
+  "scope": "https://graph.microsoft.com/Calendars.Read offline_access",
   "time_zone": "Taipei Standard Time",
   "lookahead_hours": 24,
   "top": 25,
@@ -415,6 +434,33 @@ can be provided explicitly; otherwise the adapter imports the next
 notification records with `Calendar: ...` titles, organizer/location/time
 details, importance-derived severity, and Outlook or Teams join links when
 available.
+
+Microsoft Graph Mail adapter config:
+
+```json
+{
+  "adapter": "microsoft_graph_mail",
+  "user_id": "me",
+  "mail_folder_id": "Inbox",
+  "tenant_id": "organizations",
+  "client_id": "...",
+  "client_secret": "...",
+  "refresh_token": "",
+  "scope": "https://graph.microsoft.com/Mail.Read offline_access",
+  "unread_only": true,
+  "lookback_hours": 24,
+  "top": 25,
+  "timeout_seconds": 15
+}
+```
+
+By default the mail adapter calls
+`https://graph.microsoft.com/v1.0/me/messages`, or
+`/me/mailFolders/<folder>/messages` when `mail_folder_id` is set. Set `user_id`
+to a user principal name to call `/users/<user_id>/...`, or set `messages_url`
+for a custom proxy or mock server. Messages are normalized into notification
+records with `Mail: ...` titles, sender/received/preview details,
+importance-derived severity, read state, and Outlook web links when available.
 
 Sample notification adapter configs:
 

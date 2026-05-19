@@ -241,6 +241,20 @@ impl ConnectorConfigRepository {
             .await
     }
 
+    pub async fn update_config(
+        c: &mut AsyncPgConnection,
+        source: &str,
+        config: String,
+    ) -> QueryResult<ConnectorConfig> {
+        diesel::update(connector_configs::table.filter(connector_configs::source.eq(source)))
+            .set((
+                connector_configs::config.eq(config),
+                connector_configs::updated_at.eq(diesel::dsl::now),
+            ))
+            .get_result(c)
+            .await
+    }
+
     pub async fn mark_scheduled(
         c: &mut AsyncPgConnection,
         source: &str,

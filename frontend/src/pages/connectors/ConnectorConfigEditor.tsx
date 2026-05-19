@@ -12,7 +12,7 @@ import {
   TextInput,
   Title
 } from "@mantine/core";
-import { IconBolt, IconPlayerPlay, IconTemplate } from "@tabler/icons-react";
+import { IconBolt, IconPlayerPlay, IconPlugConnected, IconTemplate } from "@tabler/icons-react";
 import type { Dispatch, FormEvent, SetStateAction } from "react";
 
 import type { Connector, ConnectorConfigForm } from "../../types/api";
@@ -29,8 +29,10 @@ export function ConnectorConfigEditor({
   onConfigChange,
   onRun,
   onSave,
+  onConnectMicrosoft,
   onApplyTemplate,
   runLoading,
+  oauthLoading,
   saving
 }: {
   selected?: Connector;
@@ -38,13 +40,17 @@ export function ConnectorConfigEditor({
   onConfigChange: Dispatch<SetStateAction<ConnectorConfigForm>>;
   onRun: (mode: string) => void | Promise<void>;
   onSave: (event: FormEvent<HTMLFormElement>) => void | Promise<void>;
+  onConnectMicrosoft: () => void | Promise<void>;
   onApplyTemplate: (templateId: string) => void;
   runLoading: boolean;
+  oauthLoading: boolean;
   saving: boolean;
 }) {
   function updateConfig<K extends keyof ConnectorConfigForm>(field: K, value: ConnectorConfigForm[K]) {
     onConfigChange((current) => ({ ...current, [field]: value }));
   }
+
+  const graphOAuthState = microsoftGraphOAuthState(config.config);
 
   return (
     <Paper p="md" withBorder>
@@ -60,7 +66,20 @@ export function ConnectorConfigEditor({
           )}
         </Box>
         <Group className="responsiveActions">
+          {graphOAuthState.enabled && (
+            <Button
+              type="button"
+              variant="light"
+              leftSection={<IconPlugConnected size={16} />}
+              disabled={!selected}
+              loading={oauthLoading}
+              onClick={onConnectMicrosoft}
+            >
+              {graphOAuthState.connected ? "Reconnect Microsoft" : "Connect Microsoft"}
+            </Button>
+          )}
           <Button
+            type="button"
             variant="default"
             leftSection={<IconPlayerPlay size={16} />}
             disabled={!selected}
@@ -70,6 +89,7 @@ export function ConnectorConfigEditor({
             Execute
           </Button>
           <Button
+            type="button"
             leftSection={<IconBolt size={16} />}
             disabled={!selected}
             loading={runLoading}
@@ -144,4 +164,24 @@ export function ConnectorConfigEditor({
       </form>
     </Paper>
   );
+}
+
+function microsoftGraphOAuthState(configJson: string): { enabled: boolean; connected: boolean } {
+  try {
+    const parsed = JSON.parse(configJson) as { adapter?: unknown; refresh_token?: unknown };
+    const adapter = typeof parsed.adapter === "string" ? parsed.adapter : "";
+    const enabled = [
+      "microsoft_graph_calendar",
+      "graph_calendar",
+      "outlook_calendar",
+      "microsoft_graph_mail",
+      "graph_mail",
+      "outlook_mail"
+    ].includes(adapter);
+    const refreshToken = typeof parsed.refresh_token === "string" ? parsed.refresh_token.trim() : "";
+
+    return { enabled, connected: enabled && refreshToken.length > 0 };
+  } catch {
+    return { enabled: false, connected: false };
+  }
 }

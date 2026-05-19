@@ -244,6 +244,19 @@ export type ConnectorConfigResponse = {
   last_scheduled_run_id: ApiId | null;
 };
 
+export type MicrosoftOAuthAuthorizeResponse = {
+  authorization_url: string;
+  state: string;
+  redirect_uri: string;
+  scope: string;
+  expires_at: DateTimeString;
+};
+
+export type MicrosoftOAuthCallbackResponse = {
+  source: string;
+  config: ConnectorConfigResponse;
+};
+
 export type ConnectorImportError = {
   external_id: string | null;
   message: string;

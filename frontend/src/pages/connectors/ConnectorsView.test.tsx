@@ -35,7 +35,7 @@ describe("ConnectorsView config editor", () => {
     const configInput = (await screen.findByLabelText("Config JSON")) as HTMLTextAreaElement;
     await waitFor(() => {
       expect(configInput.value).toContain("***redacted***");
-      expect(configInput.value).not.toContain("real-graph-token");
+      expect(configInput.value).not.toContain("real-graph-refresh-token");
     });
 
     const updatedConfig = {
@@ -54,9 +54,69 @@ describe("ConnectorsView config editor", () => {
 
     expect(payload.target).toBe("notifications");
     expect(payload.schedule_cron).toBe("@every 15m");
-    expect(submittedConfig.access_token).toBe("***redacted***");
+    expect(submittedConfig.client_secret).toBe("***redacted***");
+    expect(submittedConfig.refresh_token).toBe("***redacted***");
     expect(submittedConfig.top).toBe(10);
-    expect(payload.config).not.toContain("real-graph-token");
+    expect(payload.config).not.toContain("real-graph-refresh-token");
+  });
+
+  it("starts Microsoft OAuth after saving the current connector config", async () => {
+    const user = userEvent.setup();
+    const openSpy = vi.spyOn(window, "open").mockImplementation(() => null);
+    const putBodies: unknown[] = [];
+    const authorizeBodies: unknown[] = [];
+    const { client, calls } = createMockApiClient({
+      "GET /connectors": [graphCalendarConnector()],
+      "GET /connectors/operations": emptyOperations(),
+      "GET /connectors/graph-calendar/config": graphCalendarConfigResponse(),
+      "GET /connectors/runs?source=graph-calendar": [],
+      "PUT /connectors/graph-calendar/config": (body) => {
+        putBodies.push(body);
+        return graphCalendarConfigResponse(body as Partial<ConnectorConfigResponse>);
+      },
+      "POST /connectors/graph-calendar/oauth/microsoft/authorize": (body) => {
+        authorizeBodies.push(body);
+        return {
+          authorization_url: "https://login.microsoftonline.test/authorize?state=abc",
+          state: "abc",
+          redirect_uri: (body as { redirect_uri: string }).redirect_uri,
+          scope: "https://graph.microsoft.com/Calendars.Read offline_access",
+          expires_at: "2026-05-19T00:10:00"
+        };
+      }
+    });
+
+    try {
+      renderWithProviders(
+        <ConnectorsView client={client} drillTarget={null} onOpenService={vi.fn()} />
+      );
+
+      await waitFor(() =>
+        expect(screen.getByRole("button", { name: "Reconnect Microsoft" })).toBeEnabled()
+      );
+      await user.click(screen.getByRole("button", { name: "Reconnect Microsoft" }));
+
+      await waitFor(() => expect(putBodies).toHaveLength(1));
+      await waitFor(() => expect(authorizeBodies).toHaveLength(1));
+      await waitFor(() => expect(openSpy).toHaveBeenCalledTimes(1));
+      expect(openSpy).toHaveBeenCalledWith(
+        "https://login.microsoftonline.test/authorize?state=abc",
+        "_self",
+        "noopener"
+      );
+      expect(putBodies).toHaveLength(1);
+      expect(authorizeBodies).toEqual([
+        { redirect_uri: `${window.location.origin}/oauth/microsoft/callback` }
+      ]);
+      expect(calls.map((call) => `${call.method} ${call.path}`)).toEqual(
+        expect.arrayContaining([
+          "PUT /connectors/graph-calendar/config",
+          "POST /connectors/graph-calendar/oauth/microsoft/authorize"
+        ])
+      );
+    } finally {
+      openSpy.mockRestore();
+    }
   });
 });
 
@@ -115,7 +175,11 @@ function graphCalendarConfigResponse(
       {
         adapter: "microsoft_graph_calendar",
         user_id: "me",
-        access_token: "***redacted***",
+        tenant_id: "organizations",
+        client_id: "graph-client-id",
+        client_secret: "***redacted***",
+        refresh_token: "***redacted***",
+        scope: "https://graph.microsoft.com/Calendars.Read offline_access",
         time_zone: "Taipei Standard Time",
         lookahead_hours: 24,
         top: 25

@@ -19,7 +19,8 @@ import type {
   ConnectorDrillTarget,
   LoginRequest,
   LoginResponse,
-  MeResponse
+  MeResponse,
+  MicrosoftOAuthCallbackResponse
 } from "./types/api";
 
 const TOP_LEVEL_VIEWS = new Set(["dashboard", "connectors", "catalog", "audit"]);
@@ -124,6 +125,22 @@ function connectorHash(target?: ConnectorDrillTarget | null): string {
   return query ? `#connectors?${query}` : "#connectors";
 }
 
+function microsoftOAuthCallbackParams(): URLSearchParams | null {
+  if (window.location.pathname !== "/oauth/microsoft/callback") {
+    return null;
+  }
+
+  return new URLSearchParams(window.location.search);
+}
+
+function microsoftOAuthRedirectUri(): string {
+  return `${window.location.origin}/oauth/microsoft/callback`;
+}
+
+function clearMicrosoftOAuthCallbackUrl() {
+  window.history.replaceState(null, "", "/");
+}
+
 export default function App() {
   const initialRoute = useMemo(() => routeFromHash(), []);
   const [token, setToken] = useStoredToken();
@@ -142,6 +159,7 @@ export default function App() {
     });
   const [booting, setBooting] = useState(true);
   const restoredTokenRef = useRef<string | null>(null);
+  const handledMicrosoftOAuthCallbackRef = useRef("");
 
   const client = useMemo(() => createApiClient(token), [token]);
 
@@ -206,6 +224,65 @@ export default function App() {
       mounted = false;
     };
   }, [setToken, token]);
+
+  useEffect(() => {
+    if (!token || !user) {
+      return;
+    }
+
+    const params = microsoftOAuthCallbackParams();
+    if (!params) {
+      return;
+    }
+    const callbackKey = params.toString();
+    if (!callbackKey || handledMicrosoftOAuthCallbackRef.current === callbackKey) {
+      return;
+    }
+    handledMicrosoftOAuthCallbackRef.current = callbackKey;
+
+    let mounted = true;
+    async function finishMicrosoftOAuth() {
+      try {
+        const response = await client.post<MicrosoftOAuthCallbackResponse>(
+          "/connectors/oauth/microsoft/callback",
+          {
+            code: params.get("code"),
+            state: params.get("state") || "",
+            redirect_uri: microsoftOAuthRedirectUri(),
+            error: params.get("error"),
+            error_description: params.get("error_description")
+          }
+        );
+        if (!mounted) {
+          return;
+        }
+        notifications.show({
+          title: "Microsoft connected",
+          message: response.source,
+          color: "teal"
+        });
+        clearMicrosoftOAuthCallbackUrl();
+        openConnectorDrill({ source: response.source });
+      } catch (error) {
+        if (!mounted) {
+          return;
+        }
+        notifications.show({
+          title: "Microsoft connection failed",
+          message: error instanceof Error ? error.message : String(error),
+          color: "red"
+        });
+        clearMicrosoftOAuthCallbackUrl();
+        handleViewChange("connectors");
+      }
+    }
+
+    finishMicrosoftOAuth();
+
+    return () => {
+      mounted = false;
+    };
+  }, [client, token, user]);
 
   async function handleLogin(credentials: LoginRequest) {
     const login = await createApiClient(null).post<LoginResponse>("/login", credentials);

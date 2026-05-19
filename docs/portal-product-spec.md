@@ -200,12 +200,13 @@ The project already has:
 - Azure DevOps work card adapter.
 - Generic monitoring service health adapter.
 - Microsoft Graph Calendar adapter for Outlook calendar events.
+- Microsoft Graph Mail adapter for Outlook mail notifications.
+- Microsoft Graph OAuth connect flow, refresh-token handling, and encrypted token rotation.
 - Service health check history for homepage trend and incident summaries.
 - Frontend dashboard, catalog, connectors, audit, and service overview views.
 
 Future improvements can include:
 
-- Outlook mail connector.
 - ERP private message connector.
 - More complete home page aggregation.
 - OpenAPI or API docs.

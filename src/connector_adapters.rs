@@ -46,11 +46,48 @@ struct MicrosoftGraphCalendarConfig {
     end_at: Option<String>,
     lookahead_hours: Option<i64>,
     time_zone: Option<String>,
-    access_token: Option<String>,
-    bearer_token: Option<String>,
-    token: Option<String>,
     top: Option<u64>,
     timeout_seconds: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct MicrosoftGraphMailConfig {
+    adapter: Option<String>,
+    messages_url: Option<String>,
+    mail_messages_url: Option<String>,
+    base_url: Option<String>,
+    user_id: Option<String>,
+    mail_folder_id: Option<String>,
+    folder_id: Option<String>,
+    folder: Option<String>,
+    received_after: Option<String>,
+    lookback_hours: Option<i64>,
+    unread_only: Option<bool>,
+    filter: Option<String>,
+    orderby: Option<String>,
+    top: Option<u64>,
+    timeout_seconds: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct GraphTokenResponse {
+    access_token: Option<String>,
+    token_type: Option<String>,
+    expires_in: Option<i64>,
+    refresh_token: Option<String>,
+    scope: Option<String>,
+    error: Option<String>,
+    error_description: Option<String>,
+}
+
+pub struct ConnectorAdapterResult {
+    pub payload: Option<Value>,
+    pub updated_config: Option<String>,
+}
+
+struct GraphAccessToken {
+    token: String,
+    updated_config: Option<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -63,55 +100,79 @@ enum SampleNotificationKind {
 pub async fn fetch_connector_payload(
     target: &str,
     config_json: &str,
-) -> Result<Option<Value>, String> {
+) -> Result<ConnectorAdapterResult, String> {
     let adapter = serde_json::from_str::<AdapterConfig>(config_json)
         .map_err(|error| format!("connector config is not valid JSON: {error}"))?
         .adapter;
 
     match adapter.as_deref() {
         Some("azure_devops") if target == "work_cards" => {
-            fetch_azure_devops_work_cards(config_json).await.map(Some)
+            fetch_azure_devops_work_cards(config_json)
+                .await
+                .map(adapter_payload)
         }
         Some("azure_devops") => Err(format!(
             "azure_devops adapter does not support target {target}"
         )),
         Some("monitoring") if target == "service_health" => {
-            fetch_monitoring_service_health(config_json).await.map(Some)
+            fetch_monitoring_service_health(config_json)
+                .await
+                .map(adapter_payload)
         }
         Some("monitoring") => Err(format!(
             "monitoring adapter does not support target {target}"
         )),
         Some("microsoft_graph_calendar" | "graph_calendar" | "outlook_calendar") => {
             if target == "notifications" {
-                fetch_microsoft_graph_calendar_events(config_json)
-                    .await
-                    .map(Some)
+                fetch_microsoft_graph_calendar_events(config_json).await
             } else {
                 Err(format!(
                     "microsoft_graph_calendar adapter does not support target {target}"
                 ))
             }
         }
+        Some("microsoft_graph_mail" | "graph_mail" | "outlook_mail") => {
+            if target == "notifications" {
+                fetch_microsoft_graph_mail_messages(config_json).await
+            } else {
+                Err(format!(
+                    "microsoft_graph_mail adapter does not support target {target}"
+                ))
+            }
+        }
         Some("calendar_sample" | "calendar") if target == "notifications" => {
-            fetch_sample_notifications(config_json, SampleNotificationKind::Calendar).map(Some)
+            fetch_sample_notifications(config_json, SampleNotificationKind::Calendar)
+                .map(adapter_payload)
         }
         Some("calendar_sample" | "calendar") => Err(format!(
             "calendar_sample adapter does not support target {target}"
         )),
-        Some("outlook_mail_sample" | "outlook_mail" | "outlook") if target == "notifications" => {
-            fetch_sample_notifications(config_json, SampleNotificationKind::OutlookMail).map(Some)
+        Some("outlook_mail_sample" | "outlook") if target == "notifications" => {
+            fetch_sample_notifications(config_json, SampleNotificationKind::OutlookMail)
+                .map(adapter_payload)
         }
-        Some("outlook_mail_sample" | "outlook_mail" | "outlook") => Err(format!(
+        Some("outlook_mail_sample" | "outlook") => Err(format!(
             "outlook_mail_sample adapter does not support target {target}"
         )),
         Some("erp_messages_sample" | "erp_messages" | "erp") if target == "notifications" => {
-            fetch_sample_notifications(config_json, SampleNotificationKind::ErpMessages).map(Some)
+            fetch_sample_notifications(config_json, SampleNotificationKind::ErpMessages)
+                .map(adapter_payload)
         }
         Some("erp_messages_sample" | "erp_messages" | "erp") => Err(format!(
             "erp_messages_sample adapter does not support target {target}"
         )),
         Some(adapter) => Err(format!("connector adapter {adapter} is not supported")),
-        None => Ok(None),
+        None => Ok(ConnectorAdapterResult {
+            payload: None,
+            updated_config: None,
+        }),
+    }
+}
+
+fn adapter_payload(payload: Value) -> ConnectorAdapterResult {
+    ConnectorAdapterResult {
+        payload: Some(payload),
+        updated_config: None,
     }
 }
 
@@ -242,7 +303,11 @@ async fn fetch_monitoring_service_health(config_json: &str) -> Result<Value, Str
     Ok(json!({ "items": items }))
 }
 
-async fn fetch_microsoft_graph_calendar_events(config_json: &str) -> Result<Value, String> {
+async fn fetch_microsoft_graph_calendar_events(
+    config_json: &str,
+) -> Result<ConnectorAdapterResult, String> {
+    let mut config_value = serde_json::from_str::<Value>(config_json)
+        .map_err(|error| format!("microsoft_graph_calendar config is not valid JSON: {error}"))?;
     let config = serde_json::from_str::<MicrosoftGraphCalendarConfig>(config_json)
         .map_err(|error| format!("microsoft_graph_calendar config is not valid JSON: {error}"))?;
 
@@ -276,17 +341,6 @@ async fn fetch_microsoft_graph_calendar_events(config_json: &str) -> Result<Valu
         ],
     );
 
-    let token = config
-        .access_token
-        .as_deref()
-        .or(config.bearer_token.as_deref())
-        .or(config.token.as_deref())
-        .filter(|token| !token.trim().is_empty())
-        .ok_or_else(|| {
-            "microsoft_graph_calendar config must set access_token, bearer_token, or token"
-                .to_owned()
-        })?;
-
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(
             config.timeout_seconds.unwrap_or(15).max(1),
@@ -295,15 +349,74 @@ async fn fetch_microsoft_graph_calendar_events(config_json: &str) -> Result<Valu
         .map_err(|error| {
             format!("microsoft_graph_calendar HTTP client could not be built: {error}")
         })?;
-    let response =
-        send_graph_calendar_request(client.get(&request_url), token, config.time_zone.as_deref())
-            .await?;
+    let access_token = graph_access_token(
+        &client,
+        &mut config_value,
+        "microsoft_graph_calendar",
+        "https://graph.microsoft.com/Calendars.Read offline_access",
+    )
+    .await?;
+    let response = send_graph_calendar_request(
+        client.get(&request_url),
+        &access_token.token,
+        config.time_zone.as_deref(),
+    )
+    .await?;
     let items = graph_calendar_items(&response)
         .into_iter()
         .map(normalize_graph_calendar_event)
         .collect::<Vec<_>>();
 
-    Ok(json!({ "items": items }))
+    Ok(ConnectorAdapterResult {
+        payload: Some(json!({ "items": items })),
+        updated_config: access_token.updated_config,
+    })
+}
+
+async fn fetch_microsoft_graph_mail_messages(
+    config_json: &str,
+) -> Result<ConnectorAdapterResult, String> {
+    let mut config_value = serde_json::from_str::<Value>(config_json)
+        .map_err(|error| format!("microsoft_graph_mail config is not valid JSON: {error}"))?;
+    let config = serde_json::from_str::<MicrosoftGraphMailConfig>(config_json)
+        .map_err(|error| format!("microsoft_graph_mail config is not valid JSON: {error}"))?;
+
+    if !matches!(
+        config.adapter.as_deref(),
+        Some("microsoft_graph_mail" | "graph_mail" | "outlook_mail")
+    ) {
+        return Err(
+            "microsoft_graph_mail config must set adapter to microsoft_graph_mail".to_owned(),
+        );
+    }
+
+    let messages_url = microsoft_graph_mail_messages_url(&config);
+    require_url("messages_url", &messages_url)?;
+    let request_url = append_query_params(&messages_url, &graph_mail_query_params(&config));
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(
+            config.timeout_seconds.unwrap_or(15).max(1),
+        ))
+        .build()
+        .map_err(|error| format!("microsoft_graph_mail HTTP client could not be built: {error}"))?;
+    let access_token = graph_access_token(
+        &client,
+        &mut config_value,
+        "microsoft_graph_mail",
+        "https://graph.microsoft.com/Mail.Read offline_access",
+    )
+    .await?;
+    let response = send_graph_mail_request(client.get(&request_url), &access_token.token).await?;
+    let items = graph_mail_items(&response)
+        .into_iter()
+        .map(normalize_graph_mail_message)
+        .collect::<Vec<_>>();
+
+    Ok(ConnectorAdapterResult {
+        payload: Some(json!({ "items": items })),
+        updated_config: access_token.updated_config,
+    })
 }
 
 fn fetch_sample_notifications(
@@ -405,6 +518,193 @@ async fn send_graph_calendar_request(
         .json::<Value>()
         .await
         .map_err(|error| format!("microsoft_graph_calendar response was not valid JSON: {error}"))
+}
+
+async fn send_graph_mail_request(
+    request: reqwest::RequestBuilder,
+    token: &str,
+) -> Result<Value, String> {
+    let response = request
+        .bearer_auth(token)
+        .send()
+        .await
+        .map_err(|error| format!("microsoft_graph_mail request failed: {error}"))?;
+    let status = response.status();
+
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        return Err(format!(
+            "microsoft_graph_mail request returned {status}: {body}"
+        ));
+    }
+
+    response
+        .json::<Value>()
+        .await
+        .map_err(|error| format!("microsoft_graph_mail response was not valid JSON: {error}"))
+}
+
+async fn graph_access_token(
+    client: &reqwest::Client,
+    config: &mut Value,
+    adapter_name: &str,
+    default_scope: &str,
+) -> Result<GraphAccessToken, String> {
+    let access_token = field_string(config, &["access_token", "bearer_token", "token"]);
+    let refresh_token = field_string(config, &["refresh_token"]);
+    let refresh_disabled =
+        field_bool(config, &["refresh_access_token"]).is_some_and(|enabled| !enabled);
+
+    if let Some(refresh_token) = refresh_token.as_deref() {
+        if !refresh_disabled && graph_access_token_needs_refresh(config, access_token.as_deref()) {
+            return refresh_graph_access_token(
+                client,
+                config,
+                adapter_name,
+                default_scope,
+                refresh_token.to_owned(),
+            )
+            .await;
+        }
+    }
+
+    if let Some(token) = access_token {
+        return Ok(GraphAccessToken {
+            token,
+            updated_config: None,
+        });
+    }
+
+    if let Some(refresh_token) = refresh_token {
+        return refresh_graph_access_token(
+            client,
+            config,
+            adapter_name,
+            default_scope,
+            refresh_token,
+        )
+        .await;
+    }
+
+    Err(format!(
+        "{adapter_name} config must set access_token or OAuth refresh_token credentials"
+    ))
+}
+
+async fn refresh_graph_access_token(
+    client: &reqwest::Client,
+    config: &mut Value,
+    adapter_name: &str,
+    default_scope: &str,
+    refresh_token: String,
+) -> Result<GraphAccessToken, String> {
+    let token_url = graph_token_url(config);
+    require_url("token_url", &token_url)?;
+
+    let client_id = field_string(config, &["client_id", "application_id", "app_id"])
+        .ok_or_else(|| format!("{adapter_name} config must set client_id for token refresh"))?;
+    let client_secret = field_string(config, &["client_secret"]);
+    let scope = graph_scope(config).unwrap_or_else(|| default_scope.to_owned());
+
+    let mut form = vec![
+        ("client_id", client_id),
+        ("grant_type", "refresh_token".to_owned()),
+        ("refresh_token", refresh_token),
+        ("scope", scope),
+    ];
+    if let Some(client_secret) = client_secret {
+        form.push(("client_secret", client_secret));
+    }
+
+    let response = client
+        .post(&token_url)
+        .form(&form)
+        .send()
+        .await
+        .map_err(|error| format!("{adapter_name} OAuth token refresh failed: {error}"))?;
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+
+    if !status.is_success() {
+        return Err(format!(
+            "{adapter_name} OAuth token refresh returned {status}: {body}"
+        ));
+    }
+
+    let token_response = serde_json::from_str::<GraphTokenResponse>(&body).map_err(|error| {
+        format!("{adapter_name} OAuth token response was not valid JSON: {error}")
+    })?;
+    if let Some(error) = token_response
+        .error
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let description = token_response
+            .error_description
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("no error description");
+
+        return Err(format!(
+            "{adapter_name} OAuth token refresh returned {error}: {description}"
+        ));
+    }
+
+    let access_token = token_response
+        .access_token
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| format!("{adapter_name} OAuth token response did not include access_token"))?
+        .to_owned();
+    let expires_in = token_response.expires_in.unwrap_or(3600).max(60);
+    let expires_at = format_graph_datetime(Utc::now() + ChronoDuration::seconds(expires_in));
+    let refreshed_at = format_graph_datetime(Utc::now());
+
+    let Some(config_object) = config.as_object_mut() else {
+        return Err(format!("{adapter_name} config must be a JSON object"));
+    };
+    config_object.insert(
+        "access_token".to_owned(),
+        Value::String(access_token.clone()),
+    );
+    config_object.insert(
+        "access_token_expires_at".to_owned(),
+        Value::String(expires_at),
+    );
+    config_object.insert("token_refreshed_at".to_owned(), Value::String(refreshed_at));
+    if let Some(token_type) = token_response
+        .token_type
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+    {
+        config_object.insert("token_type".to_owned(), Value::String(token_type));
+    }
+    if let Some(refresh_token) = token_response
+        .refresh_token
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+    {
+        config_object.insert("refresh_token".to_owned(), Value::String(refresh_token));
+    }
+    if let Some(scope) = token_response
+        .scope
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+    {
+        config_object.insert("scope".to_owned(), Value::String(scope));
+    }
+
+    let updated_config = serde_json::to_string(config).map_err(|error| {
+        format!("{adapter_name} refreshed config could not be encoded: {error}")
+    })?;
+
+    Ok(GraphAccessToken {
+        token: access_token,
+        updated_config: Some(updated_config),
+    })
 }
 
 impl SampleNotificationKind {
@@ -664,6 +964,20 @@ fn graph_calendar_items(response: &Value) -> Vec<&Value> {
         .collect()
 }
 
+fn graph_mail_items(response: &Value) -> Vec<&Value> {
+    response
+        .get("value")
+        .or_else(|| response.get("items"))
+        .or_else(|| response.get("messages"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .into_iter()
+        .chain(response.as_array().into_iter().flatten())
+        .collect()
+}
+
 fn normalize_graph_calendar_event(item: &Value) -> Value {
     let subject =
         field_string(item, &["subject", "title"]).unwrap_or_else(|| "Calendar event".to_owned());
@@ -694,6 +1008,83 @@ fn normalize_graph_calendar_event(item: &Value) -> Value {
         "is_read": false,
         "url": graph_calendar_url(item)
     })
+}
+
+fn normalize_graph_mail_message(item: &Value) -> Value {
+    let subject = field_string(item, &["subject", "title"])
+        .unwrap_or_else(|| "Outlook mail message".to_owned());
+    let external_id = notification_external_id(
+        "mail",
+        item,
+        &[
+            "external_id",
+            "id",
+            "message_id",
+            "internetMessageId",
+            "internet_message_id",
+        ],
+        &subject,
+    );
+    let title = if subject.to_ascii_lowercase().starts_with("mail:") {
+        subject
+    } else {
+        format!("Mail: {subject}")
+    };
+
+    json!({
+        "external_id": external_id,
+        "title": title,
+        "body": graph_mail_body(item),
+        "severity": graph_mail_severity(item),
+        "is_read": field_bool(item, &["isRead", "is_read", "read", "seen"]).unwrap_or(false),
+        "url": graph_mail_url(item)
+    })
+}
+
+fn graph_mail_body(item: &Value) -> Option<String> {
+    let mut details = Vec::new();
+
+    if let Some(sender) = person_display(item, &["from", "sender"]) {
+        details.push(format!("From: {sender}"));
+    }
+    if let Some(received_at) = field_string(item, &["receivedDateTime", "received_at"])
+        .map(|value| normalize_naive_datetime(&value).unwrap_or(value))
+    {
+        details.push(format!("Received: {received_at}"));
+    }
+    if let Some(preview) = field_string(
+        item,
+        &["bodyPreview", "body_preview", "preview", "summary", "body"],
+    ) {
+        details.push(format!("Preview: {preview}"));
+    }
+
+    (!details.is_empty()).then(|| details.join(" | "))
+}
+
+fn graph_mail_url(item: &Value) -> Option<String> {
+    field_url(item, &["webLink", "web_link", "web_url", "url"])
+}
+
+fn graph_mail_severity(item: &Value) -> &'static str {
+    if let Some(flag_status) = item
+        .pointer("/flag/flagStatus")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        if !flag_status.eq_ignore_ascii_case("notFlagged") {
+            return "warning";
+        }
+    }
+
+    let severity = field_string(item, &["severity", "importance", "priority"])
+        .map(|value| value.trim().to_ascii_lowercase());
+    match severity.as_deref() {
+        Some("critical" | "urgent" | "blocker" | "error" | "failed" | "failure") => "critical",
+        Some("high" | "warning" | "warn" | "medium") => "warning",
+        _ => "info",
+    }
 }
 
 fn graph_calendar_body(item: &Value) -> Option<String> {
@@ -897,6 +1288,50 @@ fn microsoft_graph_calendar_view_url(config: &MicrosoftGraphCalendarConfig) -> S
     }
 }
 
+fn microsoft_graph_mail_messages_url(config: &MicrosoftGraphMailConfig) -> String {
+    if let Some(url) = config
+        .messages_url
+        .as_deref()
+        .or(config.mail_messages_url.as_deref())
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+    {
+        return url.to_owned();
+    }
+
+    let base_url = config
+        .base_url
+        .as_deref()
+        .unwrap_or("https://graph.microsoft.com/v1.0")
+        .trim_end_matches('/');
+    let user_id = config
+        .user_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|user_id| !user_id.is_empty())
+        .unwrap_or("me");
+    let mailbox_root = if user_id.eq_ignore_ascii_case("me") {
+        format!("{base_url}/me")
+    } else {
+        format!("{base_url}/users/{}", encode_url_component(user_id))
+    };
+
+    match config
+        .mail_folder_id
+        .as_deref()
+        .or(config.folder_id.as_deref())
+        .or(config.folder.as_deref())
+        .map(str::trim)
+        .filter(|folder| !folder.is_empty())
+    {
+        Some(folder) => format!(
+            "{mailbox_root}/mailFolders/{}/messages",
+            encode_url_component(folder)
+        ),
+        None => format!("{mailbox_root}/messages"),
+    }
+}
+
 fn graph_calendar_time_window(config: &MicrosoftGraphCalendarConfig) -> (String, String) {
     let now = Utc::now();
     let start_at = config
@@ -922,6 +1357,124 @@ fn graph_calendar_time_window(config: &MicrosoftGraphCalendarConfig) -> (String,
         });
 
     (start_at, end_at)
+}
+
+fn graph_mail_query_params(config: &MicrosoftGraphMailConfig) -> Vec<(&'static str, String)> {
+    let mut params = vec![
+        (
+            "$select",
+            "id,subject,bodyPreview,importance,isRead,webLink,from,sender,receivedDateTime,internetMessageId,flag"
+                .to_owned(),
+        ),
+        ("$top", config.top.unwrap_or(25).clamp(1, 50).to_string()),
+        (
+            "$orderby",
+            config
+                .orderby
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or("receivedDateTime desc")
+                .to_owned(),
+        ),
+    ];
+
+    let filter = config
+        .filter
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| {
+            let mut filters = Vec::new();
+            let received_after = config
+                .received_after
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned)
+                .unwrap_or_else(|| {
+                    let lookback_hours = config.lookback_hours.unwrap_or(24).clamp(1, 720);
+                    format_graph_datetime(Utc::now() - ChronoDuration::hours(lookback_hours))
+                });
+            filters.push(format!("receivedDateTime ge {received_after}"));
+
+            if config.unread_only.unwrap_or(true) {
+                filters.push("isRead eq false".to_owned());
+            }
+
+            filters.join(" and ")
+        });
+
+    if !filter.is_empty() {
+        params.push(("$filter", filter));
+    }
+
+    params
+}
+
+fn graph_access_token_needs_refresh(config: &Value, access_token: Option<&str>) -> bool {
+    if access_token
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .is_none()
+    {
+        return true;
+    }
+
+    let Some(expires_at) = field_string(
+        config,
+        &["access_token_expires_at", "token_expires_at", "expires_at"],
+    ) else {
+        return true;
+    };
+
+    parse_graph_token_expires_at(&expires_at)
+        .map(|expires_at| expires_at <= Utc::now() + ChronoDuration::minutes(5))
+        .unwrap_or(true)
+}
+
+fn parse_graph_token_expires_at(value: &str) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(value)
+        .map(|datetime| datetime.with_timezone(&Utc))
+        .ok()
+        .or_else(|| {
+            NaiveDateTime::parse_from_str(value.trim(), "%Y-%m-%dT%H:%M:%S")
+                .ok()
+                .map(|datetime| DateTime::<Utc>::from_naive_utc_and_offset(datetime, Utc))
+        })
+}
+
+fn graph_token_url(config: &Value) -> String {
+    if let Some(url) = field_string(config, &["token_url", "oauth_token_url"]) {
+        return url;
+    }
+
+    let tenant = field_string(config, &["tenant_id", "tenant", "directory_id"])
+        .unwrap_or_else(|| "organizations".to_owned());
+
+    format!(
+        "https://login.microsoftonline.com/{}/oauth2/v2.0/token",
+        encode_url_component(&tenant)
+    )
+}
+
+fn graph_scope(config: &Value) -> Option<String> {
+    field_string(config, &["scope", "scopes"]).or_else(|| {
+        config
+            .get("scopes")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .filter(|value| !value.is_empty())
+    })
 }
 
 fn format_graph_datetime(datetime: DateTime<Utc>) -> String {

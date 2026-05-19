@@ -83,7 +83,11 @@ export const connectorTemplates: ConnectorTemplate[] = [
     config: {
       adapter: "microsoft_graph_calendar",
       user_id: "me",
-      access_token: "",
+      tenant_id: "organizations",
+      client_id: "",
+      client_secret: "",
+      refresh_token: "",
+      scope: "https://graph.microsoft.com/Calendars.Read offline_access",
       time_zone: "UTC",
       lookahead_hours: 24,
       top: 25,
@@ -139,17 +143,18 @@ export const connectorTemplates: ConnectorTemplate[] = [
     target: "notifications",
     schedule_cron: "@every 15m",
     config: {
-      adapter: "outlook_mail_sample",
-      messages: [
-        {
-          id: "release-brief",
-          subject: "Mail: Release brief ready for review",
-          from: "release-bot@example.test",
-          body_preview: "API deploy window moved to 15:30.",
-          importance: "high",
-          web_link: "https://outlook.example.test/mail/release-brief"
-        }
-      ]
+      adapter: "microsoft_graph_mail",
+      user_id: "me",
+      mail_folder_id: "Inbox",
+      tenant_id: "organizations",
+      client_id: "",
+      client_secret: "",
+      refresh_token: "",
+      scope: "https://graph.microsoft.com/Mail.Read offline_access",
+      unread_only: true,
+      lookback_hours: 24,
+      top: 25,
+      timeout_seconds: 15
     },
     sample_payload: {
       items: [
