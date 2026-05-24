@@ -10,6 +10,13 @@ type ConnectorTemplate = {
   sample_payload: JsonValue;
 };
 
+export type ConnectorConfigDiagnostic = {
+  level: "error" | "warning";
+  message: string;
+};
+
+type JsonRecord = Record<string, unknown>;
+
 export const defaultConnectorConfig: ConnectorConfigForm = {
   target: "work_cards",
   enabled: true,
@@ -170,8 +177,37 @@ export const connectorTemplates: ConnectorTemplate[] = [
     }
   },
   {
+    id: "erp_private_messages",
+    label: "ERP private messages",
+    target: "notifications",
+    schedule_cron: "@every 15m",
+    config: {
+      adapter: "erp_private_messages",
+      messages_url: "https://erp.example.test/api/private-messages",
+      bearer_token: "",
+      api_key: "",
+      api_key_header: "x-api-key",
+      unread_only: true,
+      lookback_hours: 24,
+      top: 25,
+      timeout_seconds: 15
+    },
+    sample_payload: {
+      items: [
+        {
+          external_id: "access-approval",
+          title: "ERP: Deployment access approval waiting",
+          body: "Production deployment access needs review.",
+          severity: "warning",
+          is_read: false,
+          url: "https://erp.example.test/messages/access-approval"
+        }
+      ]
+    }
+  },
+  {
     id: "erp_message_notifications",
-    label: "ERP message notifications",
+    label: "ERP sample messages",
     target: "notifications",
     schedule_cron: "@every 15m",
     config: {
@@ -180,7 +216,7 @@ export const connectorTemplates: ConnectorTemplate[] = [
         {
           id: "access-approval",
           title: "ERP: Deployment access approval waiting",
-          message: "Sample ERP private message. Replace this adapter with the real ERP integration when one is available.",
+          message: "Sample ERP private message. Use the ERP private messages template for a real HTTP endpoint.",
           requires_approval: true
         }
       ]
@@ -190,7 +226,7 @@ export const connectorTemplates: ConnectorTemplate[] = [
         {
           external_id: "access-approval",
           title: "ERP: Deployment access approval waiting",
-          body: "Sample ERP private message. Replace this adapter with the real ERP integration when one is available.",
+          body: "Sample ERP private message. Use the ERP private messages template for a real HTTP endpoint.",
           severity: "warning",
           is_read: false,
           url: null
@@ -230,4 +266,360 @@ export function connectorConfigFromTemplate(templateId: string): ConnectorConfig
     config: JSON.stringify(template.config, null, 2),
     sample_payload: JSON.stringify(template.sample_payload, null, 2)
   };
+}
+
+export function connectorConfigDiagnostics(
+  config: ConnectorConfigForm
+): ConnectorConfigDiagnostic[] {
+  const diagnostics: ConnectorConfigDiagnostic[] = [];
+  const parsedConfig = parseJsonObject(config.config, "Config JSON", diagnostics);
+
+  if (parsedConfig) {
+    validateAdapterConfig(diagnostics, config.target, parsedConfig);
+  }
+
+  const parsedSamplePayload = parseJsonValue(config.sample_payload, "Sample payload", diagnostics);
+  if (parsedSamplePayload !== undefined && !hasItemsArray(parsedSamplePayload)) {
+    diagnostics.push({
+      level: "error",
+      message: "Sample payload must include an items array."
+    });
+  }
+
+  return diagnostics;
+}
+
+function validateAdapterConfig(
+  diagnostics: ConnectorConfigDiagnostic[],
+  target: string,
+  config: JsonRecord
+) {
+  if (!Object.prototype.hasOwnProperty.call(config, "adapter")) {
+    return;
+  }
+
+  const adapterValue = config.adapter;
+  if (typeof adapterValue !== "string") {
+    diagnostics.push({
+      level: "error",
+      message: "adapter must be a string."
+    });
+    return;
+  }
+
+  const adapter = adapterValue.trim();
+  if (!adapter) {
+    diagnostics.push({
+      level: "error",
+      message: "adapter must not be empty."
+    });
+    return;
+  }
+
+  switch (adapter) {
+    case "azure_devops":
+      validateAzureDevOpsConfig(diagnostics, target, config);
+      break;
+    case "monitoring":
+      validateMonitoringConfig(diagnostics, target, config);
+      break;
+    case "microsoft_graph_calendar":
+    case "graph_calendar":
+    case "outlook_calendar":
+      validateGraphCalendarConfig(diagnostics, target, config);
+      break;
+    case "microsoft_graph_mail":
+    case "graph_mail":
+    case "outlook_mail":
+      validateGraphMailConfig(diagnostics, target, config);
+      break;
+    case "erp_private_messages":
+    case "erp_messages_http":
+    case "erp_http":
+      validateErpPrivateMessagesConfig(diagnostics, target, config);
+      break;
+    case "calendar_sample":
+    case "calendar":
+      validateSampleNotificationConfig(diagnostics, target, config, "events");
+      break;
+    case "outlook_mail_sample":
+    case "outlook":
+    case "erp_messages_sample":
+    case "erp_messages":
+    case "erp":
+      validateSampleNotificationConfig(diagnostics, target, config, "messages");
+      break;
+    default:
+      diagnostics.push({
+        level: "error",
+        message: `Adapter ${adapter} is not supported.`
+      });
+  }
+}
+
+function validateAzureDevOpsConfig(
+  diagnostics: ConnectorConfigDiagnostic[],
+  target: string,
+  config: JsonRecord
+) {
+  requireTarget(diagnostics, "azure_devops", target, "work_cards");
+
+  if (!hasAllNonEmpty(config, ["wiql_url", "work_items_url"])) {
+    requireNonEmpty(diagnostics, config, "organization", "is required unless both endpoint URLs are set");
+    requireNonEmpty(diagnostics, config, "project", "is required unless both endpoint URLs are set");
+  }
+
+  validateUrlFields(diagnostics, config, [
+    "wiql_url",
+    "work_items_url",
+    "base_url",
+    "web_url_base"
+  ]);
+  validatePositiveInteger(diagnostics, config, "timeout_seconds");
+}
+
+function validateMonitoringConfig(
+  diagnostics: ConnectorConfigDiagnostic[],
+  target: string,
+  config: JsonRecord
+) {
+  requireTarget(diagnostics, "monitoring", target, "service_health");
+  requireUrlAny(diagnostics, config, ["url"]);
+  validatePositiveInteger(diagnostics, config, "default_maintainer_id");
+  validatePositiveInteger(diagnostics, config, "timeout_seconds");
+}
+
+function validateGraphCalendarConfig(
+  diagnostics: ConnectorConfigDiagnostic[],
+  target: string,
+  config: JsonRecord
+) {
+  requireTarget(diagnostics, "microsoft_graph_calendar", target, "notifications");
+  validateUrlFields(diagnostics, config, [
+    "calendar_view_url",
+    "base_url",
+    "token_url",
+    "authorization_url"
+  ]);
+  validatePositiveInteger(diagnostics, config, "timeout_seconds");
+  validateIntegerRange(diagnostics, config, "top", 1, 50);
+  validateIntegerRange(diagnostics, config, "lookahead_hours", 1, 168);
+}
+
+function validateGraphMailConfig(
+  diagnostics: ConnectorConfigDiagnostic[],
+  target: string,
+  config: JsonRecord
+) {
+  requireTarget(diagnostics, "microsoft_graph_mail", target, "notifications");
+  validateUrlFields(diagnostics, config, [
+    "messages_url",
+    "mail_messages_url",
+    "base_url",
+    "token_url",
+    "authorization_url"
+  ]);
+  validatePositiveInteger(diagnostics, config, "timeout_seconds");
+  validateIntegerRange(diagnostics, config, "top", 1, 50);
+  validateIntegerRange(diagnostics, config, "lookback_hours", 1, 720);
+}
+
+function validateErpPrivateMessagesConfig(
+  diagnostics: ConnectorConfigDiagnostic[],
+  target: string,
+  config: JsonRecord
+) {
+  requireTarget(diagnostics, "erp_private_messages", target, "notifications");
+  requireUrlAny(diagnostics, config, ["messages_url", "private_messages_url", "url"]);
+  validatePositiveInteger(diagnostics, config, "timeout_seconds");
+  validateIntegerRange(diagnostics, config, "top", 1, 100);
+  validateIntegerRange(diagnostics, config, "limit", 1, 100);
+  validateIntegerRange(diagnostics, config, "lookback_hours", 1, 720);
+
+  const apiKeyHeader = stringField(config, "api_key_header");
+  if (apiKeyHeader && !/^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/.test(apiKeyHeader)) {
+    diagnostics.push({
+      level: "error",
+      message: "api_key_header must be a valid HTTP header name."
+    });
+  }
+}
+
+function validateSampleNotificationConfig(
+  diagnostics: ConnectorConfigDiagnostic[],
+  target: string,
+  config: JsonRecord,
+  itemField: string
+) {
+  requireTarget(diagnostics, "sample notification adapter", target, "notifications");
+
+  const items = config[itemField];
+  if (items !== undefined && !Array.isArray(items)) {
+    diagnostics.push({
+      level: "error",
+      message: `${itemField} must be an array when provided.`
+    });
+  }
+}
+
+function requireTarget(
+  diagnostics: ConnectorConfigDiagnostic[],
+  adapter: string,
+  target: string,
+  expected: string
+) {
+  if (target !== expected) {
+    diagnostics.push({
+      level: "error",
+      message: `${adapter} config requires target ${expected}.`
+    });
+  }
+}
+
+function requireUrlAny(
+  diagnostics: ConnectorConfigDiagnostic[],
+  config: JsonRecord,
+  fields: string[]
+) {
+  if (!fields.some((field) => hasNonEmpty(config, field))) {
+    diagnostics.push({
+      level: "error",
+      message: `Set one of ${fields.join(", ")}.`
+    });
+    return;
+  }
+
+  validateUrlFields(diagnostics, config, fields);
+}
+
+function requireNonEmpty(
+  diagnostics: ConnectorConfigDiagnostic[],
+  config: JsonRecord,
+  field: string,
+  reason: string
+) {
+  if (!hasNonEmpty(config, field)) {
+    diagnostics.push({
+      level: "error",
+      message: `${field} ${reason}.`
+    });
+  }
+}
+
+function validateUrlFields(
+  diagnostics: ConnectorConfigDiagnostic[],
+  config: JsonRecord,
+  fields: string[]
+) {
+  fields.forEach((field) => {
+    const value = stringField(config, field);
+    if (value && !isAbsoluteHttpUrl(value)) {
+      diagnostics.push({
+        level: "error",
+        message: `${field} must be an absolute HTTP URL.`
+      });
+    }
+  });
+}
+
+function validatePositiveInteger(
+  diagnostics: ConnectorConfigDiagnostic[],
+  config: JsonRecord,
+  field: string
+) {
+  const value = config[field];
+
+  if (value !== undefined && (!Number.isInteger(value) || Number(value) <= 0)) {
+    diagnostics.push({
+      level: "error",
+      message: `${field} must be a positive integer.`
+    });
+  }
+}
+
+function validateIntegerRange(
+  diagnostics: ConnectorConfigDiagnostic[],
+  config: JsonRecord,
+  field: string,
+  min: number,
+  max: number
+) {
+  const value = config[field];
+
+  if (value !== undefined && (!Number.isInteger(value) || Number(value) < min || Number(value) > max)) {
+    diagnostics.push({
+      level: "error",
+      message: `${field} must be an integer from ${min} to ${max}.`
+    });
+  }
+}
+
+function parseJsonObject(
+  value: string,
+  label: string,
+  diagnostics: ConnectorConfigDiagnostic[]
+): JsonRecord | null {
+  const parsed = parseJsonValue(value, label, diagnostics);
+
+  if (parsed === undefined) {
+    return null;
+  }
+
+  if (!isRecord(parsed)) {
+    diagnostics.push({
+      level: "error",
+      message: `${label} must be a JSON object.`
+    });
+    return null;
+  }
+
+  return parsed;
+}
+
+function parseJsonValue(
+  value: string,
+  label: string,
+  diagnostics: ConnectorConfigDiagnostic[]
+): unknown {
+  try {
+    return JSON.parse(value);
+  } catch {
+    diagnostics.push({
+      level: "error",
+      message: `${label} must be valid JSON.`
+    });
+    return undefined;
+  }
+}
+
+function hasItemsArray(value: unknown) {
+  return isRecord(value) && Array.isArray(value.items);
+}
+
+function isRecord(value: unknown): value is JsonRecord {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function stringField(config: JsonRecord, field: string): string {
+  const value = config[field];
+
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function hasNonEmpty(config: JsonRecord, field: string) {
+  return stringField(config, field).length > 0;
+}
+
+function hasAllNonEmpty(config: JsonRecord, fields: string[]) {
+  return fields.every((field) => hasNonEmpty(config, field));
+}
+
+function isAbsoluteHttpUrl(value: string) {
+  try {
+    const url = new URL(value);
+
+    return url.protocol === "http:" || url.protocol === "https:";
+  } catch {
+    return false;
+  }
 }

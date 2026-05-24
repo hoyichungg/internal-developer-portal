@@ -1,4 +1,5 @@
 import {
+  Alert,
   Box,
   Button,
   Checkbox,
@@ -12,11 +13,17 @@ import {
   TextInput,
   Title
 } from "@mantine/core";
-import { IconBolt, IconPlayerPlay, IconPlugConnected, IconTemplate } from "@tabler/icons-react";
+import {
+  IconAlertTriangle,
+  IconBolt,
+  IconPlayerPlay,
+  IconPlugConnected,
+  IconTemplate
+} from "@tabler/icons-react";
 import type { Dispatch, FormEvent, SetStateAction } from "react";
 
 import type { Connector, ConnectorConfigForm } from "../../types/api";
-import { connectorTemplates } from "./connectorConfig";
+import { connectorConfigDiagnostics, connectorTemplates } from "./connectorConfig";
 
 const templateOptions = connectorTemplates.map((template) => ({
   value: template.id,
@@ -51,6 +58,8 @@ export function ConnectorConfigEditor({
   }
 
   const graphOAuthState = microsoftGraphOAuthState(config.config);
+  const configDiagnostics = connectorConfigDiagnostics(config);
+  const hasConfigErrors = configDiagnostics.some((diagnostic) => diagnostic.level === "error");
 
   return (
     <Paper p="md" withBorder>
@@ -138,6 +147,23 @@ export function ConnectorConfigEditor({
               />
             </Grid.Col>
           </Grid>
+
+          {configDiagnostics.length > 0 && (
+            <Alert
+              color={hasConfigErrors ? "red" : "yellow"}
+              icon={<IconAlertTriangle size={18} />}
+              title="Config checks"
+              variant="light"
+            >
+              <Stack gap={4}>
+                {configDiagnostics.map((diagnostic, index) => (
+                  <Text key={`${diagnostic.message}-${index}`} size="sm">
+                    {diagnostic.message}
+                  </Text>
+                ))}
+              </Stack>
+            </Alert>
+          )}
 
           <Textarea
             label="Config JSON"

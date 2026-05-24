@@ -798,6 +798,184 @@ fn test_sample_notification_adapters_import_product_core_feeds() {
 }
 
 #[test]
+fn test_erp_private_messages_adapter_fetches_and_normalizes_messages() {
+    let client = Client::new();
+    let auth = common::create_admin_auth(&client);
+    let source = common::unique_name("erp_private_adapter");
+    let mock = start_monitoring_mock(json!({
+        "private_messages": [{
+            "message_id": "erp-approval-42",
+            "request_type": "Deployment access approval",
+            "message": "Production deployment access needs review.",
+            "requires_approval": true,
+            "status": "pending",
+            "sender": { "display_name": "ERP Bot" },
+            "due_at": "2026-05-19T08:00:00Z",
+            "web_link": "https://erp.example.test/messages/erp-approval-42"
+        }, {
+            "id": "erp-policy-7",
+            "title": "Expense policy update",
+            "summary": "No engineering action required.",
+            "severity": "info",
+            "is_read": false
+        }]
+    }));
+
+    let response = client
+        .post(format!("{}/connectors", common::APP_HOST))
+        .bearer_auth(&auth.token)
+        .json(&json!({
+            "source": source.clone(),
+            "kind": "erp",
+            "display_name": "ERP Private Messages",
+            "status": "active"
+        }))
+        .send()
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    let adapter_config = json!({
+        "adapter": "erp_private_messages",
+        "messages_url": format!("{}/api/private-messages", mock.base_url),
+        "bearer_token": "erp-bearer-token",
+        "api_key": "erp-api-key",
+        "api_key_header": "x-erp-key",
+        "since": "2026-05-19T00:00:00Z",
+        "unread_only": true,
+        "top": 10,
+        "timeout_seconds": 5
+    })
+    .to_string();
+
+    let response = client
+        .put(format!("{}/connectors/{}/config", common::APP_HOST, source))
+        .bearer_auth(&auth.token)
+        .json(&json!({
+            "target": "notifications",
+            "enabled": true,
+            "schedule_cron": null,
+            "config": adapter_config,
+            "sample_payload": "{\"items\":[]}"
+        }))
+        .send()
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let config_response = response.json::<Value>().unwrap()["data"].clone();
+    assert!(
+        !config_response["config"]
+            .as_str()
+            .unwrap()
+            .contains("erp-bearer-token"),
+        "connector config response must not expose ERP bearer token"
+    );
+    assert!(
+        !config_response["config"]
+            .as_str()
+            .unwrap()
+            .contains("erp-api-key"),
+        "connector config response must not expose ERP API key"
+    );
+    assert!(
+        config_response["config"]
+            .as_str()
+            .unwrap()
+            .contains("***redacted***"),
+        "connector config response should redact ERP secrets"
+    );
+
+    let response = client
+        .post(format!("{}/connectors/{}/runs", common::APP_HOST, source))
+        .bearer_auth(&auth.token)
+        .json(&json!({}))
+        .send()
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    let execution = response.json::<Value>().unwrap()["data"].clone();
+    assert_eq!(execution["source"].as_str().unwrap(), source);
+    assert_eq!(execution["target"], "notifications");
+    assert_eq!(execution["imported"], 2, "execution: {execution:#}");
+    assert_eq!(execution["failed"], 0);
+    assert_eq!(execution["run"]["status"], "success");
+
+    let notifications = execution["data"].as_array().unwrap();
+    let approval = notifications
+        .iter()
+        .find(|item| item["external_id"].as_str() == Some("erp-approval-42"))
+        .cloned()
+        .expect("ERP adapter should import approval message");
+    let policy = notifications
+        .iter()
+        .find(|item| item["external_id"].as_str() == Some("erp-policy-7"))
+        .cloned()
+        .expect("ERP adapter should import policy message");
+
+    assert_eq!(approval["title"], "Deployment access approval");
+    assert_eq!(approval["severity"], "warning");
+    assert_eq!(
+        approval["url"],
+        "https://erp.example.test/messages/erp-approval-42"
+    );
+    assert!(approval["body"].as_str().unwrap().contains("From: ERP Bot"));
+    assert_eq!(policy["title"], "Expense policy update");
+    assert_eq!(policy["severity"], "info");
+    assert_eq!(policy["is_read"], false);
+
+    let dashboard = client
+        .get(format!("{}/dashboard?source={}", common::APP_HOST, source))
+        .bearer_auth(&auth.token)
+        .send()
+        .unwrap()
+        .json::<Value>()
+        .unwrap()["data"]
+        .clone();
+    assert_contains_id(
+        &dashboard["notifications"],
+        approval["id"].as_i64().unwrap(),
+    );
+    assert_contains_id(&dashboard["notifications"], policy["id"].as_i64().unwrap());
+
+    let requests = mock.join();
+    assert_eq!(requests.len(), 1);
+    let request = &requests[0];
+    assert!(
+        request.starts_with("GET /api/private-messages?"),
+        "ERP adapter should call private messages endpoint: {requests:?}"
+    );
+    assert!(
+        request.contains("since=2026-05-19T00%3A00%3A00Z"),
+        "ERP adapter should include configured since filter: {requests:?}"
+    );
+    assert!(
+        request.contains("unread_only=true"),
+        "ERP adapter should include unread filter: {requests:?}"
+    );
+    assert!(
+        request.contains("limit=10"),
+        "ERP adapter should include configured limit: {requests:?}"
+    );
+    let lower_request = request.to_ascii_lowercase();
+    assert!(
+        lower_request.contains("authorization: bearer erp-bearer-token"),
+        "ERP adapter should send bearer token: {requests:?}"
+    );
+    assert!(
+        lower_request.contains("x-erp-key: erp-api-key"),
+        "ERP adapter should send configured API key header: {requests:?}"
+    );
+
+    let response = client
+        .delete(format!("{}/connectors/{}", common::APP_HOST, source))
+        .bearer_auth(&auth.token)
+        .send()
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    common::delete_test_notification(&client, approval);
+    common::delete_test_notification(&client, policy);
+    common::delete_test_user(auth.user_id);
+}
+
+#[test]
 fn test_microsoft_graph_calendar_adapter_fetches_and_normalizes_events() {
     let client = Client::new();
     let auth = common::create_admin_auth(&client);

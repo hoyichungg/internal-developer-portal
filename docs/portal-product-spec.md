@@ -202,12 +202,13 @@ The project already has:
 - Microsoft Graph Calendar adapter for Outlook calendar events.
 - Microsoft Graph Mail adapter for Outlook mail notifications.
 - Microsoft Graph OAuth connect flow, refresh-token handling, and encrypted token rotation.
+- Generic ERP private message HTTP adapter for notification imports.
 - Service health check history for homepage trend and incident summaries.
 - Frontend dashboard, catalog, connectors, audit, and service overview views.
 
 Future improvements can include:
 
-- ERP private message connector.
+- ERP-specific writeback, approvals, and richer private-message workflows.
 - More complete home page aggregation.
 - OpenAPI or API docs.
 - Deeper charts, alerting, and incident drill-down workflows.

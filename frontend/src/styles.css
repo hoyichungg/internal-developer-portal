@@ -203,35 +203,121 @@ body {
   transform: translateY(-1px);
 }
 
-.attentionList {
+.workbenchSurface {
+  min-width: 0;
+}
+
+.workbenchStats {
+  min-width: 0;
+}
+
+.workbenchStat {
+  min-width: 0;
+  border-left: 3px solid var(--mantine-color-default-border);
+  padding-left: 12px;
+}
+
+.workbenchStat.is-critical {
+  border-left-color: var(--mantine-color-red-6);
+}
+
+.workbenchStat.is-work {
+  border-left-color: var(--mantine-color-yellow-6);
+}
+
+.workbenchStat.is-messages {
+  border-left-color: var(--mantine-color-blue-6);
+}
+
+.workbenchStat.is-runs {
+  border-left-color: var(--mantine-color-orange-6);
+}
+
+.workbenchStatValue {
+  font-size: 25px;
+  line-height: 1.1;
+}
+
+.workbenchToolbar {
+  min-width: 0;
+}
+
+.workbenchFilter {
+  flex: 1 1 320px;
+  min-width: 280px;
+}
+
+.workbenchSort {
+  flex: 0 1 172px;
+  min-width: 154px;
+}
+
+.workbenchSearch {
+  flex: 1 1 220px;
+  min-width: 180px;
+}
+
+.workbenchResultMeta {
+  min-height: 28px;
+}
+
+.workbenchList {
   border-top: 1px solid var(--mantine-color-default-border);
 }
 
-.attentionRow {
-  min-height: 64px;
+.workbenchRow {
+  min-height: 78px;
   padding-block: 12px;
   border-bottom: 1px solid var(--mantine-color-default-border);
 }
 
-.attentionIdentity {
+.workbenchIdentity {
   flex: 1 1 auto;
   min-width: 0;
 }
 
-.attentionCopy {
+.workbenchCopy {
   flex: 1 1 auto;
   min-width: 0;
 }
 
-.attentionRow :where(.mantine-Button-root) {
-  flex: 0 0 auto;
+.workbenchTitleRow {
+  min-width: 0;
 }
 
-.attentionTitle,
-.attentionDetail {
+.workbenchTitle {
+  flex: 0 1 auto;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.workbenchKind {
+  flex: 0 0 auto;
+  border: 1px solid var(--mantine-color-default-border);
+  border-radius: 999px;
+  padding: 1px 7px;
+  text-transform: uppercase;
+}
+
+.workbenchDetail,
+.workbenchMetaText {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workbenchMeta {
+  min-width: 0;
+}
+
+.workbenchMetaText {
+  max-width: 180px;
+}
+
+.workbenchRow :where(.mantine-Button-root) {
+  flex: 0 0 auto;
 }
 
 .healthTrendStats {
@@ -975,13 +1061,26 @@ body {
     flex: 1 1 0;
   }
 
-  .attentionRow {
+  .workbenchToolbar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .workbenchFilter,
+  .workbenchSort,
+  .workbenchSearch {
+    flex: 1 1 auto;
+    min-width: 0;
+    width: 100%;
+  }
+
+  .workbenchRow {
     align-items: stretch;
     flex-direction: column;
     gap: 10px;
   }
 
-  .attentionRow :where(.mantine-Button-root) {
+  .workbenchRow :where(.mantine-Button-root) {
     width: 100%;
   }
 

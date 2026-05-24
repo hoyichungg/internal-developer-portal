@@ -212,8 +212,13 @@ impl Validate for ConnectorConfigUpdate {
             1_000_000,
         );
 
-        if serde_json::from_str::<serde_json::Value>(&self.config).is_err() {
-            errors.push(FieldViolation::new("config", "must be valid JSON"));
+        match serde_json::from_str::<serde_json::Value>(&self.config) {
+            Ok(config) => crate::connector_config_validation::validate_connector_config_adapter(
+                &mut errors,
+                &self.target,
+                &config,
+            ),
+            Err(_) => errors.push(FieldViolation::new("config", "must be valid JSON")),
         }
 
         match serde_json::from_str::<serde_json::Value>(&self.sample_payload) {

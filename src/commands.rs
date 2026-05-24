@@ -463,7 +463,7 @@ async fn ensure_demo_product_connectors(c: &mut AsyncPgConnection) -> Result<(),
             "messages": [{
                 "id": "access-approval",
                 "title": "ERP: Deployment access approval waiting",
-                "message": "Sample ERP private message. Replace this adapter with the real ERP integration when one is available.",
+                "message": "Sample ERP private message. Configure erp_private_messages for a real HTTP endpoint.",
                 "requires_approval": true
             }]
         }),
@@ -471,7 +471,7 @@ async fn ensure_demo_product_connectors(c: &mut AsyncPgConnection) -> Result<(),
             "items": [{
                 "external_id": "access-approval",
                 "title": "ERP: Deployment access approval waiting",
-                "body": "Sample ERP private message. Replace this adapter with the real ERP integration when one is available.",
+                "body": "Sample ERP private message. Configure erp_private_messages for a real HTTP endpoint.",
                 "severity": "warning",
                 "is_read": false,
                 "url": null

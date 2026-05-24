@@ -336,20 +336,23 @@ creates queued runs when `next_run_at` is due. Supported schedule values are
 
 Connector configs can also select a real adapter. Supported adapters include
 `azure_devops` for the `work_cards` target, `monitoring` for the
-`service_health` target, and `microsoft_graph_calendar` /
-`microsoft_graph_mail` for the `notifications` target. When `config` contains
-`"adapter": "azure_devops"`, the worker calls
+`service_health` target, and `microsoft_graph_calendar`,
+`microsoft_graph_mail`, and `erp_private_messages` for the `notifications`
+target. When `config` contains `"adapter": "azure_devops"`, the worker calls
 Azure DevOps WIQL and work item batch APIs, then normalizes work items into the
 existing `work_cards` payload. When `config` contains
 `"adapter": "microsoft_graph_calendar"`, the worker calls Microsoft Graph
 Calendar View for the configured time window and normalizes Outlook events into
 morning homepage notifications. When `config` contains
 `"adapter": "microsoft_graph_mail"`, the worker calls Microsoft Graph messages
-and normalizes Outlook mail into the same notification feed. Microsoft Graph
-adapters can use either a short-lived `access_token` or OAuth refresh
-credentials; when a refresh token is configured and the access token is missing,
-expired, or near expiry, the worker refreshes the access token and stores the
-rotated token values back into the encrypted connector config.
+and normalizes Outlook mail into the same notification feed. When `config`
+contains `"adapter": "erp_private_messages"`, the worker calls a configured ERP
+private-message HTTP endpoint and normalizes messages, approvals, and pending
+requests into homepage notifications. Microsoft Graph adapters can use either a
+short-lived `access_token` or OAuth refresh credentials; when a refresh token is
+configured and the access token is missing, expired, or near expiry, the worker
+refreshes the access token and stores the rotated token values back into the
+encrypted connector config.
 For Microsoft Graph adapters, admins can use the Connect Microsoft or Reconnect
 Microsoft button in the connector config editor after setting `tenant_id`,
 `client_id`, optional `client_secret`, and `scope`. Register
@@ -362,12 +365,10 @@ For product walkthroughs and local development, three notification adapters are
 available without external credentials: `calendar_sample`, `outlook_mail_sample`,
 and `erp_messages_sample`. These target `notifications` and normalize sample
 calendar events, mail messages, and ERP-style private messages into the same
-payload accepted by `POST /connectors/<source>/notifications/import`. The ERP
-adapter is intentionally a mock/sample adapter, so it does not require a real ERP
-instance.
+payload accepted by `POST /connectors/<source>/notifications/import`.
 Config responses redact secret-looking keys such as `personal_access_token`,
 `pat`, `token`, `password`, `secret`, `client_secret`, `bearer_token`,
-`access_token`, `refresh_token`, and `api_key`.
+`access_token`, `refresh_token`, `api_key`, `x-api-key`, and `authorization`.
 Those secret values are encrypted before they are stored in
 `connector_configs.config`; the worker decrypts them only while preparing an
 adapter request. Set `CONNECTOR_SECRET_KEY` to a stable high-entropy value in
@@ -461,6 +462,32 @@ to a user principal name to call `/users/<user_id>/...`, or set `messages_url`
 for a custom proxy or mock server. Messages are normalized into notification
 records with `Mail: ...` titles, sender/received/preview details,
 importance-derived severity, read state, and Outlook web links when available.
+
+ERP private message adapter config:
+
+```json
+{
+  "adapter": "erp_private_messages",
+  "messages_url": "https://erp.example.test/api/private-messages",
+  "bearer_token": "...",
+  "api_key": "...",
+  "api_key_header": "x-api-key",
+  "unread_only": true,
+  "lookback_hours": 24,
+  "top": 25,
+  "timeout_seconds": 15
+}
+```
+
+The ERP adapter calls `messages_url`, `private_messages_url`, or `url`. Optional
+`since`, `updated_after`, `received_after`, `lookback_hours`, `unread_only`,
+`top`, and `limit` settings are appended as query parameters when provided. The
+response can be `{ "items": [...] }`, `{ "messages": [...] }`,
+`{ "private_messages": [...] }`, the same arrays under `data`, or a top-level
+array. Messages are normalized into notification records using common fields
+such as `id`, `message_id`, `request_id`, `approval_id`, `title`,
+`request_type`, `message`, `summary`, `severity`, `priority`, `status`,
+`requires_approval`, `is_read`, and `url`.
 
 Sample notification adapter configs:
 

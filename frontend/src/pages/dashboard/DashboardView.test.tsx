@@ -1,4 +1,4 @@
-import { screen } from "@testing-library/react";
+import { screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
@@ -7,7 +7,7 @@ import type { MeOverviewResponse } from "../../types/api";
 import { createMockApiClient } from "../../test/mockApiClient";
 import { renderWithProviders } from "../../test/render";
 
-describe("DashboardView attention queue", () => {
+describe("DashboardView daily workbench", () => {
   it("routes each today-first item to the expected detail surface", async () => {
     const user = userEvent.setup();
     const onOpenService = vi.fn();
@@ -57,6 +57,43 @@ describe("DashboardView attention queue", () => {
     await user.click(screen.getByRole("button", { name: "Details Incident summary" }));
     expect(onOpenNotification).toHaveBeenCalledWith(73);
   });
+
+  it("filters, searches, and sorts the daily workbench", async () => {
+    const user = userEvent.setup();
+    const { client } = createMockApiClient({
+      "GET /me/overview": overviewWithPriorityItems()
+    });
+
+    renderWithProviders(
+      <DashboardView
+        client={client}
+        onOpenService={vi.fn()}
+        onOpenConnector={vi.fn()}
+        onOpenWorkCard={vi.fn()}
+        onOpenNotification={vi.fn()}
+      />
+    );
+
+    const workbench = await screen.findByLabelText("Daily workbench");
+    expect(within(workbench).getByText("Identity API")).toBeInTheDocument();
+    expect(within(workbench).getByText("Fix blocked deployment")).toBeInTheDocument();
+
+    await user.click(within(workbench).getByRole("radio", { name: "Work" }));
+    expect(within(workbench).getByText("Fix blocked deployment")).toBeInTheDocument();
+    expect(within(workbench).queryByText("Identity API")).not.toBeInTheDocument();
+
+    await user.click(within(workbench).getByRole("radio", { name: "All" }));
+    await user.type(within(workbench).getByLabelText("Search workbench"), "incident");
+    expect(within(workbench).getByText("Incident summary")).toBeInTheDocument();
+    expect(within(workbench).queryByText("Fix blocked deployment")).not.toBeInTheDocument();
+
+    await user.click(within(workbench).getByRole("button", { name: "Clear" }));
+    await user.click(within(workbench).getByLabelText("Sort workbench"));
+    await user.click(await screen.findByRole("option", { name: "Newest first" }));
+
+    const rows = within(workbench).getAllByTestId("workbench-row");
+    expect(within(rows[0]).getByText("Incident summary")).toBeInTheDocument();
+  });
 });
 
 function overviewWithPriorityItems(): MeOverviewResponse {
@@ -95,7 +132,7 @@ function overviewWithPriorityItems(): MeOverviewResponse {
         due_at: null,
         url: null,
         created_at: "2026-05-19T00:00:00",
-        updated_at: "2026-05-19T00:00:00"
+        updated_at: "2026-05-19T00:02:00"
       }
     ],
     unread_notifications: [
@@ -109,7 +146,7 @@ function overviewWithPriorityItems(): MeOverviewResponse {
         is_read: false,
         url: null,
         created_at: "2026-05-19T00:00:00",
-        updated_at: "2026-05-19T00:00:00"
+        updated_at: "2026-05-19T00:04:00"
       }
     ],
     failed_connector_runs: [
@@ -123,7 +160,7 @@ function overviewWithPriorityItems(): MeOverviewResponse {
         duration_ms: 120,
         error_message: "Graph request returned 401",
         started_at: "2026-05-19T00:00:00",
-        finished_at: "2026-05-19T00:00:01",
+        finished_at: "2026-05-19T00:01:00",
         trigger: "scheduled",
         claimed_at: null,
         worker_id: "worker-1"
@@ -138,7 +175,8 @@ function overviewWithPriorityItems(): MeOverviewResponse {
         detail: "down - monitoring",
         source: "monitoring",
         target: "service_health",
-        service_id: 7
+        service_id: 7,
+        occurred_at: "2026-05-19T00:00:00"
       },
       {
         key: "run-91",
@@ -148,7 +186,8 @@ function overviewWithPriorityItems(): MeOverviewResponse {
         detail: "Graph request returned 401",
         source: "graph-calendar",
         target: "notifications",
-        record_id: 91
+        record_id: 91,
+        occurred_at: "2026-05-19T00:01:00"
       },
       {
         key: "work-42",
@@ -158,7 +197,8 @@ function overviewWithPriorityItems(): MeOverviewResponse {
         detail: "urgent - platform-team - azure-devops",
         source: "azure-devops",
         target: "work_cards",
-        record_id: 42
+        record_id: 42,
+        occurred_at: "2026-05-19T00:02:00"
       },
       {
         key: "notification-73",
@@ -168,7 +208,8 @@ function overviewWithPriorityItems(): MeOverviewResponse {
         detail: "graph-calendar",
         source: "graph-calendar",
         target: "notifications",
-        record_id: 73
+        record_id: 73,
+        occurred_at: "2026-05-19T00:04:00"
       }
     ],
     health_history: {

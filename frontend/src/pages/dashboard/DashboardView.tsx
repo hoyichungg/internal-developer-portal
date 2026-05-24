@@ -5,12 +5,23 @@ import {
   Grid,
   Group,
   Paper,
+  SegmentedControl,
+  Select,
   SimpleGrid,
   Stack,
   Text,
+  TextInput,
   Title
 } from "@mantine/core";
-import { IconAlertTriangle, IconArrowRight, IconExternalLink } from "@tabler/icons-react";
+import {
+  IconAlertTriangle,
+  IconArrowRight,
+  IconExternalLink,
+  IconFilter,
+  IconSearch,
+  IconSortDescending
+} from "@tabler/icons-react";
+import { useMemo, useState } from "react";
 
 import type { ApiClient } from "../../api/client";
 import { DataPanel } from "../../components/DataPanel";
@@ -77,9 +88,9 @@ export function DashboardView({
           <OperationsWarning operations={overview.operations} />
 
           <Grid>
-            <Grid.Col span={{ base: 12, lg: 6 }}>
-              <DataPanel title="Today first">
-                <AttentionQueue
+            <Grid.Col span={{ base: 12, lg: 7 }}>
+              <DataPanel title="Daily workbench">
+                <DailyWorkbench
                   overview={overview}
                   onOpenService={onOpenService}
                   onOpenConnector={onOpenConnector}
@@ -89,7 +100,7 @@ export function DashboardView({
               </DataPanel>
             </Grid.Col>
 
-            <Grid.Col span={{ base: 12, lg: 6 }}>
+            <Grid.Col span={{ base: 12, lg: 5 }}>
               <DataPanel title="Health trend">
                 <HealthTrendPanel history={overview.health_history} onOpenService={onOpenService} />
               </DataPanel>
@@ -202,6 +213,206 @@ export function DashboardView({
         </Stack>
       )}
     </ViewFrame>
+  );
+}
+
+type WorkbenchFilter =
+  | "all"
+  | "service"
+  | "work_card"
+  | "notification"
+  | "connector_run"
+  | "operations";
+type WorkbenchSort = "impact" | "recent" | "source";
+
+type WorkbenchItem = {
+  key: string;
+  kind: Exclude<WorkbenchFilter, "all">;
+  kindLabel: string;
+  severity: string;
+  title: string;
+  detail: string;
+  source?: string | null;
+  target?: string | null;
+  occurredAt?: DateTimeString | null;
+  rank: number;
+  action: AttentionAction;
+  url?: string | null;
+};
+
+const workbenchFilters: { label: string; value: WorkbenchFilter }[] = [
+  { label: "All", value: "all" },
+  { label: "Services", value: "service" },
+  { label: "Work", value: "work_card" },
+  { label: "Messages", value: "notification" },
+  { label: "Runs", value: "connector_run" },
+  { label: "Ops", value: "operations" }
+];
+
+const workbenchSorts: { label: string; value: WorkbenchSort }[] = [
+  { label: "Impact first", value: "impact" },
+  { label: "Newest first", value: "recent" },
+  { label: "Source", value: "source" }
+];
+
+function DailyWorkbench({
+  overview,
+  onOpenService,
+  onOpenConnector,
+  onOpenWorkCard,
+  onOpenNotification
+}: {
+  overview: MeOverviewResponse;
+  onOpenService: (serviceId: string | number) => void;
+  onOpenConnector: (target: ConnectorDrillTarget) => void;
+  onOpenWorkCard: (workCardId: string | number) => void;
+  onOpenNotification: (notificationId: string | number) => void;
+}) {
+  const [kindFilter, setKindFilter] = useState<WorkbenchFilter>("all");
+  const [sortMode, setSortMode] = useState<WorkbenchSort>("impact");
+  const [query, setQuery] = useState("");
+  const allItems = useMemo(() => buildWorkbenchItems(overview), [overview]);
+  const visibleItems = useMemo(
+    () => sortWorkbenchItems(filterWorkbenchItems(allItems, kindFilter, query), sortMode),
+    [allItems, kindFilter, query, sortMode]
+  );
+  const summary = useMemo(() => summarizeWorkbenchItems(allItems), [allItems]);
+
+  return (
+    <Box component="section" aria-label="Daily workbench" className="workbenchSurface">
+      <Stack gap="md">
+        <SimpleGrid cols={{ base: 2, sm: 4 }} className="workbenchStats">
+          <WorkbenchStat label="Critical" value={summary.critical} tone="critical" />
+          <WorkbenchStat label="Work" value={summary.work} tone="work" />
+          <WorkbenchStat label="Messages" value={summary.messages} tone="messages" />
+          <WorkbenchStat label="Runs" value={summary.runs} tone="runs" />
+        </SimpleGrid>
+
+        <Group gap="sm" align="flex-end" className="workbenchToolbar">
+          <SegmentedControl
+            aria-label="Filter workbench"
+            size="sm"
+            value={kindFilter}
+            data={workbenchFilters}
+            onChange={(value) => setKindFilter(value as WorkbenchFilter)}
+            className="workbenchFilter"
+          />
+          <Select
+            aria-label="Sort workbench"
+            size="sm"
+            value={sortMode}
+            data={workbenchSorts}
+            leftSection={<IconSortDescending size={16} />}
+            onChange={(value) => setSortMode((value as WorkbenchSort) || "impact")}
+            className="workbenchSort"
+          />
+          <TextInput
+            aria-label="Search workbench"
+            size="sm"
+            value={query}
+            placeholder="Search"
+            leftSection={<IconSearch size={16} />}
+            onChange={(event) => setQuery(event.currentTarget.value)}
+            className="workbenchSearch"
+          />
+        </Group>
+
+        <Group justify="space-between" gap="sm" className="workbenchResultMeta">
+          <Group gap={6} wrap="nowrap">
+            <IconFilter size={15} />
+            <Text size="sm" c="dimmed">
+              {visibleItems.length} of {allItems.length}
+            </Text>
+          </Group>
+          {query && (
+            <Button size="compact-sm" variant="subtle" onClick={() => setQuery("")}>
+              Clear
+            </Button>
+          )}
+        </Group>
+
+        {visibleItems.length > 0 ? (
+          <Stack gap={0} className="workbenchList">
+            {visibleItems.slice(0, 12).map((item) => (
+              <Group
+                key={item.key}
+                data-testid="workbench-row"
+                justify="space-between"
+                align="center"
+                wrap="nowrap"
+                className={`workbenchRow is-${item.kind}`}
+              >
+                <Group gap="sm" wrap="nowrap" className="workbenchIdentity">
+                  <StatusBadge value={item.severity} />
+                  <Box className="workbenchCopy">
+                    <Group gap="xs" wrap="nowrap" className="workbenchTitleRow">
+                      <Text fw={760} className="workbenchTitle" title={item.title}>
+                        {item.title}
+                      </Text>
+                      <Text size="xs" c="dimmed" className="workbenchKind">
+                        {item.kindLabel}
+                      </Text>
+                    </Group>
+                    <Text size="sm" c="dimmed" className="workbenchDetail" title={item.detail}>
+                      {item.detail}
+                    </Text>
+                    <Group gap={6} className="workbenchMeta">
+                      {item.source && (
+                        <Text size="xs" c="dimmed" className="workbenchMetaText">
+                          {item.source}
+                        </Text>
+                      )}
+                      {item.target && (
+                        <Text size="xs" c="dimmed" className="workbenchMetaText">
+                          {item.target}
+                        </Text>
+                      )}
+                      {item.occurredAt && (
+                        <Text size="xs" c="dimmed" className="workbenchMetaText">
+                          {formatCheckTime(item.occurredAt)}
+                        </Text>
+                      )}
+                    </Group>
+                  </Box>
+                </Group>
+
+                <AttentionActionButton
+                  action={item.action}
+                  itemTitle={item.title}
+                  onOpenService={onOpenService}
+                  onOpenConnector={onOpenConnector}
+                  onOpenWorkCard={onOpenWorkCard}
+                  onOpenNotification={onOpenNotification}
+                />
+              </Group>
+            ))}
+          </Stack>
+        ) : (
+          <EmptyText>No matching workbench items</EmptyText>
+        )}
+      </Stack>
+    </Box>
+  );
+}
+
+function WorkbenchStat({
+  label,
+  value,
+  tone
+}: {
+  label: string;
+  value: number;
+  tone: string;
+}) {
+  return (
+    <Box className={`workbenchStat is-${tone}`}>
+      <Text size="xs" c="dimmed" fw={700} tt="uppercase">
+        {label}
+      </Text>
+      <Text fw={850} className="workbenchStatValue">
+        {value}
+      </Text>
+    </Box>
   );
 }
 
@@ -412,61 +623,6 @@ function MessageList({
   );
 }
 
-function AttentionQueue({
-  overview,
-  onOpenService,
-  onOpenConnector,
-  onOpenWorkCard,
-  onOpenNotification
-}: {
-  overview: MeOverviewResponse;
-  onOpenService: (serviceId: string | number) => void;
-  onOpenConnector: (target: ConnectorDrillTarget) => void;
-  onOpenWorkCard: (workCardId: string | number) => void;
-  onOpenNotification: (notificationId: string | number) => void;
-}) {
-  const items = overview.priority_items?.length
-    ? overview.priority_items
-    : buildAttentionItems(overview);
-
-  if (items.length === 0) {
-    return <EmptyText>Nothing needs attention</EmptyText>;
-  }
-
-  return (
-    <Stack gap={0} className="attentionList">
-      {items.map((item) => {
-        const action = attentionAction(item);
-
-        return (
-          <Group key={item.key} justify="space-between" align="center" wrap="nowrap" className="attentionRow">
-            <Group gap="sm" wrap="nowrap" className="attentionIdentity">
-              <StatusBadge value={item.severity} />
-              <Box className="attentionCopy">
-                <Text fw={750} className="attentionTitle" title={item.title}>
-                  {item.title}
-                </Text>
-                <Text size="sm" c="dimmed" className="attentionDetail" title={item.detail}>
-                  {item.detail}
-                </Text>
-              </Box>
-            </Group>
-
-            <AttentionActionButton
-              action={action}
-              itemTitle={item.title}
-              onOpenService={onOpenService}
-              onOpenConnector={onOpenConnector}
-              onOpenWorkCard={onOpenWorkCard}
-              onOpenNotification={onOpenNotification}
-            />
-          </Group>
-        );
-      })}
-    </Stack>
-  );
-}
-
 type AttentionAction =
   | { type: "service"; label: string; serviceId: string | number }
   | { type: "connector"; label: string; target: ConnectorDrillTarget }
@@ -668,6 +824,327 @@ function buildAttentionItems(overview: MeOverviewResponse): DashboardPriorityIte
   }));
 
   return [...operationItems, ...services, ...workCards, ...notifications, ...runs].slice(0, 8);
+}
+
+function buildWorkbenchItems(overview: MeOverviewResponse): WorkbenchItem[] {
+  const items = new Map<string, WorkbenchItem>();
+  const put = (item: WorkbenchItem) => {
+    const existing = items.get(item.key);
+
+    if (!existing) {
+      items.set(item.key, item);
+      return;
+    }
+
+    if (item.rank < existing.rank) {
+      items.set(item.key, {
+        ...item,
+        occurredAt: item.occurredAt || existing.occurredAt,
+        url: item.url || existing.url
+      });
+      return;
+    }
+
+    if (!existing.occurredAt || !existing.url) {
+      items.set(item.key, {
+        ...existing,
+        occurredAt: existing.occurredAt || item.occurredAt,
+        url: existing.url || item.url
+      });
+    }
+  };
+
+  const priorityItems = overview.priority_items?.length
+    ? overview.priority_items
+    : buildAttentionItems(overview);
+  priorityItems.forEach((item) => put(workbenchItemFromPriority(item)));
+
+  (overview.services || [])
+    .filter((service) => service.health_status !== "healthy")
+    .forEach((service) =>
+      put({
+        key: `service-${service.id}`,
+        kind: "service",
+        kindLabel: "Service",
+        severity: service.health_status,
+        title: service.name,
+        detail: `${service.health_status} service from ${service.source}`,
+        source: service.source,
+        target: "service_health",
+        occurredAt: service.last_checked_at || service.updated_at,
+        rank: service.health_status === "down" ? 10 : 20,
+        action: { type: "service", label: "Overview", serviceId: service.id },
+        url: service.dashboard_url || service.runbook_url
+      })
+    );
+
+  (overview.open_work_cards || []).forEach((card) =>
+    put({
+      key: `work-card-${card.id}`,
+      kind: "work_card",
+      kindLabel: "Work",
+      severity: workCardSeverity(card.status, card.priority),
+      title: card.title,
+      detail: [card.status, card.priority, card.assignee].filter(Boolean).join(" - "),
+      source: card.source,
+      target: "work_cards",
+      occurredAt: card.updated_at || card.created_at,
+      rank: workCardRank(card.status, card.priority),
+      action: { type: "work-card", label: "Details", workCardId: card.id },
+      url: card.url
+    })
+  );
+
+  (overview.unread_notifications || []).forEach((notification) =>
+    put({
+      key: `notification-${notification.id}`,
+      kind: "notification",
+      kindLabel: "Message",
+      severity: notification.severity,
+      title: notification.title,
+      detail: notification.body || notification.source,
+      source: notification.source,
+      target: "notifications",
+      occurredAt: notification.updated_at || notification.created_at,
+      rank: notificationRank(notification.severity),
+      action: {
+        type: "notification",
+        label: "Details",
+        notificationId: notification.id
+      },
+      url: notification.url
+    })
+  );
+
+  (overview.failed_connector_runs || []).forEach((run) =>
+    put({
+      key: `connector-run-${run.id}`,
+      kind: "connector_run",
+      kindLabel: "Run",
+      severity: run.status,
+      title: `${run.source} / ${run.target}`,
+      detail: run.error_message || `${run.failure_count} failed item(s)`,
+      source: run.source,
+      target: run.target,
+      occurredAt: run.finished_at || run.started_at,
+      rank: run.status === "failed" ? 60 : 65,
+      action: {
+        type: "connector",
+        label: "Run detail",
+        target: { source: run.source, target: run.target, runId: run.id }
+      }
+    })
+  );
+
+  return sortWorkbenchItems(Array.from(items.values()), "impact");
+}
+
+function workbenchItemFromPriority(item: DashboardPriorityItem): WorkbenchItem {
+  const kind = workbenchKindFromPriority(item);
+
+  return {
+    key: workbenchKeyFromPriority(item),
+    kind,
+    kindLabel: workbenchKindLabel(kind),
+    severity: item.severity || "info",
+    title: item.title,
+    detail: item.detail,
+    source: item.source,
+    target: item.target,
+    occurredAt: item.occurred_at,
+    rank: typeof item.rank === "number" ? item.rank : impactRank(item.severity),
+    action: attentionAction(item),
+    url: item.url
+  };
+}
+
+function workbenchKeyFromPriority(item: DashboardPriorityItem): string {
+  const serviceId = item.service_id ?? item.serviceId;
+
+  if (serviceId) {
+    return `service-${serviceId}`;
+  }
+  if (item.kind === "connector_run" && item.record_id) {
+    return `connector-run-${item.record_id}`;
+  }
+  if (item.kind === "work_card" && item.record_id) {
+    return `work-card-${item.record_id}`;
+  }
+  if (item.kind === "notification" && item.record_id) {
+    return `notification-${item.record_id}`;
+  }
+
+  return `priority-${item.key}`;
+}
+
+function workbenchKindFromPriority(item: DashboardPriorityItem): WorkbenchItem["kind"] {
+  if (item.service_id || item.serviceId || item.kind === "service") {
+    return "service";
+  }
+  if (item.kind === "work_card") {
+    return "work_card";
+  }
+  if (item.kind === "notification") {
+    return "notification";
+  }
+  if (item.kind === "connector_run") {
+    return "connector_run";
+  }
+
+  return "operations";
+}
+
+function workbenchKindLabel(kind: WorkbenchItem["kind"]): string {
+  switch (kind) {
+    case "service":
+      return "Service";
+    case "work_card":
+      return "Work";
+    case "notification":
+      return "Message";
+    case "connector_run":
+      return "Run";
+    case "operations":
+      return "Ops";
+  }
+}
+
+function filterWorkbenchItems(
+  items: WorkbenchItem[],
+  kindFilter: WorkbenchFilter,
+  query: string
+): WorkbenchItem[] {
+  const needle = query.trim().toLowerCase();
+
+  return items.filter((item) => {
+    if (kindFilter !== "all" && item.kind !== kindFilter) {
+      return false;
+    }
+    if (!needle) {
+      return true;
+    }
+
+    return [
+      item.title,
+      item.detail,
+      item.source,
+      item.target,
+      item.kindLabel,
+      item.severity
+    ]
+      .filter(Boolean)
+      .some((value) => String(value).toLowerCase().includes(needle));
+  });
+}
+
+function sortWorkbenchItems(items: WorkbenchItem[], sortMode: WorkbenchSort): WorkbenchItem[] {
+  return [...items].sort((left, right) => {
+    if (sortMode === "recent") {
+      return (
+        timeValue(right.occurredAt) - timeValue(left.occurredAt) ||
+        left.rank - right.rank ||
+        left.title.localeCompare(right.title)
+      );
+    }
+
+    if (sortMode === "source") {
+      return (
+        String(left.source || "").localeCompare(String(right.source || "")) ||
+        left.rank - right.rank ||
+        left.title.localeCompare(right.title)
+      );
+    }
+
+    return (
+      left.rank - right.rank ||
+      timeValue(right.occurredAt) - timeValue(left.occurredAt) ||
+      left.title.localeCompare(right.title)
+    );
+  });
+}
+
+function summarizeWorkbenchItems(items: WorkbenchItem[]) {
+  return {
+    critical: items.filter((item) => isCriticalWorkbenchItem(item)).length,
+    work: items.filter((item) => item.kind === "work_card").length,
+    messages: items.filter((item) => item.kind === "notification").length,
+    runs: items.filter((item) => item.kind === "connector_run").length
+  };
+}
+
+function isCriticalWorkbenchItem(item: WorkbenchItem): boolean {
+  return ["blocked", "critical", "down", "error", "failed", "urgent"].includes(
+    item.severity.toLowerCase()
+  );
+}
+
+function workCardSeverity(status: string, priority: string): string {
+  if (status === "blocked") {
+    return "blocked";
+  }
+  return priority || status;
+}
+
+function workCardRank(status: string, priority: string): number {
+  if (status === "blocked") {
+    return 30;
+  }
+
+  switch (priority) {
+    case "urgent":
+      return 40;
+    case "high":
+      return 45;
+    case "medium":
+      return 55;
+    default:
+      return 70;
+  }
+}
+
+function notificationRank(severity: string): number {
+  switch (severity) {
+    case "critical":
+      return 50;
+    case "warning":
+      return 55;
+    default:
+      return 80;
+  }
+}
+
+function impactRank(severity: string): number {
+  switch (severity) {
+    case "down":
+      return 10;
+    case "degraded":
+      return 20;
+    case "blocked":
+      return 30;
+    case "urgent":
+      return 40;
+    case "critical":
+      return 50;
+    case "failed":
+      return 60;
+    case "partial_success":
+      return 65;
+    case "warning":
+    case "stale":
+    case "missing":
+      return 70;
+    default:
+      return 80;
+  }
+}
+
+function timeValue(value?: DateTimeString | null): number {
+  if (!value) {
+    return 0;
+  }
+
+  const time = Date.parse(value);
+  return Number.isFinite(time) ? time : 0;
 }
 
 function ServiceCards({
