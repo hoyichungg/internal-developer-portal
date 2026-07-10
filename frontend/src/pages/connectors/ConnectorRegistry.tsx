@@ -40,8 +40,13 @@ export function ConnectorRegistry({
                 </Text>
               }
               description={
-                <Text size="xs" c="dimmed" className="connectorRegistryMeta" title={`${connector.source} - ${connector.kind}`}>
-                  {connector.source} - {connector.kind}
+                <Text
+                  size="xs"
+                  c="dimmed"
+                  className="connectorRegistryMeta"
+                  title={`${connector.source} - ${connector.kind} - ${scopeLabel(connector)}`}
+                >
+                  {connector.source} - {connector.kind} - {scopeLabel(connector)}
                 </Text>
               }
               rightSection={<StatusBadge value={connector.status} />}
@@ -52,4 +57,10 @@ export function ConnectorRegistry({
       </ScrollArea>
     </DataPanel>
   );
+}
+
+function scopeLabel(connector: Connector): string {
+  if (connector.scope_type === "user") return `private user #${connector.owner_user_id}`;
+  if (connector.scope_type === "maintainer") return `team #${connector.maintainer_id}`;
+  return "everyone";
 }

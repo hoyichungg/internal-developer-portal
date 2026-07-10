@@ -17,6 +17,7 @@ import type {
   Maintainer,
   MaintainerMember,
   MaintainerMemberPayload,
+  MeResponse,
   NewMaintainerPayload,
   NewPackagePayload,
   NewServicePayload,
@@ -32,7 +33,7 @@ import {
 } from "./CatalogForms";
 import type { CatalogDialog } from "./CatalogForms";
 
-export function CatalogView({ client }: { client: ApiClient }) {
+export function CatalogView({ client, user }: { client: ApiClient; user: MeResponse }) {
   const [dialog, setDialog] = useState<CatalogDialog>(null);
   const [selectedMaintainerId, setSelectedMaintainerId] = useState("");
   const [removingMember, setRemovingMember] = useState<MaintainerMember | null>(null);
@@ -43,7 +44,9 @@ export function CatalogView({ client }: { client: ApiClient }) {
       client.get<Maintainer[]>("/maintainers"),
       client.get<Service[]>("/services"),
       client.get<Package[]>("/packages"),
-      client.get<UserSummary[]>("/users").catch(() => [])
+      user.capabilities.view_user_directory
+        ? client.get<UserSummary[]>("/users").catch(() => [])
+        : Promise.resolve([])
     ]);
     return { maintainers, services, packages, users };
   }, [client]);
@@ -74,6 +77,44 @@ export function CatalogView({ client }: { client: ApiClient }) {
     (catalog?.maintainers || []).forEach((maintainer) => lookup.set(maintainer.id, maintainer));
     return lookup;
   }, [catalog?.maintainers]);
+  const writableMaintainerIds = useMemo(
+    () =>
+      new Set(
+        user.maintainer_access
+          .filter((access) => access.can_write)
+          .map((access) => access.maintainer_id)
+      ),
+    [user.maintainer_access]
+  );
+  const memberMaintainerIds = useMemo(
+    () =>
+      new Set(
+        user.maintainer_access
+          .filter((access) => access.can_manage_members)
+          .map((access) => access.maintainer_id)
+      ),
+    [user.maintainer_access]
+  );
+  const canWriteMaintainer = (maintainerId: ApiId) =>
+    user.capabilities.manage_maintainers || writableMaintainerIds.has(maintainerId);
+  const canManageMaintainerMembers = (maintainerId: ApiId) =>
+    user.capabilities.manage_maintainers || memberMaintainerIds.has(maintainerId);
+  const writableMaintainerOptions = useMemo(
+    () =>
+      maintainerOptions.filter(
+        (option) =>
+          user.capabilities.manage_maintainers || writableMaintainerIds.has(Number(option.value))
+      ),
+    [maintainerOptions, user.capabilities.manage_maintainers, writableMaintainerIds]
+  );
+  const memberMaintainerOptions = useMemo(
+    () =>
+      maintainerOptions.filter(
+        (option) =>
+          user.capabilities.manage_maintainers || memberMaintainerIds.has(Number(option.value))
+      ),
+    [maintainerOptions, memberMaintainerIds, user.capabilities.manage_maintainers]
+  );
   const userOptions = useMemo(
     () =>
       (catalog?.users || []).map((user) => ({
@@ -87,10 +128,15 @@ export function CatalogView({ client }: { client: ApiClient }) {
     (catalog?.users || []).forEach((user) => lookup.set(user.id, user));
     return lookup;
   }, [catalog?.users]);
-  const defaultMaintainerId = maintainerOptions[0]?.value || "";
+  const defaultMaintainerId = writableMaintainerOptions[0]?.value || "";
+  const defaultMemberMaintainerId = memberMaintainerOptions[0]?.value || "";
   const selectedMaintainer = maintainerById.get(Number(selectedMaintainerId)) || null;
-  const canManageOwnedRecords = maintainerOptions.length > 0;
-  const canManageMembers = Boolean(selectedMaintainer && userOptions.length > 0);
+  const canManageOwnedRecords = writableMaintainerOptions.length > 0;
+  const canManageMembers = Boolean(
+    selectedMaintainer &&
+      canManageMaintainerMembers(selectedMaintainer.id) &&
+      userOptions.length > 0
+  );
   const dialogTitle = getDialogTitle(dialog);
   const removingMemberUser = removingMember ? userById.get(removingMember.user_id) : undefined;
   const removingMemberMaintainer = removingMember
@@ -102,16 +148,20 @@ export function CatalogView({ client }: { client: ApiClient }) {
       return;
     }
 
-    const selectedStillExists = catalog.maintainers.some(
-      (maintainer) => String(maintainer.id) === selectedMaintainerId
+    const selectedStillExists = memberMaintainerOptions.some(
+      (maintainer) => maintainer.value === selectedMaintainerId
     );
     if (!selectedStillExists) {
-      setSelectedMaintainerId(defaultMaintainerId);
+      setSelectedMaintainerId(defaultMemberMaintainerId);
     }
-  }, [catalog, defaultMaintainerId, selectedMaintainerId]);
+  }, [catalog, defaultMemberMaintainerId, memberMaintainerOptions, selectedMaintainerId]);
 
   async function saveMaintainer(payload: NewMaintainerPayload) {
-    if (!dialog || dialog.type !== "maintainer") {
+    if (
+      !dialog ||
+      dialog.type !== "maintainer" ||
+      !user.capabilities.manage_maintainers
+    ) {
       return;
     }
 
@@ -135,7 +185,12 @@ export function CatalogView({ client }: { client: ApiClient }) {
   }
 
   async function saveService(payload: NewServicePayload) {
-    if (!dialog || dialog.type !== "service") {
+    if (
+      !dialog ||
+      dialog.type !== "service" ||
+      !canWriteMaintainer(payload.maintainer_id) ||
+      (dialog.record && !canWriteMaintainer(dialog.record.maintainer_id))
+    ) {
       return;
     }
 
@@ -159,7 +214,12 @@ export function CatalogView({ client }: { client: ApiClient }) {
   }
 
   async function savePackage(payload: NewPackagePayload) {
-    if (!dialog || dialog.type !== "package") {
+    if (
+      !dialog ||
+      dialog.type !== "package" ||
+      !canWriteMaintainer(payload.maintainer_id) ||
+      (dialog.record && !canWriteMaintainer(dialog.record.maintainer_id))
+    ) {
       return;
     }
 
@@ -183,7 +243,11 @@ export function CatalogView({ client }: { client: ApiClient }) {
   }
 
   async function saveMember(payload: MaintainerMemberPayload) {
-    if (!dialog || dialog.type !== "member") {
+    if (
+      !dialog ||
+      dialog.type !== "member" ||
+      !canManageMaintainerMembers(dialog.maintainerId)
+    ) {
       return;
     }
 
@@ -210,6 +274,10 @@ export function CatalogView({ client }: { client: ApiClient }) {
   }
 
   async function removeMember(member: MaintainerMember) {
+    if (!canManageMaintainerMembers(member.maintainer_id)) {
+      return;
+    }
+
     setRemoving(true);
     try {
       await client.delete(
@@ -231,34 +299,47 @@ export function CatalogView({ client }: { client: ApiClient }) {
     }
   }
 
-  const MaintainerActionCell = ({ row }: { row: Maintainer }) => (
-    <Group gap="xs" wrap="nowrap">
-      <Button
-        variant="subtle"
-        size="compact-sm"
-        leftSection={<IconUsers size={16} />}
-        onClick={() => setSelectedMaintainerId(String(row.id))}
-      >
-        Members
-      </Button>
+  const MaintainerActionCell = ({ row }: { row: Maintainer }) => {
+    const canManageMembersForRow = canManageMaintainerMembers(row.id);
+    if (!canManageMembersForRow && !user.capabilities.manage_maintainers) {
+      return null;
+    }
+
+    return (
+      <Group gap="xs" wrap="nowrap">
+        {canManageMembersForRow && (
+          <Button
+            variant="subtle"
+            size="compact-sm"
+            leftSection={<IconUsers size={16} />}
+            onClick={() => setSelectedMaintainerId(String(row.id))}
+          >
+            Members
+          </Button>
+        )}
+        {user.capabilities.manage_maintainers && (
+          <EditAction
+            label={`Edit maintainer ${row.display_name}`}
+            onClick={() => setDialog({ type: "maintainer", record: row })}
+          />
+        )}
+      </Group>
+    );
+  };
+  const ServiceActionCell = ({ row }: { row: Service }) =>
+    canWriteMaintainer(row.maintainer_id) ? (
       <EditAction
-        label={`Edit maintainer ${row.display_name}`}
-        onClick={() => setDialog({ type: "maintainer", record: row })}
+        label={`Edit service ${row.name}`}
+        onClick={() => setDialog({ type: "service", record: row })}
       />
-    </Group>
-  );
-  const ServiceActionCell = ({ row }: { row: Service }) => (
-    <EditAction
-      label={`Edit service ${row.name}`}
-      onClick={() => setDialog({ type: "service", record: row })}
-    />
-  );
-  const PackageActionCell = ({ row }: { row: Package }) => (
-    <EditAction
-      label={`Edit package ${row.name}`}
-      onClick={() => setDialog({ type: "package", record: row })}
-    />
-  );
+    ) : null;
+  const PackageActionCell = ({ row }: { row: Package }) =>
+    canWriteMaintainer(row.maintainer_id) ? (
+      <EditAction
+        label={`Edit package ${row.name}`}
+        onClick={() => setDialog({ type: "package", record: row })}
+      />
+    ) : null;
   const MaintainerCell = ({ value }: { value?: unknown }) => {
     const maintainer = maintainerById.get(Number(value));
     return <Text size="sm">{maintainer?.display_name || "-"}</Text>;
@@ -316,7 +397,7 @@ export function CatalogView({ client }: { client: ApiClient }) {
             dialog={dialog}
             title={dialogTitle}
             onClose={() => setDialog(null)}
-            maintainerOptions={maintainerOptions}
+            maintainerOptions={writableMaintainerOptions}
             defaultMaintainerId={defaultMaintainerId}
             userOptions={userOptions}
             saving={saving}
@@ -345,13 +426,15 @@ export function CatalogView({ client }: { client: ApiClient }) {
             <DataPanel
               title="Maintainers"
               actions={
-                <Button
-                  leftSection={<IconPlus size={16} />}
-                  size="compact-sm"
-                  onClick={() => setDialog({ type: "maintainer" })}
-                >
-                  New maintainer
-                </Button>
+                user.capabilities.manage_maintainers ? (
+                  <Button
+                    leftSection={<IconPlus size={16} />}
+                    size="compact-sm"
+                    onClick={() => setDialog({ type: "maintainer" })}
+                  >
+                    New maintainer
+                  </Button>
+                ) : null
               }
             >
               <DataTable
@@ -364,53 +447,54 @@ export function CatalogView({ client }: { client: ApiClient }) {
               />
             </DataPanel>
 
-            <DataPanel
-              title="Maintainer members"
-              actions={
-                <Button
-                  leftSection={<IconUserPlus size={16} />}
-                  size="compact-sm"
-                  disabled={!canManageMembers}
-                  onClick={() =>
-                    selectedMaintainer &&
-                    setDialog({ type: "member", maintainerId: selectedMaintainer.id })
-                  }
-                >
-                  Add member
-                </Button>
-              }
-            >
-              <Stack gap="md">
-                <Select
-                  label="Maintainer"
-                  data={maintainerOptions}
-                  value={selectedMaintainerId}
-                  onChange={(value) => setSelectedMaintainerId(value || "")}
-                  disabled={maintainerOptions.length === 0}
-                  searchable
-                />
-                {membersData.error && (
-                  <Text size="sm" c="red">
-                    {membersData.error.message}
-                  </Text>
-                )}
-                {membersData.loading && !membersData.value ? (
-                  <Text size="sm" c="dimmed">
-                    Loading members...
-                  </Text>
-                ) : (
-                  <DataTable
-                    rows={membersData.value || []}
-                    columns={[
-                      ["user_id", "User", MemberUserCell],
-                      ["role", "Role", StatusBadge],
-                      ["created_at", "Added", DateCell],
-                      ["_actions", "Actions", MemberActionCell]
-                    ]}
+            {memberMaintainerOptions.length > 0 && (
+              <DataPanel
+                title="Maintainer members"
+                actions={
+                  <Button
+                    leftSection={<IconUserPlus size={16} />}
+                    size="compact-sm"
+                    disabled={!canManageMembers}
+                    onClick={() =>
+                      selectedMaintainer &&
+                      setDialog({ type: "member", maintainerId: selectedMaintainer.id })
+                    }
+                  >
+                    Add member
+                  </Button>
+                }
+              >
+                <Stack gap="md">
+                  <Select
+                    label="Maintainer"
+                    data={memberMaintainerOptions}
+                    value={selectedMaintainerId}
+                    onChange={(value) => setSelectedMaintainerId(value || "")}
+                    searchable
                   />
-                )}
-              </Stack>
-            </DataPanel>
+                  {membersData.error && (
+                    <Text size="sm" c="red">
+                      {membersData.error.message}
+                    </Text>
+                  )}
+                  {membersData.loading && !membersData.value ? (
+                    <Text size="sm" c="dimmed">
+                      Loading members...
+                    </Text>
+                  ) : (
+                    <DataTable
+                      rows={membersData.value || []}
+                      columns={[
+                        ["user_id", "User", MemberUserCell],
+                        ["role", "Role", StatusBadge],
+                        ["created_at", "Added", DateCell],
+                        ["_actions", "Actions", MemberActionCell]
+                      ]}
+                    />
+                  )}
+                </Stack>
+              </DataPanel>
+            )}
 
             <Grid>
               <Grid.Col span={{ base: 12, xl: 7 }}>

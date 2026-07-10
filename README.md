@@ -28,6 +28,12 @@ Docker Compose runs database migrations once, then starts the HTTP server and
 the connector worker as separate services. The HTTP API is intentionally not
 responsible for executing queued connector work.
 
+The development Compose file binds PostgreSQL and HTTP only to `127.0.0.1`.
+It mounts `src/` for backend hot reload without mounting over the image's
+prebuilt `frontend/dist`, so a clean clone serves the UI immediately. Re-run
+`docker compose up --build` after frontend or Cargo manifest changes. Redis is
+not part of the stack because the current scheduler and worker use PostgreSQL.
+
 The frontend and backend are separated for development: the Vite dev server
 proxies API requests to the backend on port `8000`. The default built app is
 served by Rocket from `frontend/dist`, so local Docker deployment uses one
@@ -79,6 +85,11 @@ non-root user, and uses `/app/server` instead of `cargo watch`. The production
 Compose file runs migrations as a one-shot `migrate` service and keeps the HTTP
 server and connector worker as separate long-running services.
 
+The application container healthcheck calls `GET /readyz`, which runs a real
+PostgreSQL query. The worker container healthcheck verifies that the worker is
+still its container's active process. `GET /livez` is available for process-only
+liveness probes that must not depend on PostgreSQL.
+
 Create or update an initial admin account only when needed:
 
 ```sh
@@ -107,6 +118,11 @@ Application-level config is loaded from environment variables:
 - `CONNECTOR_WORKER_POLL_MS`
 - `CONNECTOR_WORKER_HEARTBEAT_INTERVAL_SECONDS`
 - `CONNECTOR_WORKER_STALE_AFTER_SECONDS`
+- `CONNECTOR_RUN_LEASE_SECONDS`
+- `CONNECTOR_RUN_LEASE_RENEW_INTERVAL_SECONDS`
+- `CONNECTOR_RUN_MAX_ATTEMPTS`
+- `CONNECTOR_RUN_RETRY_BASE_SECONDS`
+- `CONNECTOR_RUN_RETRY_MAX_SECONDS`
 - `CONNECTOR_HEALTH_RETENTION_DAYS`
 - `CONNECTOR_RUN_RETENTION_DAYS`
 - `AUDIT_LOG_RETENTION_DAYS`
@@ -114,6 +130,15 @@ Application-level config is loaded from environment variables:
 - `ROCKET_ADDRESS`
 - `ROCKET_PORT`
 - `ROCKET_DATABASES`
+
+`APP_ENV` must be `development`, `test`, or `production`.
+`AUTH_TOKEN_TTL_SECONDS` defaults to `86400` only when it is absent; a supplied
+value must be an integer greater than zero. In production, startup requires
+`DATABASE_URL` (or `ROCKET_DATABASES` for the HTTP server) and a
+`CONNECTOR_SECRET_KEY` of at least 32 bytes. Placeholder and low-diversity keys
+are rejected. Generate a random key and keep it stable so previously encrypted
+connector credentials remain decryptable. Invalid startup configuration exits
+with a non-zero status instead of falling back silently.
 
 ## CLI
 
@@ -171,7 +196,9 @@ powershell -ExecutionPolicy Bypass -File .\scripts\local-validate.ps1 -Mode Full
 See `docs/local-validation.md` for details. The CI workflow runs frontend
 builds and regression tests, formatting, build checks, Clippy, Diesel
 migrations, a real Rocket server, and the integration tests against PostgreSQL
-16.
+16. Destructive retention coverage uses a separately migrated database whose
+name includes `test`; the test also requires `APP_ENV=test` before it can issue
+any cleanup DELETE.
 
 ## API Shape
 
@@ -214,8 +241,10 @@ Authorization: Bearer <token>
 
 ## Ownership and Permissions
 
-- Read routes require a bearer token. `GET /health` and `POST /login` remain
-  public so health checks and login can work before a session exists.
+- Read routes require a bearer token. `GET /health`, `GET /livez`, `GET /readyz`,
+  and `POST /login` remain public so probes and login work before a session
+  exists. `/health` is a compatibility alias with readiness semantics; use
+  `/livez` for process liveness and `/readyz` for traffic readiness.
 - `admin` users can manage maintainers, work cards, notifications, connector
   registry, connector imports, connector run history, audit logs, and
   maintainer membership.
@@ -235,6 +264,8 @@ Authorization: Bearer <token>
 - Packages can link to source repositories and documentation.
 - `services` represent internal applications with lifecycle and health status.
 - `work-cards` represent DevOps or task items from external work systems.
+- `calendar-events` represent structured meetings with start/end time,
+  organizer, location, time zone, and join/event links.
 - `notifications` represent unread messages from systems such as ERP, mail, or monitoring.
 - `dashboard` aggregates the morning work context for the portal home screen.
   It can be scoped by `maintainer_id` and connector `source`.
@@ -243,7 +274,7 @@ Authorization: Bearer <token>
 - `connector_runs` record each import execution with source, target, status,
   success count, failure count, duration, and final or queued execution state.
 - Connector run status is one of `queued`, `running`, `success`,
-  `partial_success`, or `failed`.
+  `partial_success`, `failed`, or `cancelled`.
 - `connector_run_item_errors` preserve item-level failures for replay and
   debugging.
 - `connector_configs` store per-source runtime config, target, enabled state,
@@ -259,6 +290,8 @@ Authorization: Bearer <token>
 - `GET /`
 - `GET /openapi.json`
 - `GET /health`
+- `GET /livez`
+- `GET /readyz`
 - `GET /dashboard`
 - `GET /dashboard?maintainer_id=<id>`
 - `GET /dashboard?source=<connector>`
@@ -291,18 +324,22 @@ Authorization: Bearer <token>
 - `GET /work-cards/<id>`
 - `PUT /work-cards/<id>`
 - `DELETE /work-cards/<id>`
+- `GET /calendar-events`
+- `GET /calendar-events/<id>`
 - `GET /notifications`
 - `POST /notifications`
 - `GET /notifications/<id>`
 - `PUT /notifications/<id>`
 - `DELETE /notifications/<id>`
 - `POST /connectors/<source>/service-health/import`
+- `POST /connectors/<source>/calendar-events/import`
 - `POST /connectors/<source>/work-cards/import`
 - `POST /connectors/<source>/notifications/import`
 - `GET /connectors`
 - `POST /connectors`
 - `GET /connectors/<source>`
 - `PUT /connectors/<source>`
+- `PUT /connectors/<source>/scope`
 - `DELETE /connectors/<source>`
 - `GET /connectors/operations`
 - `GET /connectors/<source>/config`
@@ -312,6 +349,7 @@ Authorization: Bearer <token>
 - `GET /connectors/runs?source=<connector>&target=<target>`
 - `GET /connectors/runs/<id>`
 - `POST /connectors/runs/<id>/retry`
+- `POST /connectors/runs/<id>/cancel`
 
 ## Connector Runtime
 
@@ -322,13 +360,27 @@ target, enabled flag, optional schedule metadata, config JSON, and a
 config.
 
 Manual runs move through `queued` and `running` before ending as `success`,
-`partial_success`, or `failed`. A request body of `{ "mode": "queue" }` creates
-a queued run; the background worker claims it, executes the stored payload
-snapshot, sets `claimed_at` and `worker_id`, and writes the final status.
+`partial_success`, `failed`, or `cancelled`. A request body of
+`{ "mode": "queue" }` creates a queued run; the background worker atomically
+claims it, executes the stored payload snapshot, sets `claimed_at`, `worker_id`,
+and a renewable lease, and writes the final status only while it still owns an
+unexpired lease.
 Runtime executions record item-level errors, which are returned in the run
 response and available through `GET /connectors/runs/<id>`. Run detail also
 returns `health_checks` for service-health runs, letting the UI trace a
 homepage incident back to the connector execution that imported it.
+
+Work-card and notification payloads may declare
+`"snapshot_complete": true` only when `items` contains the full result set for
+that connector query. If every item imports successfully, records previously
+owned by that connector but absent from the new snapshot are archived in the
+same transaction; the run exposes `snapshot_complete` and `archived_count`.
+Omitted/false declarations, page/item limits, item errors, cancellation, and
+failed runs never archive missing records. Microsoft Graph adapters calculate
+this flag from pagination completion, Azure DevOps treats a WIQL response that
+fills `max_items` as incomplete, and ERP reconciliation is opt-in through the
+boolean config field `snapshot_complete` because ERP endpoints may be
+incremental or lookback-based.
 
 The built-in scheduler reads enabled connector configs with `schedule_cron` and
 creates queued runs when `next_run_at` is due. Supported schedule values are
@@ -338,12 +390,13 @@ Connector configs can also select a real adapter. Supported adapters include
 `azure_devops` for the `work_cards` target, `monitoring` for the
 `service_health` target, and `microsoft_graph_calendar`,
 `microsoft_graph_mail`, and `erp_private_messages` for the `notifications`
-target. When `config` contains `"adapter": "azure_devops"`, the worker calls
+target. Microsoft Graph Calendar also supports the first-class
+`calendar_events` target. When `config` contains `"adapter": "azure_devops"`, the worker calls
 Azure DevOps WIQL and work item batch APIs, then normalizes work items into the
 existing `work_cards` payload. When `config` contains
 `"adapter": "microsoft_graph_calendar"`, the worker calls Microsoft Graph
 Calendar View for the configured time window and normalizes Outlook events into
-morning homepage notifications. When `config` contains
+structured homepage meetings (legacy `notifications` configs remain supported). When `config` contains
 `"adapter": "microsoft_graph_mail"`, the worker calls Microsoft Graph messages
 and normalizes Outlook mail into the same notification feed. When `config`
 contains `"adapter": "erp_private_messages"`, the worker calls a configured ERP
@@ -511,12 +564,17 @@ homepage.
 
 Runtime environment flags:
 
-- `CONNECTOR_SECRET_KEY=<stable secret>`
+- `CONNECTOR_SECRET_KEY=<stable random secret of at least 32 bytes in production>`
 - `CONNECTOR_WORKER_ENABLED=true`
 - `CONNECTOR_SCHEDULER_ENABLED=true`
 - `CONNECTOR_WORKER_POLL_MS=500`
 - `CONNECTOR_WORKER_HEARTBEAT_INTERVAL_SECONDS=15`
 - `CONNECTOR_WORKER_STALE_AFTER_SECONDS=45`
+- `CONNECTOR_RUN_LEASE_SECONDS=60`
+- `CONNECTOR_RUN_LEASE_RENEW_INTERVAL_SECONDS=15`
+- `CONNECTOR_RUN_MAX_ATTEMPTS=3`
+- `CONNECTOR_RUN_RETRY_BASE_SECONDS=5`
+- `CONNECTOR_RUN_RETRY_MAX_SECONDS=300`
 - `CONNECTOR_HEALTH_RETENTION_DAYS=30`
 - `CONNECTOR_RUN_RETENTION_DAYS=90`
 - `AUDIT_LOG_RETENTION_DAYS=365`
@@ -534,15 +592,40 @@ longer 365-day window.
 The worker writes heartbeat status to `connector_workers`, and each retention
 cleanup writes a `maintenance_runs` history row. `GET /connectors/operations`
 returns recent worker status and cleanup history for the Connectors operations
-panel. Failed or partially successful connector runs can be retried with
+panel. Failed, partially successful, or cancelled connector runs can be retried with
 `POST /connectors/runs/<id>/retry`, which creates a queued retry run using the
 original run payload when available or the current connector config otherwise.
+Only one queued/running retry may exist for an original run at a time. Queued
+or running runs can be cancelled with `POST /connectors/runs/<id>/cancel`;
+queued runs become `cancelled` immediately, while running runs record a request
+that prevents a worker from committing a successful final state. Cancellation
+is terminal and is never auto-requeued; an admin must explicitly call the retry
+endpoint to create a fresh bounded-attempt child run.
+
+Admins can change an existing connector between global, maintainer-team, and
+private-user visibility with `PUT /connectors/<source>/scope` or the Edit
+visibility control. The connector and all work cards/notifications previously
+imported by it move scopes in one database transaction, so the connector and
+its imported records cannot expose different audiences.
+
+Each claimed run has its own database lease heartbeat, separate from the
+worker-process heartbeat. Before claiming more work, workers recover expired
+leases with bounded exponential backoff. A crashed run is requeued while
+`attempt_count < max_attempts`; after the configured limit it becomes
+`failed`. This makes crash retries bounded and keeps the scheduler from adding
+another run for the same source/target while a delayed retry is pending.
 
 Run the worker separately from the HTTP server:
 
 ```sh
 cargo run --bin worker
 ```
+
+An explicitly disabled worker (`CONNECTOR_WORKER_ENABLED=false`) exits
+successfully. An enabled worker without `DATABASE_URL`, or with invalid
+application configuration, exits non-zero so a process supervisor does not
+mistake a missing worker for a healthy stopped service. The worker-enabled flag
+accepts `true`/`false`, `1`/`0`, or `yes`/`no`; misspellings also fail startup.
 
 The worker reuses a PostgreSQL connection between poll cycles and reconnects
 when database operations fail. For local experiments only, the HTTP server can

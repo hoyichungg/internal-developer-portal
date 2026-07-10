@@ -1,3 +1,4 @@
+use chrono::{Duration, Utc};
 use serde_json::{json, Value};
 
 use super::erp::normalize_erp_message_notification;
@@ -27,7 +28,10 @@ pub(super) fn fetch_sample_notifications(
         None => default_sample_notifications(kind),
     };
 
-    Ok(json!({ "items": items }))
+    Ok(json!({
+        "items": items,
+        "snapshot_complete": true
+    }))
 }
 
 impl SampleNotificationKind {
@@ -85,7 +89,16 @@ fn normalize_calendar_notification(item: &Value) -> Value {
         "body": calendar_body(item),
         "severity": severity,
         "is_read": field_bool(item, &["is_read", "read", "seen"]).unwrap_or(false),
-        "url": field_url(item, &["url", "web_url", "web_link", "webLink", "join_url", "online_meeting_url"])
+        "url": field_url(item, &["url", "web_url", "web_link", "webLink", "join_url", "online_meeting_url"]),
+        "organizer": person_display(item, &["organizer", "organizer_name", "from"]),
+        "location": field_string(item, &["location", "room"]),
+        "starts_at": normalized_time_field(item, &["starts_at", "start_at", "start_time", "start"]),
+        "ends_at": normalized_time_field(item, &["ends_at", "end_at", "end_time", "end"]),
+        "time_zone": field_string(item, &["time_zone", "timeZone"]),
+        "is_all_day": field_bool(item, &["is_all_day", "isAllDay"]).unwrap_or(false),
+        "is_cancelled": field_bool(item, &["is_cancelled", "isCancelled"]).unwrap_or(false),
+        "web_url": field_url(item, &["url", "web_url", "web_link", "webLink"]),
+        "join_url": field_url(item, &["join_url", "online_meeting_url"])
     })
 }
 
@@ -114,14 +127,27 @@ fn normalize_outlook_mail_notification(item: &Value) -> Value {
 
 fn default_sample_notifications(kind: SampleNotificationKind) -> Vec<Value> {
     match kind {
-        SampleNotificationKind::Calendar => vec![json!({
-            "external_id": "calendar-platform-standup",
-            "title": "Calendar: Platform standup in 15 minutes",
-            "body": "Organizer: Taylor Lin | Location: Teams",
-            "severity": "info",
-            "is_read": false,
-            "url": "https://calendar.example.test/events/platform-standup"
-        })],
+        SampleNotificationKind::Calendar => {
+            let starts_at = Utc::now().naive_utc() + Duration::minutes(15);
+            let ends_at = starts_at + Duration::minutes(30);
+            vec![json!({
+                "external_id": "calendar-platform-standup",
+                "title": "Calendar: Platform standup",
+                "body": "Organizer: Taylor Lin | Location: Teams",
+                "severity": "info",
+                "is_read": false,
+                "url": "https://calendar.example.test/events/platform-standup",
+                "organizer": "Taylor Lin",
+                "location": "Teams",
+                "starts_at": starts_at.format("%Y-%m-%dT%H:%M:%S").to_string(),
+                "ends_at": ends_at.format("%Y-%m-%dT%H:%M:%S").to_string(),
+                "time_zone": "UTC",
+                "is_all_day": false,
+                "is_cancelled": false,
+                "web_url": "https://calendar.example.test/events/platform-standup",
+                "join_url": "https://teams.example.test/platform-standup"
+            })]
+        }
         SampleNotificationKind::OutlookMail => vec![json!({
             "external_id": "mail-release-brief",
             "title": "Mail: Release brief ready for review",

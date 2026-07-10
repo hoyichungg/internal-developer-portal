@@ -9,7 +9,9 @@ use crate::{api, config::AppConfig, rocket_routes};
 const DEFAULT_LOCAL_DATABASE_URL: &str = "postgres://postgres:postgres@localhost:5432/app_db";
 
 pub fn build(app_config: AppConfig) -> Rocket<Build> {
-    rocket::custom(figment_with_database_url_fallback())
+    let figment = figment_with_database_url_fallback(&app_config);
+
+    rocket::custom(figment)
         .manage(app_config)
         .register(
             "/",
@@ -20,6 +22,7 @@ pub fn build(app_config: AppConfig) -> Rocket<Build> {
                 api::not_found,
                 api::unprocessable_entity,
                 api::internal_server_error,
+                api::service_unavailable,
             ],
         )
         .mount(
@@ -30,6 +33,8 @@ pub fn build(app_config: AppConfig) -> Rocket<Build> {
                 rocket_routes::authorization::me_overview,
                 rocket_routes::authorization::users,
                 rocket_routes::authorization::logout,
+                rocket_routes::calendar_events::get_calendar_events,
+                rocket_routes::calendar_events::view_calendar_event,
                 crate::openapi::openapi_json,
                 rocket_routes::audit_logs::get_audit_logs,
                 rocket_routes::connectors::get_connectors,
@@ -37,6 +42,7 @@ pub fn build(app_config: AppConfig) -> Rocket<Build> {
                 rocket_routes::connectors::view_connector,
                 rocket_routes::connectors::create_connector,
                 rocket_routes::connectors::update_connector,
+                rocket_routes::connectors::update_connector_scope,
                 rocket_routes::connectors::delete_connector,
                 rocket_routes::connectors::get_connector_config,
                 rocket_routes::connectors::upsert_connector_config,
@@ -46,12 +52,16 @@ pub fn build(app_config: AppConfig) -> Rocket<Build> {
                 rocket_routes::connectors::get_connector_runs,
                 rocket_routes::connectors::get_connector_run,
                 rocket_routes::connectors::retry_connector_run,
+                rocket_routes::connectors::cancel_connector_run,
                 rocket_routes::connectors::run_connector,
+                rocket_routes::connectors::import_calendar_events,
                 rocket_routes::connectors::import_notifications,
                 rocket_routes::connectors::import_service_health,
                 rocket_routes::connectors::import_work_cards,
                 rocket_routes::dashboard::dashboard,
                 rocket_routes::health::health,
+                rocket_routes::health::livez,
+                rocket_routes::health::readyz,
                 rocket_routes::maintainers::get_maintainers,
                 rocket_routes::maintainers::view_maintainer,
                 rocket_routes::maintainers::create_maintainer,
@@ -78,6 +88,11 @@ pub fn build(app_config: AppConfig) -> Rocket<Build> {
                 rocket_routes::work_cards::delete_work_card,
                 rocket_routes::notifications::get_notifications,
                 rocket_routes::notifications::view_notification,
+                rocket_routes::notifications::mark_notification_read,
+                rocket_routes::notifications::mark_notification_unread,
+                rocket_routes::notifications::dismiss_notification,
+                rocket_routes::notifications::snooze_notification,
+                rocket_routes::notifications::restore_notification,
                 rocket_routes::notifications::create_notification,
                 rocket_routes::notifications::update_notification,
                 rocket_routes::notifications::delete_notification,
@@ -87,20 +102,20 @@ pub fn build(app_config: AppConfig) -> Rocket<Build> {
         .attach(rocket_routes::DbConn::init())
 }
 
-fn figment_with_database_url_fallback() -> Figment {
+fn figment_with_database_url_fallback(app_config: &AppConfig) -> Figment {
     let figment = rocket::Config::figment();
 
-    if env::var("ROCKET_DATABASES").is_ok() {
+    if env::var("ROCKET_DATABASES").is_ok_and(|value| !value.trim().is_empty()) {
         return figment;
     }
 
     match env::var("DATABASE_URL") {
-        Ok(database_url) => figment.merge(("databases.postgres.url", database_url)),
-        Err(_)
-            if env::var("APP_ENV").unwrap_or_else(|_| "development".to_owned()) != "production" =>
-        {
+        Ok(database_url) if !database_url.trim().is_empty() => {
+            figment.merge(("databases.postgres.url", database_url))
+        }
+        _ if app_config.environment != "production" => {
             figment.merge(("databases.postgres.url", DEFAULT_LOCAL_DATABASE_URL))
         }
-        Err(_) => figment,
+        _ => figment,
     }
 }

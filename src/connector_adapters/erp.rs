@@ -29,6 +29,7 @@ struct ErpPrivateMessagesConfig {
     top: Option<u64>,
     limit: Option<u64>,
     timeout_seconds: Option<u64>,
+    snapshot_complete: Option<bool>,
 }
 
 pub(super) async fn fetch_erp_private_messages(config_json: &str) -> Result<Value, String> {
@@ -63,7 +64,12 @@ pub(super) async fn fetch_erp_private_messages(config_json: &str) -> Result<Valu
         .map(normalize_erp_message_notification)
         .collect::<Vec<_>>();
 
-    Ok(json!({ "items": items }))
+    Ok(json!({
+        "items": items,
+        // ERP endpoints vary between full lists and incremental windows. Reconciliation is
+        // opt-in so a bounded/lookback response cannot accidentally archive older messages.
+        "snapshot_complete": config.snapshot_complete.unwrap_or(false)
+    }))
 }
 
 async fn send_erp_private_messages_request(

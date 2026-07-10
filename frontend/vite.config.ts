@@ -1,24 +1,35 @@
-import { defineConfig } from "vitest/config";
 import react from "@vitejs/plugin-react";
+import { loadEnv } from "vite";
+import { defineConfig } from "vitest/config";
 
-export default defineConfig({
-  plugins: [react()],
-  test: {
-    environment: "jsdom",
-    setupFiles: "./src/test/setup.ts"
-  },
-  server: {
-    proxy: {
-      "/audit-logs": "http://127.0.0.1:8000",
-      "/connectors": "http://127.0.0.1:8000",
-      "/dashboard": "http://127.0.0.1:8000",
-      "/health": "http://127.0.0.1:8000",
-      "/login": "http://127.0.0.1:8000",
-      "/logout": "http://127.0.0.1:8000",
-      "/me": "http://127.0.0.1:8000",
-      "/packages": "http://127.0.0.1:8000",
-      "/services": "http://127.0.0.1:8000",
-      "/work-cards": "http://127.0.0.1:8000"
+import { createApiProxy, resolveApiProxyTarget } from "./src/api/viteProxy";
+
+export default defineConfig(({ mode }) => {
+  const env = loadEnv(mode, ".", "");
+  const proxyTarget = resolveApiProxyTarget(env.VITE_API_BASE_URL);
+
+  return {
+    plugins: [react()],
+    test: {
+      environment: "jsdom",
+      setupFiles: "./src/test/setup.ts"
+    },
+    build: {
+      rollupOptions: {
+        output: {
+          manualChunks(id) {
+            if (id.includes("node_modules/@mantine/")) return "mantine";
+            if (id.includes("node_modules/@tabler/icons-react")) return "icons";
+            if (id.includes("node_modules/react") || id.includes("node_modules/scheduler")) {
+              return "react";
+            }
+            return undefined;
+          }
+        }
+      }
+    },
+    server: {
+      proxy: createApiProxy(proxyTarget)
     }
-  }
+  };
 });

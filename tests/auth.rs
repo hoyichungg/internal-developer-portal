@@ -36,6 +36,12 @@ fn test_login_me_logout_flow() {
     assert_eq!(me["username"], username);
     assert!(me["roles"].as_array().unwrap().contains(&json!("admin")));
     assert!(me["roles"].as_array().unwrap().contains(&json!("member")));
+    assert!(me["expires_at"].as_str().is_some());
+    assert_eq!(me["capabilities"]["manage_connectors"], true);
+    assert_eq!(me["capabilities"]["view_audit"], true);
+    assert_eq!(me["capabilities"]["manage_maintainers"], true);
+    assert_eq!(me["capabilities"]["view_user_directory"], true);
+    assert_eq!(me["maintainer_access"], json!([]));
 
     let response = client
         .post(format!("{}/logout", common::APP_HOST))
@@ -141,6 +147,25 @@ fn test_users_directory_is_limited_to_admins_and_maintainer_owners() {
             .unwrap();
         assert_eq!(response.status(), StatusCode::CREATED);
     }
+
+    let owner_me = client
+        .get(format!("{}/me", common::APP_HOST))
+        .bearer_auth(&owner.token)
+        .send()
+        .unwrap();
+    assert_eq!(owner_me.status(), StatusCode::OK);
+    let owner_me: Value = owner_me.json::<Value>().unwrap()["data"].clone();
+    assert_eq!(owner_me["capabilities"]["manage_connectors"], false);
+    assert_eq!(owner_me["capabilities"]["view_audit"], false);
+    assert_eq!(owner_me["capabilities"]["manage_maintainers"], false);
+    assert_eq!(owner_me["capabilities"]["view_user_directory"], true);
+    assert_eq!(
+        owner_me["maintainer_access"][0]["maintainer_id"],
+        maintainer["id"]
+    );
+    assert_eq!(owner_me["maintainer_access"][0]["role"], "owner");
+    assert_eq!(owner_me["maintainer_access"][0]["can_write"], true);
+    assert_eq!(owner_me["maintainer_access"][0]["can_manage_members"], true);
 
     let response = client
         .get(format!("{}/users", common::APP_HOST))

@@ -18,12 +18,15 @@ import {
   IconBolt,
   IconPlayerPlay,
   IconPlugConnected,
+  IconRefresh,
+  IconUsers,
   IconTemplate
 } from "@tabler/icons-react";
 import type { Dispatch, FormEvent, SetStateAction } from "react";
 
 import type { Connector, ConnectorConfigForm } from "../../types/api";
 import { connectorConfigDiagnostics, connectorTemplates } from "./connectorConfig";
+import type { ConnectorConfigLoadState } from "./connectorConfig";
 
 const templateOptions = connectorTemplates.map((template) => ({
   value: template.id,
@@ -33,10 +36,14 @@ const templateOptions = connectorTemplates.map((template) => ({
 export function ConnectorConfigEditor({
   selected,
   config,
+  configLoadState,
+  configLoadError,
   onConfigChange,
+  onRetryConfig,
   onRun,
   onSave,
   onConnectMicrosoft,
+  onEditScope,
   onApplyTemplate,
   runLoading,
   oauthLoading,
@@ -44,10 +51,14 @@ export function ConnectorConfigEditor({
 }: {
   selected?: Connector;
   config: ConnectorConfigForm;
+  configLoadState: ConnectorConfigLoadState;
+  configLoadError: Error | null;
   onConfigChange: Dispatch<SetStateAction<ConnectorConfigForm>>;
+  onRetryConfig: () => void | Promise<void>;
   onRun: (mode: string) => void | Promise<void>;
   onSave: (event: FormEvent<HTMLFormElement>) => void | Promise<void>;
   onConnectMicrosoft: () => void | Promise<void>;
+  onEditScope: () => void;
   onApplyTemplate: (templateId: string) => void;
   runLoading: boolean;
   oauthLoading: boolean;
@@ -60,6 +71,11 @@ export function ConnectorConfigEditor({
   const graphOAuthState = microsoftGraphOAuthState(config.config);
   const configDiagnostics = connectorConfigDiagnostics(config);
   const hasConfigErrors = configDiagnostics.some((diagnostic) => diagnostic.level === "error");
+  const editorLocked =
+    !selected ||
+    configLoadState === "idle" ||
+    configLoadState === "loading" ||
+    configLoadState === "error";
 
   return (
     <Paper p="md" withBorder>
@@ -75,12 +91,21 @@ export function ConnectorConfigEditor({
           )}
         </Box>
         <Group className="responsiveActions">
+          <Button
+            type="button"
+            variant="default"
+            leftSection={<IconUsers size={16} />}
+            disabled={!selected}
+            onClick={onEditScope}
+          >
+            Edit visibility
+          </Button>
           {graphOAuthState.enabled && (
             <Button
               type="button"
               variant="light"
               leftSection={<IconPlugConnected size={16} />}
-              disabled={!selected}
+              disabled={editorLocked}
               loading={oauthLoading}
               onClick={onConnectMicrosoft}
             >
@@ -91,7 +116,7 @@ export function ConnectorConfigEditor({
             type="button"
             variant="default"
             leftSection={<IconPlayerPlay size={16} />}
-            disabled={!selected}
+            disabled={editorLocked}
             loading={runLoading}
             onClick={() => onRun("execute")}
           >
@@ -100,7 +125,7 @@ export function ConnectorConfigEditor({
           <Button
             type="button"
             leftSection={<IconBolt size={16} />}
-            disabled={!selected}
+            disabled={editorLocked}
             loading={runLoading}
             onClick={() => onRun("queue")}
           >
@@ -108,6 +133,40 @@ export function ConnectorConfigEditor({
           </Button>
         </Group>
       </Group>
+
+      {configLoadState === "error" && (
+        <Alert
+          color="red"
+          icon={<IconAlertTriangle size={18} />}
+          title="Connector config unavailable"
+          variant="light"
+          mb="md"
+        >
+          <Stack gap="xs">
+            <Text size="sm">
+              The saved configuration could not be loaded. Editing is locked to prevent
+              overwriting it.
+            </Text>
+            {configLoadError && (
+              <Text size="sm" c="red.8">
+                {configLoadError.message}
+              </Text>
+            )}
+            <Box>
+              <Button
+                type="button"
+                variant="light"
+                color="red"
+                size="xs"
+                leftSection={<IconRefresh size={14} />}
+                onClick={onRetryConfig}
+              >
+                Retry config
+              </Button>
+            </Box>
+          </Stack>
+        </Alert>
+      )}
 
       <form onSubmit={onSave}>
         <Stack>
@@ -120,21 +179,23 @@ export function ConnectorConfigEditor({
                 value={null}
                 leftSection={<IconTemplate size={16} />}
                 onChange={(templateId) => templateId && onApplyTemplate(templateId)}
-                disabled={!selected}
+                disabled={editorLocked}
               />
             </Grid.Col>
             <Grid.Col span={{ base: 12, md: 5 }}>
               <Select
                 label="Target"
                 value={config.target}
+                disabled={editorLocked}
                 onChange={(target) => updateConfig("target", target || "")}
-                data={["work_cards", "notifications", "service_health"]}
+                data={["work_cards", "notifications", "calendar_events", "service_health"]}
               />
             </Grid.Col>
             <Grid.Col span={{ base: 12, md: 3 }}>
               <TextInput
                 label="Schedule"
                 value={config.schedule_cron}
+                disabled={editorLocked}
                 placeholder="@every 15m"
                 onChange={(event) => updateConfig("schedule_cron", event.currentTarget.value)}
               />
@@ -143,6 +204,7 @@ export function ConnectorConfigEditor({
               <Checkbox
                 label="Enabled"
                 checked={config.enabled}
+                disabled={editorLocked}
                 onChange={(event) => updateConfig("enabled", event.currentTarget.checked)}
               />
             </Grid.Col>
@@ -170,6 +232,7 @@ export function ConnectorConfigEditor({
             minRows={8}
             autosize
             value={config.config}
+            disabled={editorLocked}
             onChange={(event) => updateConfig("config", event.currentTarget.value)}
             classNames={{ input: "codeInput" }}
           />
@@ -178,11 +241,12 @@ export function ConnectorConfigEditor({
             minRows={8}
             autosize
             value={config.sample_payload}
+            disabled={editorLocked}
             onChange={(event) => updateConfig("sample_payload", event.currentTarget.value)}
             classNames={{ input: "codeInput" }}
           />
           <Group justify="flex-end">
-            <Button type="submit" disabled={!selected} loading={saving}>
+            <Button type="submit" disabled={editorLocked} loading={saving}>
               Save config
             </Button>
           </Group>

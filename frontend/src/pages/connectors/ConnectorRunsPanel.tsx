@@ -9,7 +9,7 @@ import {
   Stack,
   Text
 } from "@mantine/core";
-import { IconArrowRight, IconEye, IconRefresh } from "@tabler/icons-react";
+import { IconArrowRight, IconEye, IconRefresh, IconX } from "@tabler/icons-react";
 import { useState } from "react";
 import type { ReactNode } from "react";
 
@@ -31,6 +31,8 @@ export function ConnectorRunsPanel({
   onSelectRun,
   onRetryRun,
   retryingRunId,
+  onCancelRun,
+  cancellingRunId,
   onOpenService
 }: {
   runs: ConnectorRun[];
@@ -39,6 +41,8 @@ export function ConnectorRunsPanel({
   onSelectRun: (runId: string | number, options?: RunDetailOptions) => void | Promise<void>;
   onRetryRun: (run: ConnectorRun) => void | Promise<void>;
   retryingRunId: ApiId | string | null;
+  onCancelRun: (run: ConnectorRun) => void | Promise<void>;
+  cancellingRunId: ApiId | string | null;
   onOpenService: (serviceId: string | number) => void;
 }) {
   return (
@@ -53,8 +57,27 @@ export function ConnectorRunsPanel({
             ["status", "Status", StatusBadge],
             ["success_count", "OK"],
             ["failure_count", "Failed"],
+            ["archived_count", "Archived"],
             ["duration_ms", "MS"],
             ["started_at", "Started", DateCell],
+            [
+              "id",
+              "Cancel",
+              ({ row }) =>
+                canCancel(row) ? (
+                  <Button
+                    size="compact-sm"
+                    variant="subtle"
+                    color="red"
+                    aria-label={`Cancel run #${row.id}`}
+                    leftSection={<IconX size={14} />}
+                    loading={cancellingRunId === row.id}
+                    onClick={() => onCancelRun(row)}
+                  >
+                    Cancel
+                  </Button>
+                ) : null
+            ],
             [
               "id",
               "Retry",
@@ -102,6 +125,8 @@ export function ConnectorRunsPanel({
           loading={runDetailLoading}
           onRetryRun={onRetryRun}
           retryingRunId={retryingRunId}
+          onCancelRun={onCancelRun}
+          cancellingRunId={cancellingRunId}
           onOpenService={onOpenService}
         />
       </DataPanel>
@@ -114,12 +139,16 @@ function RunDetail({
   loading,
   onRetryRun,
   retryingRunId,
+  onCancelRun,
+  cancellingRunId,
   onOpenService
 }: {
   detail: ConnectorRunDetail | null;
   loading: boolean;
   onRetryRun: (run: ConnectorRun) => void | Promise<void>;
   retryingRunId: ApiId | string | null;
+  onCancelRun: (run: ConnectorRun) => void | Promise<void>;
+  cancellingRunId: ApiId | string | null;
   onOpenService: (serviceId: string | number) => void;
 }) {
   if (loading && !detail) {
@@ -151,6 +180,18 @@ function RunDetail({
           </Text>
         </Box>
         <Group gap="xs">
+          {canCancel(run) && (
+            <Button
+              size="compact-sm"
+              variant="light"
+              color="red"
+              leftSection={<IconX size={14} />}
+              loading={cancellingRunId === run.id}
+              onClick={() => onCancelRun(run)}
+            >
+              Cancel
+            </Button>
+          )}
           {canRetry(run) && (
             <Button
               size="compact-sm"
@@ -175,6 +216,18 @@ function RunDetail({
         />
         <RunMetric label="Run items" value={runItems.length} tone="items" />
         <RunMetric label="Duration" value={`${run.duration_ms} ms`} tone="duration" />
+      </SimpleGrid>
+
+      <SimpleGrid cols={{ base: 2, sm: 3 }} className="runDetailMetrics">
+        <RunMetric label="Attempt" value={`${run.attempt_count} / ${run.max_attempts}`} />
+        <RunMetric label="Snapshot" value={formatSnapshotState(run)} />
+        <RunMetric label="Archived" value={run.archived_count} />
+        <RunMetric label="Next attempt" value={formatRunDate(run.next_attempt_at)} />
+        <RunMetric label="Lease heartbeat" value={formatRunDate(run.heartbeat_at)} />
+        <RunMetric
+          label="Cancellation"
+          value={run.cancelled_at ? "Cancelled" : run.cancel_requested_at ? "Requested" : "-"}
+        />
       </SimpleGrid>
 
       {run.error_message && (
@@ -272,7 +325,28 @@ function RunDetail({
 }
 
 function canRetry(run?: Pick<ConnectorRun, "status"> | null) {
-  return Boolean(run?.status && ["failed", "partial_success"].includes(run.status));
+  return Boolean(run?.status && ["failed", "partial_success", "cancelled"].includes(run.status));
+}
+
+function canCancel(run?: Pick<ConnectorRun, "status"> | null) {
+  return Boolean(run?.status && ["queued", "running"].includes(run.status));
+}
+
+function formatRunDate(value?: string | null): string {
+  return value ? new Date(value).toLocaleString() : "-";
+}
+
+function formatSnapshotState(run: ConnectorRun): string {
+  if (run.snapshot_complete === null) {
+    return "Not declared";
+  }
+  if (!run.snapshot_complete) {
+    return "Incomplete - existing records kept";
+  }
+  if (run.failure_count > 0) {
+    return "Complete - item errors, no archive";
+  }
+  return "Complete";
 }
 
 function RunMetric({

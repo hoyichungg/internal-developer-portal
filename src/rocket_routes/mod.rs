@@ -1,5 +1,6 @@
 pub mod audit_logs;
 pub mod authorization;
+pub mod calendar_events;
 pub mod connectors;
 pub mod dashboard;
 pub mod health;

@@ -16,6 +16,41 @@ diesel::table! {
 }
 
 diesel::table! {
+    calendar_events (id) {
+        id -> Int4,
+        #[max_length = 64]
+        source -> Varchar,
+        #[max_length = 128]
+        external_id -> Varchar,
+        #[max_length = 256]
+        title -> Varchar,
+        body -> Nullable<Text>,
+        #[max_length = 256]
+        organizer -> Nullable<Varchar>,
+        #[max_length = 256]
+        location -> Nullable<Varchar>,
+        starts_at -> Timestamp,
+        ends_at -> Timestamp,
+        #[max_length = 128]
+        time_zone -> Nullable<Varchar>,
+        is_all_day -> Bool,
+        is_cancelled -> Bool,
+        #[max_length = 2048]
+        web_url -> Nullable<Varchar>,
+        #[max_length = 2048]
+        join_url -> Nullable<Varchar>,
+        connector_id -> Nullable<Int4>,
+        owner_user_id -> Nullable<Int4>,
+        maintainer_id -> Nullable<Int4>,
+        source_updated_at -> Nullable<Timestamp>,
+        last_seen_run_id -> Nullable<Int4>,
+        archived_at -> Nullable<Timestamp>,
+        created_at -> Timestamp,
+        updated_at -> Timestamp,
+    }
+}
+
+diesel::table! {
     connector_configs (id) {
         id -> Int4,
         #[max_length = 64]
@@ -90,6 +125,16 @@ diesel::table! {
         claimed_at -> Nullable<Timestamp>,
         #[max_length = 128]
         worker_id -> Nullable<Varchar>,
+        attempt_count -> Int4,
+        max_attempts -> Int4,
+        next_attempt_at -> Timestamp,
+        lease_expires_at -> Nullable<Timestamp>,
+        heartbeat_at -> Nullable<Timestamp>,
+        cancel_requested_at -> Nullable<Timestamp>,
+        cancelled_at -> Nullable<Timestamp>,
+        parent_run_id -> Nullable<Int4>,
+        snapshot_complete -> Nullable<Bool>,
+        archived_count -> Int4,
     }
 }
 
@@ -125,6 +170,10 @@ diesel::table! {
         last_success_at -> Nullable<Timestamp>,
         created_at -> Timestamp,
         updated_at -> Timestamp,
+        #[max_length = 16]
+        scope_type -> Varchar,
+        owner_user_id -> Nullable<Int4>,
+        maintainer_id -> Nullable<Int4>,
     }
 }
 
@@ -169,6 +218,19 @@ diesel::table! {
 }
 
 diesel::table! {
+    notification_receipts (id) {
+        id -> Int4,
+        notification_id -> Int4,
+        user_id -> Int4,
+        read_at -> Nullable<Timestamp>,
+        dismissed_at -> Nullable<Timestamp>,
+        snoozed_until -> Nullable<Timestamp>,
+        created_at -> Timestamp,
+        updated_at -> Timestamp,
+    }
+}
+
+diesel::table! {
     notifications (id) {
         id -> Int4,
         #[max_length = 64]
@@ -185,6 +247,12 @@ diesel::table! {
         updated_at -> Timestamp,
         #[max_length = 128]
         external_id -> Nullable<Varchar>,
+        connector_id -> Nullable<Int4>,
+        owner_user_id -> Nullable<Int4>,
+        maintainer_id -> Nullable<Int4>,
+        source_updated_at -> Nullable<Timestamp>,
+        last_seen_run_id -> Nullable<Int4>,
+        archived_at -> Nullable<Timestamp>,
     }
 }
 
@@ -321,16 +389,34 @@ diesel::table! {
         url -> Nullable<Varchar>,
         created_at -> Timestamp,
         updated_at -> Timestamp,
+        connector_id -> Nullable<Int4>,
+        owner_user_id -> Nullable<Int4>,
+        maintainer_id -> Nullable<Int4>,
+        source_updated_at -> Nullable<Timestamp>,
+        last_seen_run_id -> Nullable<Int4>,
+        archived_at -> Nullable<Timestamp>,
     }
 }
 
 diesel::joinable!(audit_logs -> users (actor_user_id));
+diesel::joinable!(calendar_events -> connector_runs (last_seen_run_id));
+diesel::joinable!(calendar_events -> connectors (connector_id));
+diesel::joinable!(calendar_events -> maintainers (maintainer_id));
+diesel::joinable!(calendar_events -> users (owner_user_id));
 diesel::joinable!(connector_configs -> connector_runs (last_scheduled_run_id));
 diesel::joinable!(connector_run_item_errors -> connector_runs (connector_run_id));
 diesel::joinable!(connector_run_items -> connector_runs (connector_run_id));
 diesel::joinable!(connector_workers -> connector_runs (current_run_id));
+diesel::joinable!(connectors -> maintainers (maintainer_id));
+diesel::joinable!(connectors -> users (owner_user_id));
 diesel::joinable!(maintainer_members -> maintainers (maintainer_id));
 diesel::joinable!(maintainer_members -> users (user_id));
+diesel::joinable!(notification_receipts -> notifications (notification_id));
+diesel::joinable!(notification_receipts -> users (user_id));
+diesel::joinable!(notifications -> connector_runs (last_seen_run_id));
+diesel::joinable!(notifications -> connectors (connector_id));
+diesel::joinable!(notifications -> maintainers (maintainer_id));
+diesel::joinable!(notifications -> users (owner_user_id));
 diesel::joinable!(packages -> maintainers (maintainer_id));
 diesel::joinable!(service_health_checks -> connector_runs (connector_run_id));
 diesel::joinable!(service_health_checks -> services (service_id));
@@ -338,9 +424,14 @@ diesel::joinable!(services -> maintainers (maintainer_id));
 diesel::joinable!(sessions -> users (user_id));
 diesel::joinable!(users_roles -> roles (role_id));
 diesel::joinable!(users_roles -> users (user_id));
+diesel::joinable!(work_cards -> connector_runs (last_seen_run_id));
+diesel::joinable!(work_cards -> connectors (connector_id));
+diesel::joinable!(work_cards -> maintainers (maintainer_id));
+diesel::joinable!(work_cards -> users (owner_user_id));
 
 diesel::allow_tables_to_appear_in_same_query!(
     audit_logs,
+    calendar_events,
     connector_configs,
     connector_run_item_errors,
     connector_run_items,
@@ -350,6 +441,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     maintainer_members,
     maintainers,
     maintenance_runs,
+    notification_receipts,
     notifications,
     packages,
     roles,

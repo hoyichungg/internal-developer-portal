@@ -1,9 +1,11 @@
 import { notifications } from "@mantine/notifications";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { createApiClient } from "./api/client";
+import { createApiClient, isApiError } from "./api/client";
+import { AccessDenied } from "./components/AccessDenied";
 import { CenterStage } from "./components/CenterStage";
 import { PageLoader } from "./components/LoadingState";
+import { SessionRecoveryScreen } from "./components/SessionRecoveryScreen";
 import { useStoredToken } from "./hooks/useStoredToken";
 import { PortalShell } from "./layout/PortalShell";
 import { AuditView } from "./pages/audit/AuditView";
@@ -141,9 +143,20 @@ function clearMicrosoftOAuthCallbackUrl() {
   window.history.replaceState(null, "", "/");
 }
 
+function canAccessView(user: MeResponse, view: AppView): boolean {
+  if (view === "connectors") {
+    return user.capabilities.manage_connectors;
+  }
+  if (view === "audit") {
+    return user.capabilities.view_audit;
+  }
+
+  return true;
+}
+
 export default function App() {
   const initialRoute = useMemo(() => routeFromHash(), []);
-  const [token, setToken] = useStoredToken();
+  const [token, setToken, storedExpiresAt] = useStoredToken();
   const [user, setUser] = useState<MeResponse | null>(null);
   const [view, setView] = useState(() => initialRoute.view);
   const [selectedServiceId, setSelectedServiceId] = useState<ApiId | null>(null);
@@ -158,10 +171,22 @@ export default function App() {
       return initialRoute.view === "connectors" ? connectorTargetFromParams(initialRoute.params) : null;
     });
   const [booting, setBooting] = useState(true);
-  const restoredTokenRef = useRef<string | null>(null);
+  const [restoreError, setRestoreError] = useState<Error | null>(null);
+  const [restoreAttempt, setRestoreAttempt] = useState(0);
+  const restoreRequestIdRef = useRef(0);
   const handledMicrosoftOAuthCallbackRef = useRef("");
 
-  const client = useMemo(() => createApiClient(token), [token]);
+  const handleUnauthorized = useCallback(() => {
+    setUser(null);
+    setRestoreError(null);
+    setBooting(false);
+    setToken(null);
+  }, [setToken]);
+
+  const client = useMemo(
+    () => createApiClient(token, { onUnauthorized: handleUnauthorized }),
+    [handleUnauthorized, token]
+  );
 
   useEffect(() => {
     function syncViewFromHash() {
@@ -183,37 +208,63 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    let mounted = true;
+    const requestId = restoreRequestIdRef.current + 1;
+    restoreRequestIdRef.current = requestId;
 
     async function restore() {
       if (!token) {
-        restoredTokenRef.current = null;
         setUser(null);
+        setRestoreError(null);
         setBooting(false);
         return;
       }
 
-      if (restoredTokenRef.current === token) {
+      if (isSessionExpired(storedExpiresAt)) {
+        setUser(null);
+        setRestoreError(null);
         setBooting(false);
+        setToken(null);
         return;
       }
 
-      restoredTokenRef.current = token;
       setBooting(true);
+      setRestoreError(null);
+      setUser(null);
 
       try {
-        const me = await createApiClient(token).get<MeResponse>("/me");
-        if (mounted) {
-          setUser(me);
+        const me = await createApiClient(token, {
+          onUnauthorized: handleUnauthorized
+        }).get<MeResponse>("/me");
+        if (restoreRequestIdRef.current !== requestId) {
+          return;
         }
-      } catch {
-        if (mounted) {
-          restoredTokenRef.current = null;
+
+        const expiresAt = validSessionExpiry(me.expires_at) ? me.expires_at : storedExpiresAt;
+        if (isSessionExpired(expiresAt)) {
           setUser(null);
           setToken(null);
+          return;
         }
+
+        setUser(me);
+        if (me.expires_at && me.expires_at !== storedExpiresAt && validSessionExpiry(me.expires_at)) {
+          setToken(token, me.expires_at);
+        }
+      } catch (error) {
+        if (restoreRequestIdRef.current !== requestId) {
+          return;
+        }
+
+        if (isApiError(error) && error.status === 401) {
+          setUser(null);
+          setToken(null);
+          return;
+        }
+
+        setUser(null);
+        setRestoreError(error instanceof Error ? error : new Error(String(error)));
       } finally {
-        if (mounted) {
+        if (restoreRequestIdRef.current === requestId) {
           setBooting(false);
         }
       }
@@ -221,9 +272,11 @@ export default function App() {
 
     restore();
     return () => {
-      mounted = false;
+      if (restoreRequestIdRef.current === requestId) {
+        restoreRequestIdRef.current += 1;
+      }
     };
-  }, [setToken, token]);
+  }, [handleUnauthorized, restoreAttempt, setToken, token]);
 
   useEffect(() => {
     if (!token || !user) {
@@ -288,12 +341,8 @@ export default function App() {
     const login = await createApiClient(null).post<LoginResponse>("/login", credentials);
     setBooting(true);
     setUser(null);
-    setSelectedServiceId(null);
-    setSelectedWorkCardId(null);
-    setSelectedNotificationId(null);
-    setConnectorDrillTarget(null);
-    setToken(login.token);
-    handleViewChange("dashboard");
+    setRestoreError(null);
+    setToken(login.token, login.expires_at);
     notifications.show({
       title: "Signed in",
       message: "Session restored",
@@ -308,10 +357,20 @@ export default function App() {
       // Session might already be expired.
     }
     setUser(null);
-    setSelectedServiceId(null);
-    setSelectedWorkCardId(null);
-    setSelectedNotificationId(null);
-    setConnectorDrillTarget(null);
+    setRestoreError(null);
+    setToken(null);
+  }
+
+  function retrySessionRestore() {
+    setRestoreError(null);
+    setBooting(true);
+    setRestoreAttempt((attempt) => attempt + 1);
+  }
+
+  function abandonStoredSession() {
+    setUser(null);
+    setRestoreError(null);
+    setBooting(false);
     setToken(null);
   }
 
@@ -395,8 +454,26 @@ export default function App() {
     );
   }
 
+  if (token && !user && restoreError) {
+    return (
+      <SessionRecoveryScreen
+        error={restoreError}
+        onRetry={retrySessionRestore}
+        onSignOut={abandonStoredSession}
+      />
+    );
+  }
+
   if (!token || !user) {
     return <LoginScreen onLogin={handleLogin} />;
+  }
+
+  if (!canAccessView(user, view)) {
+    return (
+      <PortalShell user={user} view={view} onLogout={handleLogout}>
+        <AccessDenied onGoHome={() => handleViewChange("dashboard")} />
+      </PortalShell>
+    );
   }
 
   return (
@@ -414,6 +491,7 @@ export default function App() {
       {view === "dashboard" && (
         <DashboardView
           client={client}
+          canManageConnectors={user.capabilities.manage_connectors}
           onOpenService={openServiceOverview}
           onOpenConnector={openConnectorDrill}
           onOpenWorkCard={openWorkCardDetail}
@@ -450,8 +528,28 @@ export default function App() {
           onOpenService={openServiceOverview}
         />
       )}
-      {view === "catalog" && <CatalogView client={client} />}
+      {view === "catalog" && <CatalogView client={client} user={user} />}
       {view === "audit" && <AuditView client={client} />}
     </PortalShell>
   );
+}
+
+function validSessionExpiry(value?: string | null): value is string {
+  return sessionExpiryMilliseconds(value) !== null;
+}
+
+function isSessionExpired(value?: string | null): boolean {
+  const expiresAt = sessionExpiryMilliseconds(value);
+  return expiresAt !== null && expiresAt <= Date.now();
+}
+
+function sessionExpiryMilliseconds(value?: string | null): number | null {
+  if (!value) {
+    return null;
+  }
+
+  // Rocket serializes UTC NaiveDateTime without a timezone suffix. Treat that wire format as UTC.
+  const normalized = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(value) ? value : `${value}Z`;
+  const parsed = Date.parse(normalized);
+  return Number.isFinite(parsed) ? parsed : null;
 }

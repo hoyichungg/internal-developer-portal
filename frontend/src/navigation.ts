@@ -5,9 +5,23 @@ import {
   IconTopologyStar
 } from "@tabler/icons-react";
 
-export const NAV_ITEMS = [
+import type { MeCapabilities } from "./types/api";
+
+type NavigationItem = {
+  id: string;
+  label: string;
+  icon: typeof IconLayoutDashboard;
+  capability?: keyof MeCapabilities;
+};
+
+export const NAV_ITEMS: NavigationItem[] = [
   { id: "dashboard", label: "Dashboard", icon: IconLayoutDashboard },
-  { id: "connectors", label: "Connectors", icon: IconPlugConnected },
+  {
+    id: "connectors",
+    label: "Connectors",
+    icon: IconPlugConnected,
+    capability: "manage_connectors"
+  },
   { id: "catalog", label: "Catalog", icon: IconTopologyStar },
-  { id: "audit", label: "Audit", icon: IconHistory }
+  { id: "audit", label: "Audit", icon: IconHistory, capability: "view_audit" }
 ];

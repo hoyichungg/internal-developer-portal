@@ -11,6 +11,7 @@ export type ApiErrorDetail = {
 };
 
 export type ApiErrorBody = {
+  code?: string;
   message?: string;
   details?: ApiErrorDetail[];
 };
@@ -24,6 +25,23 @@ export type MeResponse = {
   id: ApiId;
   username: string;
   roles: string[];
+  expires_at?: DateTimeString;
+  capabilities: MeCapabilities;
+  maintainer_access: MeMaintainerAccess[];
+};
+
+export type MeCapabilities = {
+  manage_connectors: boolean;
+  view_audit: boolean;
+  manage_maintainers: boolean;
+  view_user_directory: boolean;
+};
+
+export type MeMaintainerAccess = {
+  maintainer_id: ApiId;
+  role: string;
+  can_write: boolean;
+  can_manage_members: boolean;
 };
 
 export type UserSummary = {
@@ -129,6 +147,31 @@ export type WorkCard = {
   updated_at: DateTimeString;
 };
 
+export type CalendarEvent = {
+  id: ApiId;
+  source: string;
+  external_id: string;
+  title: string;
+  body: string | null;
+  organizer: string | null;
+  location: string | null;
+  starts_at: DateTimeString;
+  ends_at: DateTimeString;
+  time_zone: string | null;
+  is_all_day: boolean;
+  is_cancelled: boolean;
+  web_url: string | null;
+  join_url: string | null;
+  connector_id: ApiId | null;
+  owner_user_id: ApiId | null;
+  maintainer_id: ApiId | null;
+  source_updated_at: DateTimeString | null;
+  last_seen_run_id: ApiId | null;
+  archived_at: DateTimeString | null;
+  created_at: DateTimeString;
+  updated_at: DateTimeString;
+};
+
 export type Notification = {
   id: ApiId;
   source: string;
@@ -136,10 +179,20 @@ export type Notification = {
   body: string | null;
   severity: string;
   is_read: boolean;
+  source_is_read: boolean;
   url: string | null;
   created_at: DateTimeString;
   updated_at: DateTimeString;
   external_id: string | null;
+  connector_id: ApiId | null;
+  owner_user_id: ApiId | null;
+  maintainer_id: ApiId | null;
+  source_updated_at: DateTimeString | null;
+  last_seen_run_id: ApiId | null;
+  archived_at: DateTimeString | null;
+  read_at: DateTimeString | null;
+  dismissed_at: DateTimeString | null;
+  snoozed_until: DateTimeString | null;
 };
 
 export type Connector = {
@@ -150,8 +203,17 @@ export type Connector = {
   status: string;
   last_run_at: DateTimeString | null;
   last_success_at: DateTimeString | null;
+  scope_type: "global" | "user" | "maintainer";
+  owner_user_id: ApiId | null;
+  maintainer_id: ApiId | null;
   created_at: DateTimeString;
   updated_at: DateTimeString;
+};
+
+export type ConnectorScopePayload = {
+  scope_type: "global" | "user" | "maintainer";
+  owner_user_id: ApiId | null;
+  maintainer_id: ApiId | null;
 };
 
 export type ConnectorRun = {
@@ -168,6 +230,16 @@ export type ConnectorRun = {
   trigger: string;
   claimed_at: DateTimeString | null;
   worker_id: string | null;
+  attempt_count: number;
+  max_attempts: number;
+  next_attempt_at: DateTimeString;
+  lease_expires_at: DateTimeString | null;
+  heartbeat_at: DateTimeString | null;
+  cancel_requested_at: DateTimeString | null;
+  cancelled_at: DateTimeString | null;
+  parent_run_id: ApiId | null;
+  snapshot_complete: boolean | null;
+  archived_count: number;
 };
 
 export type ConnectorRunItem = {
@@ -337,6 +409,7 @@ export type MeOverviewSummary = {
   services: number;
   unhealthy_services: number;
   packages: number;
+  today_calendar_events: number;
   open_work_cards: number;
   unread_notifications: number;
   failed_connector_runs: number;
@@ -352,6 +425,7 @@ export type MeOverviewResponse = {
   maintainers: MeMaintainerOverview[];
   services: Service[];
   packages: Package[];
+  today_calendar_events: CalendarEvent[];
   open_work_cards: WorkCard[];
   unread_notifications: Notification[];
   failed_connector_runs: ConnectorRun[];
@@ -428,6 +502,9 @@ export type NewConnectorPayload = {
   kind: string;
   display_name: string;
   status: string;
+  scope_type: "global" | "user" | "maintainer";
+  owner_user_id: ApiId | null;
+  maintainer_id: ApiId | null;
 };
 
 export type MaintainerMemberPayload = {

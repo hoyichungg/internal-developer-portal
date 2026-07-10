@@ -28,7 +28,10 @@ export function PortalShell({
   onLogout: () => void | Promise<void>;
   children: ReactNode;
 }) {
-  const [opened, { toggle }] = useDisclosure(false);
+  const [opened, { close, toggle }] = useDisclosure(false);
+  const visibleNavigation = NAV_ITEMS.filter(
+    (item) => !item.capability || user.capabilities[item.capability]
+  );
 
   return (
     <AppShell
@@ -54,6 +57,7 @@ export function PortalShell({
               <ActionIcon
                 variant="light"
                 size="lg"
+                aria-label="Refresh current view"
                 onClick={() => window.dispatchEvent(new CustomEvent("idp-refresh"))}
               >
                 <IconRefresh size={18} />
@@ -68,7 +72,13 @@ export function PortalShell({
               Sign out
             </Button>
             <Tooltip label="Sign out">
-              <ActionIcon variant="default" size="lg" onClick={onLogout} hiddenFrom="xs">
+              <ActionIcon
+                variant="default"
+                size="lg"
+                aria-label="Sign out"
+                onClick={onLogout}
+                hiddenFrom="xs"
+              >
                 <IconLogout size={18} />
               </ActionIcon>
             </Tooltip>
@@ -78,12 +88,13 @@ export function PortalShell({
 
       <AppShell.Navbar p="md" className="appNavbar">
         <Stack gap={6}>
-          {NAV_ITEMS.map((item) => (
+          {visibleNavigation.map((item) => (
             <a
               key={item.id}
               href={`#${item.id}`}
               aria-current={view === item.id ? "page" : undefined}
               className={`appNavButton${view === item.id ? " isActive" : ""}`}
+              onClick={close}
             >
               <item.icon size={20} />
               <span>{item.label}</span>

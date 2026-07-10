@@ -50,7 +50,7 @@ pub async fn fetch_connector_payload(
             "monitoring adapter does not support target {target}"
         )),
         Some("microsoft_graph_calendar" | "graph_calendar" | "outlook_calendar") => {
-            if target == "notifications" {
+            if matches!(target, "notifications" | "calendar_events") {
                 fetch_microsoft_graph_calendar_events(config_json).await
             } else {
                 Err(format!(
@@ -77,7 +77,9 @@ pub async fn fetch_connector_payload(
         Some("erp_private_messages" | "erp_messages_http" | "erp_http") => Err(format!(
             "erp_private_messages adapter does not support target {target}"
         )),
-        Some("calendar_sample" | "calendar") if target == "notifications" => {
+        Some("calendar_sample" | "calendar")
+            if matches!(target, "notifications" | "calendar_events") =>
+        {
             fetch_sample_notifications(config_json, SampleNotificationKind::Calendar)
                 .map(adapter_payload)
         }

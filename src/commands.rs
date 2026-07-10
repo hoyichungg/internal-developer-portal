@@ -8,15 +8,16 @@ use serde_json::{json, Value};
 
 use crate::{
     models::{
-        ConnectorRun, ConnectorRunStateUpdate, ConnectorUpdate, NewConnector, NewConnectorRun,
-        NewConnectorRunItem, NewConnectorRunItemError, NewMaintainer, NewMaintainerMember,
-        NewNotification, NewPackage, NewService, NewUser, NewWorkCard,
+        ConnectorRun, ConnectorRunStateUpdate, ConnectorUpdate, NewCalendarEvent, NewConnector,
+        NewConnectorRun, NewConnectorRunItem, NewConnectorRunItemError, NewMaintainer,
+        NewMaintainerMember, NewNotification, NewPackage, NewService, NewUser, NewWorkCard,
     },
     repositories::{
-        ConnectorConfigRepository, ConnectorRepository, ConnectorRunItemErrorRepository,
-        ConnectorRunItemRepository, ConnectorRunRepository, MaintainerMemberRepository,
-        MaintainerRepository, NotificationRepository, PackageRepository, RoleRepository,
-        ServiceRepository, UserRepository, UserRoleRepository, WorkCardRepository,
+        CalendarEventRepository, ConnectorConfigRepository, ConnectorRepository,
+        ConnectorRunItemErrorRepository, ConnectorRunItemRepository, ConnectorRunRepository,
+        MaintainerMemberRepository, MaintainerRepository, NotificationRepository,
+        PackageRepository, RoleRepository, ServiceRepository, UserRepository, UserRoleRepository,
+        WorkCardRepository,
     },
     schema::{
         connector_configs, connector_run_item_errors, connector_run_items, connector_runs,
@@ -36,7 +37,18 @@ struct DemoSeedSummary {
     package_count: usize,
     work_card_count: usize,
     notification_count: usize,
+    calendar_event_count: usize,
     connector_run_count: usize,
+}
+
+struct DemoProductConnectorSeed<'a> {
+    source: &'a str,
+    kind: &'a str,
+    display_name: &'a str,
+    target: &'a str,
+    schedule_cron: &'a str,
+    config: Value,
+    sample_payload: Value,
 }
 
 async fn load_db_connection() -> AsyncPgConnection {
@@ -146,11 +158,12 @@ pub async fn seed_demo_data(admin_username: Option<String>) {
         DEMO_SOURCE, summary.maintainer_id
     );
     println!(
-        "Seeded {} services, {} packages, {} work cards, {} notifications, {} connector runs",
+        "Seeded {} services, {} packages, {} work cards, {} notifications, {} calendar events, {} connector runs",
         summary.service_count,
         summary.package_count,
         summary.work_card_count,
         summary.notification_count,
+        summary.calendar_event_count,
         summary.connector_run_count
     );
 }
@@ -181,6 +194,7 @@ async fn seed_demo_data_transaction(
 
     ensure_demo_connector(c, maintainer.id).await?;
     ensure_demo_product_connectors(c).await?;
+    let calendar_events = seed_demo_calendar_events(c, now).await?;
 
     let packages = vec![
         ensure_demo_package(
@@ -301,6 +315,7 @@ async fn seed_demo_data_transaction(
         package_count: packages.len(),
         work_card_count: work_cards.len(),
         notification_count: notifications.len(),
+        calendar_event_count: calendar_events.len(),
         connector_run_count: 3,
     })
 }
@@ -363,12 +378,18 @@ async fn ensure_demo_connector(
                     kind: "demo".to_owned(),
                     display_name: "Demo Workday Feed".to_owned(),
                     status: "active".to_owned(),
+                    scope_type: "maintainer".to_owned(),
+                    owner_user_id: None,
+                    maintainer_id: Some(maintainer_id),
                 },
             )
             .await?;
         }
         Err(error) => return Err(error),
     }
+
+    ConnectorRepository::update_scope(c, DEMO_SOURCE, "maintainer", None, Some(maintainer_id))
+        .await?;
 
     ConnectorConfigRepository::upsert_by_source(
         c,
@@ -396,40 +417,53 @@ async fn ensure_demo_connector(
 async fn ensure_demo_product_connectors(c: &mut AsyncPgConnection) -> Result<(), DieselError> {
     ensure_demo_product_connector(
         c,
-        DEMO_CALENDAR_SOURCE,
-        "calendar",
-        "Calendar Sample Feed",
-        "@every 30m",
-        json!({
+        DemoProductConnectorSeed {
+            source: DEMO_CALENDAR_SOURCE,
+            kind: "calendar",
+            display_name: "Calendar Sample Feed",
+            target: "calendar_events",
+            schedule_cron: "@every 30m",
+            config: json!({
             "adapter": "calendar_sample",
             "events": [{
                 "id": "calendar-platform-standup",
-                "subject": "Calendar: Platform standup in 15 minutes",
+                "subject": "Calendar: Platform standup",
                 "organizer": "Taylor Lin",
                 "location": "Teams",
-                "starts_at": "2026-05-11T09:30:00Z",
+                "starts_at": (Utc::now().naive_utc() + Duration::minutes(30)).format("%Y-%m-%dT%H:%M:%S").to_string(),
+                "ends_at": (Utc::now().naive_utc() + Duration::minutes(60)).format("%Y-%m-%dT%H:%M:%S").to_string(),
                 "web_link": "https://calendar.example.test/events/platform-standup"
             }]
-        }),
-        json!({
+            }),
+            sample_payload: json!({
             "items": [{
                 "external_id": "calendar-platform-standup",
-                "title": "Calendar: Platform standup in 15 minutes",
+                "title": "Calendar: Platform standup",
                 "body": "Organizer: Taylor Lin | Location: Teams",
-                "severity": "info",
-                "is_read": false,
-                "url": "https://calendar.example.test/events/platform-standup"
-            }]
-        }),
+                "organizer": "Taylor Lin",
+                "location": "Teams",
+                "starts_at": (Utc::now().naive_utc() + Duration::minutes(30)).format("%Y-%m-%dT%H:%M:%S").to_string(),
+                "ends_at": (Utc::now().naive_utc() + Duration::minutes(60)).format("%Y-%m-%dT%H:%M:%S").to_string(),
+                "time_zone": "UTC",
+                "is_all_day": false,
+                "is_cancelled": false,
+                "web_url": "https://calendar.example.test/events/platform-standup",
+                "join_url": "https://teams.example.test/platform-standup"
+            }],
+            "snapshot_complete": true
+            }),
+        },
     )
     .await?;
     ensure_demo_product_connector(
         c,
-        DEMO_OUTLOOK_SOURCE,
-        "outlook",
-        "Outlook Mail Sample Feed",
-        "@every 15m",
-        json!({
+        DemoProductConnectorSeed {
+            source: DEMO_OUTLOOK_SOURCE,
+            kind: "outlook",
+            display_name: "Outlook Mail Sample Feed",
+            target: "notifications",
+            schedule_cron: "@every 15m",
+            config: json!({
             "adapter": "outlook_mail_sample",
             "messages": [{
                 "id": "release-brief",
@@ -439,8 +473,8 @@ async fn ensure_demo_product_connectors(c: &mut AsyncPgConnection) -> Result<(),
                 "importance": "high",
                 "web_link": "https://outlook.example.test/mail/release-brief"
             }]
-        }),
-        json!({
+            }),
+            sample_payload: json!({
             "items": [{
                 "external_id": "release-brief",
                 "title": "Mail: Release brief ready for review",
@@ -449,16 +483,19 @@ async fn ensure_demo_product_connectors(c: &mut AsyncPgConnection) -> Result<(),
                 "is_read": false,
                 "url": "https://outlook.example.test/mail/release-brief"
             }]
-        }),
+            }),
+        },
     )
     .await?;
     ensure_demo_product_connector(
         c,
-        DEMO_ERP_SOURCE,
-        "erp",
-        "ERP Messages Sample Feed",
-        "@every 15m",
-        json!({
+        DemoProductConnectorSeed {
+            source: DEMO_ERP_SOURCE,
+            kind: "erp",
+            display_name: "ERP Messages Sample Feed",
+            target: "notifications",
+            schedule_cron: "@every 15m",
+            config: json!({
             "adapter": "erp_messages_sample",
             "messages": [{
                 "id": "access-approval",
@@ -466,8 +503,8 @@ async fn ensure_demo_product_connectors(c: &mut AsyncPgConnection) -> Result<(),
                 "message": "Sample ERP private message. Configure erp_private_messages for a real HTTP endpoint.",
                 "requires_approval": true
             }]
-        }),
-        json!({
+            }),
+            sample_payload: json!({
             "items": [{
                 "external_id": "access-approval",
                 "title": "ERP: Deployment access approval waiting",
@@ -476,20 +513,59 @@ async fn ensure_demo_product_connectors(c: &mut AsyncPgConnection) -> Result<(),
                 "is_read": false,
                 "url": null
             }]
-        }),
+            }),
+        },
     )
     .await
 }
 
+async fn seed_demo_calendar_events(
+    c: &mut AsyncPgConnection,
+    now: chrono::NaiveDateTime,
+) -> Result<Vec<crate::models::CalendarEvent>, DieselError> {
+    let connector = ConnectorRepository::find_by_source(c, DEMO_CALENDAR_SOURCE).await?;
+    let event = CalendarEventRepository::upsert_from_connector(
+        c,
+        NewCalendarEvent {
+            source: DEMO_CALENDAR_SOURCE.to_owned(),
+            external_id: "calendar-platform-standup".to_owned(),
+            title: "Platform standup".to_owned(),
+            body: Some("Daily engineering priorities and operational risks.".to_owned()),
+            organizer: Some("Taylor Lin".to_owned()),
+            location: Some("Teams".to_owned()),
+            starts_at: now + Duration::minutes(30),
+            ends_at: now + Duration::minutes(60),
+            time_zone: Some("UTC".to_owned()),
+            is_all_day: false,
+            is_cancelled: false,
+            web_url: Some("https://calendar.example.test/events/platform-standup".to_owned()),
+            join_url: Some("https://teams.example.test/platform-standup".to_owned()),
+            connector_id: Some(connector.id),
+            owner_user_id: connector.owner_user_id,
+            maintainer_id: connector.maintainer_id,
+            source_updated_at: Some(now),
+            last_seen_run_id: None,
+            archived_at: None,
+        },
+    )
+    .await?;
+
+    Ok(vec![event])
+}
+
 async fn ensure_demo_product_connector(
     c: &mut AsyncPgConnection,
-    source: &str,
-    kind: &str,
-    display_name: &str,
-    schedule_cron: &str,
-    config: Value,
-    sample_payload: Value,
+    seed: DemoProductConnectorSeed<'_>,
 ) -> Result<(), DieselError> {
+    let DemoProductConnectorSeed {
+        source,
+        kind,
+        display_name,
+        target,
+        schedule_cron,
+        config,
+        sample_payload,
+    } = seed;
     match ConnectorRepository::find_by_source(c, source).await {
         Ok(_) => {
             ConnectorRepository::update_by_source(
@@ -511,6 +587,9 @@ async fn ensure_demo_product_connector(
                     kind: kind.to_owned(),
                     display_name: display_name.to_owned(),
                     status: "active".to_owned(),
+                    scope_type: "global".to_owned(),
+                    owner_user_id: None,
+                    maintainer_id: None,
                 },
             )
             .await?;
@@ -522,7 +601,7 @@ async fn ensure_demo_product_connector(
         c,
         source,
         crate::models::ConnectorConfigUpdate {
-            target: "notifications".to_owned(),
+            target: target.to_owned(),
             enabled: true,
             schedule_cron: Some(schedule_cron.to_owned()),
             config: config.to_string(),
@@ -586,6 +665,16 @@ async fn prepare_demo_run(
                     connector_runs::payload.eq::<Option<String>>(None),
                     connector_runs::claimed_at.eq::<Option<chrono::NaiveDateTime>>(None),
                     connector_runs::worker_id.eq::<Option<String>>(None),
+                    connector_runs::attempt_count.eq(1),
+                    connector_runs::max_attempts.eq(1),
+                    connector_runs::next_attempt_at.eq(started_at),
+                    connector_runs::lease_expires_at.eq::<Option<chrono::NaiveDateTime>>(None),
+                    connector_runs::heartbeat_at.eq::<Option<chrono::NaiveDateTime>>(None),
+                    connector_runs::cancel_requested_at.eq::<Option<chrono::NaiveDateTime>>(None),
+                    connector_runs::cancelled_at.eq::<Option<chrono::NaiveDateTime>>(None),
+                    connector_runs::parent_run_id.eq::<Option<i32>>(None),
+                    connector_runs::snapshot_complete.eq::<Option<bool>>(None),
+                    connector_runs::archived_count.eq(0),
                 ))
                 .get_result(c)
                 .await
@@ -607,6 +696,16 @@ async fn prepare_demo_run(
                     payload: None,
                     claimed_at: None,
                     worker_id: None,
+                    attempt_count: 1,
+                    max_attempts: 1,
+                    next_attempt_at: started_at,
+                    lease_expires_at: None,
+                    heartbeat_at: None,
+                    cancel_requested_at: None,
+                    cancelled_at: None,
+                    parent_run_id: None,
+                    snapshot_complete: None,
+                    archived_count: 0,
                 },
             )
             .await
@@ -731,6 +830,7 @@ async fn seed_demo_work_cards(
     c: &mut AsyncPgConnection,
     now: chrono::NaiveDateTime,
 ) -> Result<Vec<SeededRecord>, DieselError> {
+    let connector = ConnectorRepository::find_by_source(c, DEMO_SOURCE).await?;
     let items = vec![
         json!({
             "external_id": "DP-104",
@@ -769,6 +869,12 @@ async fn seed_demo_work_cards(
                 )
                 .ok(),
                 url: item["url"].as_str().map(ToOwned::to_owned),
+                connector_id: Some(connector.id),
+                owner_user_id: connector.owner_user_id,
+                maintainer_id: connector.maintainer_id,
+                source_updated_at: Some(now),
+                last_seen_run_id: None,
+                archived_at: None,
             },
         )
         .await?;
@@ -786,6 +892,8 @@ async fn seed_demo_work_cards(
 async fn seed_demo_notifications(
     c: &mut AsyncPgConnection,
 ) -> Result<Vec<SeededRecord>, DieselError> {
+    let connector = ConnectorRepository::find_by_source(c, DEMO_SOURCE).await?;
+    let source_updated_at = Utc::now().naive_utc();
     let items = vec![
         json!({
             "external_id": "OUTLOOK-9001",
@@ -825,6 +933,12 @@ async fn seed_demo_notifications(
                 severity: item["severity"].as_str().unwrap().to_owned(),
                 is_read: item["is_read"].as_bool().unwrap_or(false),
                 url: item["url"].as_str().map(ToOwned::to_owned),
+                connector_id: Some(connector.id),
+                owner_user_id: connector.owner_user_id,
+                maintainer_id: connector.maintainer_id,
+                source_updated_at: Some(source_updated_at),
+                last_seen_run_id: None,
+                archived_at: None,
             },
         )
         .await?;
@@ -884,6 +998,8 @@ async fn finish_demo_run(
             duration_ms,
             error_message,
             finished_at: Some(run.started_at + Duration::milliseconds(duration_ms)),
+            snapshot_complete: None,
+            archived_count: 0,
         },
     )
     .await

@@ -14,6 +14,10 @@ fn default_manual_source() -> String {
     "manual".to_owned()
 }
 
+fn default_global_scope() -> String {
+    "global".to_owned()
+}
+
 fn default_connector_enabled() -> bool {
     true
 }
@@ -71,6 +75,9 @@ pub struct Connector {
     pub created_at: NaiveDateTime,
     #[serde(skip_deserializing)]
     pub updated_at: NaiveDateTime,
+    pub scope_type: String,
+    pub owner_user_id: Option<i32>,
+    pub maintainer_id: Option<i32>,
 }
 
 #[derive(Insertable, Deserialize, ToSchema)]
@@ -80,6 +87,10 @@ pub struct NewConnector {
     pub kind: String,
     pub display_name: String,
     pub status: String,
+    #[serde(default = "default_global_scope")]
+    pub scope_type: String,
+    pub owner_user_id: Option<i32>,
+    pub maintainer_id: Option<i32>,
 }
 
 impl Validate for NewConnector {
@@ -100,8 +111,69 @@ impl Validate for NewConnector {
             &self.status,
             &["active", "paused", "error"],
         );
+        validate_data_scope(
+            &mut errors,
+            &self.scope_type,
+            self.owner_user_id,
+            self.maintainer_id,
+        );
 
         errors
+    }
+}
+
+#[derive(Deserialize, ToSchema)]
+pub struct ConnectorScopeUpdate {
+    pub scope_type: String,
+    pub owner_user_id: Option<i32>,
+    pub maintainer_id: Option<i32>,
+}
+
+impl Validate for ConnectorScopeUpdate {
+    fn validate(&self) -> Vec<FieldViolation> {
+        let mut errors = Vec::new();
+        validate_data_scope(
+            &mut errors,
+            &self.scope_type,
+            self.owner_user_id,
+            self.maintainer_id,
+        );
+        errors
+    }
+}
+
+fn validate_data_scope(
+    errors: &mut Vec<FieldViolation>,
+    scope_type: &str,
+    owner_user_id: Option<i32>,
+    maintainer_id: Option<i32>,
+) {
+    required(errors, "scope_type", scope_type);
+    max_len(errors, "scope_type", scope_type, 16);
+    one_of(
+        errors,
+        "scope_type",
+        scope_type,
+        &["global", "maintainer", "user"],
+    );
+
+    let valid_shape = match scope_type {
+        "global" => owner_user_id.is_none() && maintainer_id.is_none(),
+        "user" => owner_user_id.is_some() && maintainer_id.is_none(),
+        "maintainer" => owner_user_id.is_none() && maintainer_id.is_some(),
+        _ => true,
+    };
+    if !valid_shape {
+        errors.push(FieldViolation::new(
+            "scope_type",
+            "must match exactly one owner: global has none, user has owner_user_id, maintainer has maintainer_id",
+        ));
+    }
+    if owner_user_id.is_some_and(|id| id <= 0) {
+        errors.push(FieldViolation::new("owner_user_id", "must be positive"));
+    }
+    if maintainer_id.is_some_and(|id| id <= 0) {
+        errors.push(FieldViolation::new("maintainer_id", "must be positive"));
     }
 }
 
@@ -191,7 +263,12 @@ impl Validate for ConnectorConfigUpdate {
             &mut errors,
             "target",
             &self.target,
-            &["service_health", "work_cards", "notifications"],
+            &[
+                "service_health",
+                "work_cards",
+                "notifications",
+                "calendar_events",
+            ],
         );
         max_optional_len(&mut errors, "schedule_cron", &self.schedule_cron, 128);
         if let Some(schedule_cron) = &self.schedule_cron {
@@ -259,6 +336,16 @@ pub struct ConnectorRun {
     #[serde(skip_deserializing)]
     pub claimed_at: Option<NaiveDateTime>,
     pub worker_id: Option<String>,
+    pub attempt_count: i32,
+    pub max_attempts: i32,
+    pub next_attempt_at: NaiveDateTime,
+    pub lease_expires_at: Option<NaiveDateTime>,
+    pub heartbeat_at: Option<NaiveDateTime>,
+    pub cancel_requested_at: Option<NaiveDateTime>,
+    pub cancelled_at: Option<NaiveDateTime>,
+    pub parent_run_id: Option<i32>,
+    pub snapshot_complete: Option<bool>,
+    pub archived_count: i32,
 }
 
 #[derive(Insertable)]
@@ -277,6 +364,16 @@ pub struct NewConnectorRun {
     pub payload: Option<String>,
     pub claimed_at: Option<NaiveDateTime>,
     pub worker_id: Option<String>,
+    pub attempt_count: i32,
+    pub max_attempts: i32,
+    pub next_attempt_at: NaiveDateTime,
+    pub lease_expires_at: Option<NaiveDateTime>,
+    pub heartbeat_at: Option<NaiveDateTime>,
+    pub cancel_requested_at: Option<NaiveDateTime>,
+    pub cancelled_at: Option<NaiveDateTime>,
+    pub parent_run_id: Option<i32>,
+    pub snapshot_complete: Option<bool>,
+    pub archived_count: i32,
 }
 
 pub struct ConnectorRunStateUpdate {
@@ -286,6 +383,8 @@ pub struct ConnectorRunStateUpdate {
     pub duration_ms: i64,
     pub error_message: Option<String>,
     pub finished_at: Option<NaiveDateTime>,
+    pub snapshot_complete: Option<bool>,
+    pub archived_count: i32,
 }
 
 #[derive(Queryable, Serialize, Deserialize, ToSchema)]
@@ -675,6 +774,94 @@ impl Validate for NewService {
 }
 
 #[derive(Queryable, Serialize, Deserialize, ToSchema)]
+pub struct CalendarEvent {
+    #[serde(skip_deserializing)]
+    pub id: i32,
+    pub source: String,
+    pub external_id: String,
+    pub title: String,
+    pub body: Option<String>,
+    pub organizer: Option<String>,
+    pub location: Option<String>,
+    pub starts_at: NaiveDateTime,
+    pub ends_at: NaiveDateTime,
+    pub time_zone: Option<String>,
+    pub is_all_day: bool,
+    pub is_cancelled: bool,
+    pub web_url: Option<String>,
+    pub join_url: Option<String>,
+    pub connector_id: Option<i32>,
+    pub owner_user_id: Option<i32>,
+    pub maintainer_id: Option<i32>,
+    pub source_updated_at: Option<NaiveDateTime>,
+    pub last_seen_run_id: Option<i32>,
+    pub archived_at: Option<NaiveDateTime>,
+    #[serde(skip_deserializing)]
+    pub created_at: NaiveDateTime,
+    #[serde(skip_deserializing)]
+    pub updated_at: NaiveDateTime,
+}
+
+#[derive(AsChangeset, Insertable, Deserialize, ToSchema)]
+#[diesel(table_name=calendar_events)]
+#[diesel(treat_none_as_null = true)]
+pub struct NewCalendarEvent {
+    pub source: String,
+    pub external_id: String,
+    pub title: String,
+    pub body: Option<String>,
+    pub organizer: Option<String>,
+    pub location: Option<String>,
+    pub starts_at: NaiveDateTime,
+    pub ends_at: NaiveDateTime,
+    pub time_zone: Option<String>,
+    pub is_all_day: bool,
+    pub is_cancelled: bool,
+    pub web_url: Option<String>,
+    pub join_url: Option<String>,
+    #[serde(skip_deserializing)]
+    pub connector_id: Option<i32>,
+    #[serde(skip_deserializing)]
+    pub owner_user_id: Option<i32>,
+    #[serde(skip_deserializing)]
+    pub maintainer_id: Option<i32>,
+    #[serde(skip_deserializing)]
+    pub source_updated_at: Option<NaiveDateTime>,
+    #[serde(skip_deserializing)]
+    pub last_seen_run_id: Option<i32>,
+    #[serde(skip_deserializing)]
+    pub archived_at: Option<NaiveDateTime>,
+}
+
+impl Validate for NewCalendarEvent {
+    fn validate(&self) -> Vec<FieldViolation> {
+        let mut errors = Vec::new();
+
+        required(&mut errors, "source", &self.source);
+        max_len(&mut errors, "source", &self.source, 64);
+        required(&mut errors, "external_id", &self.external_id);
+        max_len(&mut errors, "external_id", &self.external_id, 128);
+        required(&mut errors, "title", &self.title);
+        max_len(&mut errors, "title", &self.title, 256);
+        max_optional_len(&mut errors, "organizer", &self.organizer, 256);
+        max_optional_len(&mut errors, "location", &self.location, 256);
+        max_optional_len(&mut errors, "time_zone", &self.time_zone, 128);
+        max_optional_len(&mut errors, "web_url", &self.web_url, 2048);
+        optional_url(&mut errors, "web_url", &self.web_url);
+        max_optional_len(&mut errors, "join_url", &self.join_url, 2048);
+        optional_url(&mut errors, "join_url", &self.join_url);
+        if self.ends_at < self.starts_at {
+            errors.push(FieldViolation::new(
+                "ends_at",
+                "must be greater than or equal to starts_at",
+            ));
+        }
+
+        errors
+    }
+}
+
+#[derive(Queryable, Serialize, Deserialize, ToSchema)]
 pub struct WorkCard {
     #[serde(skip_deserializing)]
     pub id: i32,
@@ -690,6 +877,12 @@ pub struct WorkCard {
     pub created_at: NaiveDateTime,
     #[serde(skip_deserializing)]
     pub updated_at: NaiveDateTime,
+    pub connector_id: Option<i32>,
+    pub owner_user_id: Option<i32>,
+    pub maintainer_id: Option<i32>,
+    pub source_updated_at: Option<NaiveDateTime>,
+    pub last_seen_run_id: Option<i32>,
+    pub archived_at: Option<NaiveDateTime>,
 }
 
 #[derive(AsChangeset, Insertable, Deserialize, ToSchema)]
@@ -704,6 +897,18 @@ pub struct NewWorkCard {
     pub assignee: Option<String>,
     pub due_at: Option<NaiveDateTime>,
     pub url: Option<String>,
+    #[serde(skip_deserializing)]
+    pub connector_id: Option<i32>,
+    #[serde(skip_deserializing)]
+    pub owner_user_id: Option<i32>,
+    #[serde(skip_deserializing)]
+    pub maintainer_id: Option<i32>,
+    #[serde(skip_deserializing)]
+    pub source_updated_at: Option<NaiveDateTime>,
+    #[serde(skip_deserializing)]
+    pub last_seen_run_id: Option<i32>,
+    #[serde(skip_deserializing)]
+    pub archived_at: Option<NaiveDateTime>,
 }
 
 impl Validate for NewWorkCard {
@@ -754,6 +959,70 @@ pub struct Notification {
     #[serde(skip_deserializing)]
     pub updated_at: NaiveDateTime,
     pub external_id: Option<String>,
+    pub connector_id: Option<i32>,
+    pub owner_user_id: Option<i32>,
+    pub maintainer_id: Option<i32>,
+    pub source_updated_at: Option<NaiveDateTime>,
+    pub last_seen_run_id: Option<i32>,
+    pub archived_at: Option<NaiveDateTime>,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct NotificationView {
+    pub id: i32,
+    pub source: String,
+    pub title: String,
+    pub body: Option<String>,
+    pub severity: String,
+    /// Effective read state for the current user. Source-level read state cannot be overridden.
+    pub is_read: bool,
+    /// Read state last imported from the source system.
+    pub source_is_read: bool,
+    pub url: Option<String>,
+    pub created_at: NaiveDateTime,
+    pub updated_at: NaiveDateTime,
+    pub external_id: Option<String>,
+    pub connector_id: Option<i32>,
+    pub owner_user_id: Option<i32>,
+    pub maintainer_id: Option<i32>,
+    pub source_updated_at: Option<NaiveDateTime>,
+    pub last_seen_run_id: Option<i32>,
+    pub archived_at: Option<NaiveDateTime>,
+    pub read_at: Option<NaiveDateTime>,
+    pub dismissed_at: Option<NaiveDateTime>,
+    pub snoozed_until: Option<NaiveDateTime>,
+}
+
+impl NotificationView {
+    pub fn from_record(notification: Notification, receipt: Option<NotificationReceipt>) -> Self {
+        let (read_at, dismissed_at, snoozed_until) = receipt
+            .map(|receipt| (receipt.read_at, receipt.dismissed_at, receipt.snoozed_until))
+            .unwrap_or((None, None, None));
+        let source_is_read = notification.is_read;
+
+        Self {
+            id: notification.id,
+            source: notification.source,
+            title: notification.title,
+            body: notification.body,
+            severity: notification.severity,
+            is_read: source_is_read || read_at.is_some(),
+            source_is_read,
+            url: notification.url,
+            created_at: notification.created_at,
+            updated_at: notification.updated_at,
+            external_id: notification.external_id,
+            connector_id: notification.connector_id,
+            owner_user_id: notification.owner_user_id,
+            maintainer_id: notification.maintainer_id,
+            source_updated_at: notification.source_updated_at,
+            last_seen_run_id: notification.last_seen_run_id,
+            archived_at: notification.archived_at,
+            read_at,
+            dismissed_at,
+            snoozed_until,
+        }
+    }
 }
 
 #[derive(AsChangeset, Insertable, Deserialize, ToSchema)]
@@ -767,6 +1036,18 @@ pub struct NewNotification {
     pub severity: String,
     pub is_read: bool,
     pub url: Option<String>,
+    #[serde(skip_deserializing)]
+    pub connector_id: Option<i32>,
+    #[serde(skip_deserializing)]
+    pub owner_user_id: Option<i32>,
+    #[serde(skip_deserializing)]
+    pub maintainer_id: Option<i32>,
+    #[serde(skip_deserializing)]
+    pub source_updated_at: Option<NaiveDateTime>,
+    #[serde(skip_deserializing)]
+    pub last_seen_run_id: Option<i32>,
+    #[serde(skip_deserializing)]
+    pub archived_at: Option<NaiveDateTime>,
 }
 
 impl Validate for NewNotification {
@@ -791,6 +1072,21 @@ impl Validate for NewNotification {
 
         errors
     }
+}
+
+#[derive(Queryable, Serialize, Deserialize, ToSchema)]
+pub struct NotificationReceipt {
+    #[serde(skip_deserializing)]
+    pub id: i32,
+    pub notification_id: i32,
+    pub user_id: i32,
+    pub read_at: Option<NaiveDateTime>,
+    pub dismissed_at: Option<NaiveDateTime>,
+    pub snoozed_until: Option<NaiveDateTime>,
+    #[serde(skip_deserializing)]
+    pub created_at: NaiveDateTime,
+    #[serde(skip_deserializing)]
+    pub updated_at: NaiveDateTime,
 }
 
 #[derive(Queryable, Debug, Identifiable)]

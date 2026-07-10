@@ -1,5 +1,5 @@
 use chrono::{DateTime, NaiveDateTime, Utc};
-use diesel_async::AsyncPgConnection;
+use diesel_async::{AsyncConnection, AsyncPgConnection};
 use rocket::serde::Serialize;
 use serde_json::Value;
 
@@ -7,21 +7,22 @@ use crate::api::ApiError;
 use crate::connector_adapters::fetch_connector_payload;
 use crate::crypto::{decrypt_connector_config, encrypt_connector_config, sanitized_json_snapshot};
 use crate::models::{
-    ConnectorRun, ConnectorRunStateUpdate, NewConnectorRun, NewConnectorRunItem,
+    ConnectorRun, ConnectorRunStateUpdate, NewCalendarEvent, NewConnectorRun, NewConnectorRunItem,
     NewConnectorRunItemError, NewNotification, NewService, NewWorkCard,
 };
 use crate::repositories::{
-    ConnectorConfigRepository, ConnectorRepository, ConnectorRunItemErrorRepository,
-    ConnectorRunItemRepository, ConnectorRunRepository, NotificationRepository, ServiceRepository,
-    WorkCardRepository,
+    CalendarEventRepository, ConnectorConfigRepository, ConnectorRepository,
+    ConnectorRunItemErrorRepository, ConnectorRunItemRepository, ConnectorRunRepository,
+    NotificationRepository, ServiceRepository, WorkCardRepository,
 };
 use crate::rocket_routes::connectors::shared::{
     api_error_message, count_as_i32, validation_error, validation_error_dynamic,
 };
 use crate::rocket_routes::connectors::types::{
-    ConnectorExecution, ConnectorImportError, ConnectorRunExecutionResponse, ConnectorRunItemDraft,
-    NotificationImportItem, NotificationImportRequest, ServiceHealthImportItem,
-    ServiceHealthImportRequest, WorkCardImportItem, WorkCardImportRequest,
+    CalendarEventImportItem, CalendarEventImportRequest, ConnectorExecution, ConnectorImportError,
+    ConnectorRunExecutionResponse, ConnectorRunItemDraft, NotificationImportItem,
+    NotificationImportRequest, ServiceHealthImportItem, ServiceHealthImportRequest,
+    WorkCardImportItem, WorkCardImportRequest,
 };
 use crate::validation::validate_request;
 
@@ -29,18 +30,103 @@ pub(crate) async fn execute_claimed_connector_run(
     db: &mut AsyncPgConnection,
     run: ConnectorRun,
 ) -> Result<ConnectorRunExecutionResponse, ApiError> {
+    execute_connector_run(db, run, None).await
+}
+
+pub(crate) async fn execute_leased_connector_run(
+    db: &mut AsyncPgConnection,
+    run: ConnectorRun,
+    worker_id: &str,
+) -> Result<ConnectorRunExecutionResponse, ApiError> {
+    execute_connector_run(db, run, Some(worker_id.to_owned())).await
+}
+
+async fn execute_connector_run(
+    db: &mut AsyncPgConnection,
+    run: ConnectorRun,
+    worker_id: Option<String>,
+) -> Result<ConnectorRunExecutionResponse, ApiError> {
     let source = run.source.clone();
     let target = run.target.clone();
-    let execution = match load_payload_for_claimed_run(db, &run).await {
-        Ok(payload) => execute_payload_for_target(db, &source, &target, run.id, payload).await?,
-        Err(error) => ConnectorExecution {
+    let run_id = run.id;
+    if !ConnectorRunRepository::execution_is_active(db, run_id, worker_id.as_deref()).await? {
+        return cancelled_response_or_ownership_error(db, run_id, worker_id.as_deref()).await;
+    }
+
+    let prepared = match load_payload_for_claimed_run(db, &run).await {
+        Ok(payload) => PreparedConnectorRun::Payload(payload),
+        Err(error) => PreparedConnectorRun::Execution(ConnectorExecution {
             data: Vec::new(),
             items: Vec::new(),
             errors: vec![connector_error(None, api_error_message(&error), None)],
-        },
+            snapshot_complete: None,
+            archived_count: 0,
+        }),
     };
 
-    finish_connector_run(db, &source, &target, run, execution).await
+    if !ConnectorRunRepository::execution_is_active(db, run_id, worker_id.as_deref()).await? {
+        return cancelled_response_or_ownership_error(db, run_id, worker_id.as_deref()).await;
+    }
+
+    let transaction_worker_id = worker_id.clone();
+    let result = db
+        .transaction::<ConnectorRunExecutionResponse, ApiError, _>(|conn| {
+            Box::pin(async move {
+                if !ConnectorRunRepository::execution_is_active(
+                    conn,
+                    run_id,
+                    transaction_worker_id.as_deref(),
+                )
+                .await?
+                {
+                    return Err(ApiError::ServiceUnavailable);
+                }
+
+                let execution = match prepared {
+                    PreparedConnectorRun::Payload(payload) => {
+                        execute_payload_for_target(conn, &source, &target, run_id, payload).await?
+                    }
+                    PreparedConnectorRun::Execution(execution) => execution,
+                };
+
+                if !ConnectorRunRepository::execution_is_active(
+                    conn,
+                    run_id,
+                    transaction_worker_id.as_deref(),
+                )
+                .await?
+                {
+                    return Err(ApiError::ServiceUnavailable);
+                }
+
+                finish_connector_run_for_owner(
+                    conn,
+                    &source,
+                    &target,
+                    run,
+                    execution,
+                    transaction_worker_id.as_deref(),
+                )
+                .await
+            })
+        })
+        .await;
+
+    match result {
+        Ok(response) => Ok(response),
+        Err(error) => {
+            if ConnectorRunRepository::cancellation_requested(db, run_id).await? {
+                cancelled_response_or_ownership_error(db, run_id, worker_id.as_deref()).await
+            } else {
+                Err(error)
+            }
+        }
+    }
+}
+
+enum PreparedConnectorRun {
+    Payload(Value),
+    Execution(ConnectorExecution),
 }
 
 async fn load_payload_for_claimed_run(
@@ -91,28 +177,84 @@ pub(crate) async fn create_queued_run(
     trigger: &str,
     payload: Option<String>,
 ) -> Result<ConnectorRun, ApiError> {
+    create_queued_run_with_parent(db, source, target, trigger, payload, None).await
+}
+
+pub(crate) async fn create_queued_retry_run(
+    db: &mut AsyncPgConnection,
+    source: &str,
+    target: &str,
+    payload: Option<String>,
+    parent_run_id: i32,
+) -> Result<ConnectorRun, ApiError> {
+    create_queued_run_with_parent(db, source, target, "retry", payload, Some(parent_run_id)).await
+}
+
+async fn create_queued_run_with_parent(
+    db: &mut AsyncPgConnection,
+    source: &str,
+    target: &str,
+    trigger: &str,
+    payload: Option<String>,
+    parent_run_id: Option<i32>,
+) -> Result<ConnectorRun, ApiError> {
     let started_at = Utc::now().naive_utc();
 
-    ConnectorRunRepository::create(
-        db,
-        NewConnectorRun {
-            source: source.to_owned(),
-            target: target.to_owned(),
-            status: "queued".to_owned(),
-            success_count: 0,
-            failure_count: 0,
-            duration_ms: 0,
-            error_message: None,
-            started_at,
-            finished_at: None,
-            trigger: trigger.to_owned(),
-            payload,
-            claimed_at: None,
-            worker_id: None,
-        },
-    )
-    .await
-    .map_err(ApiError::from)
+    let new_run = NewConnectorRun {
+        source: source.to_owned(),
+        target: target.to_owned(),
+        status: "queued".to_owned(),
+        success_count: 0,
+        failure_count: 0,
+        duration_ms: 0,
+        error_message: None,
+        started_at,
+        finished_at: None,
+        trigger: trigger.to_owned(),
+        payload,
+        claimed_at: None,
+        worker_id: None,
+        attempt_count: 0,
+        max_attempts: configured_connector_run_max_attempts(),
+        next_attempt_at: started_at,
+        lease_expires_at: None,
+        heartbeat_at: None,
+        cancel_requested_at: None,
+        cancelled_at: None,
+        parent_run_id,
+        snapshot_complete: None,
+        archived_count: 0,
+    };
+
+    if let Some(parent_run_id) = parent_run_id {
+        return ConnectorRunRepository::create_retry(db, parent_run_id, new_run)
+            .await
+            .map_err(ApiError::from)?
+            .ok_or_else(|| {
+                validation_error(
+                    "status",
+                    "an active run already exists for source and target",
+                )
+            });
+    }
+
+    ConnectorRunRepository::create_if_no_pending(db, new_run)
+        .await
+        .map_err(ApiError::from)?
+        .ok_or_else(|| {
+            validation_error(
+                "status",
+                "an active run already exists for source and target",
+            )
+        })
+}
+
+pub(crate) fn configured_connector_run_max_attempts() -> i32 {
+    std::env::var("CONNECTOR_RUN_MAX_ATTEMPTS")
+        .ok()
+        .and_then(|value| value.parse::<i32>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(3)
 }
 
 pub(crate) async fn create_running_run(
@@ -122,22 +264,13 @@ pub(crate) async fn create_running_run(
     trigger: &str,
     payload: Option<String>,
 ) -> Result<ConnectorRun, ApiError> {
+    ConnectorRepository::find_or_create_default(db, source, default_connector_kind(source, target))
+        .await?;
     let run = create_queued_run(db, source, target, trigger, payload).await?;
 
-    ConnectorRunRepository::update_state(
-        db,
-        run.id,
-        ConnectorRunStateUpdate {
-            status: "running".to_owned(),
-            success_count: 0,
-            failure_count: 0,
-            duration_ms: 0,
-            error_message: None,
-            finished_at: None,
-        },
-    )
-    .await
-    .map_err(ApiError::from)
+    ConnectorRunRepository::start_direct_execution(db, run.id)
+        .await
+        .map_err(ApiError::from)
 }
 
 pub(crate) async fn finish_connector_run(
@@ -146,6 +279,24 @@ pub(crate) async fn finish_connector_run(
     target: &str,
     run: ConnectorRun,
     execution: ConnectorExecution,
+) -> Result<ConnectorRunExecutionResponse, ApiError> {
+    finish_connector_run_for_owner(db, source, target, run, execution, None).await
+}
+
+pub(crate) async fn settle_cancelled_connector_run(
+    db: &mut AsyncPgConnection,
+    run_id: i32,
+) -> Result<ConnectorRunExecutionResponse, ApiError> {
+    cancelled_response_or_ownership_error(db, run_id, None).await
+}
+
+async fn finish_connector_run_for_owner(
+    db: &mut AsyncPgConnection,
+    source: &str,
+    target: &str,
+    run: ConnectorRun,
+    execution: ConnectorExecution,
+    worker_id: Option<&str>,
 ) -> Result<ConnectorRunExecutionResponse, ApiError> {
     let finished_at = Utc::now().naive_utc();
     let started_at = run.claimed_at.unwrap_or(run.started_at);
@@ -158,9 +309,10 @@ pub(crate) async fn finish_connector_run(
         (_, _) => "partial_success",
     };
     let error_message = connector_run_error_message(&execution.errors);
-    let run = ConnectorRunRepository::update_state(
+    let run = ConnectorRunRepository::finalize_if_active(
         db,
         run.id,
+        worker_id,
         ConnectorRunStateUpdate {
             status: status.to_owned(),
             success_count: count_as_i32(imported),
@@ -168,10 +320,13 @@ pub(crate) async fn finish_connector_run(
             duration_ms,
             error_message,
             finished_at: Some(finished_at),
+            snapshot_complete: execution.snapshot_complete,
+            archived_count: count_as_i32(execution.archived_count),
         },
     )
     .await
-    .map_err(ApiError::from)?;
+    .map_err(ApiError::from)?
+    .ok_or(ApiError::ServiceUnavailable)?;
 
     let item_errors = ConnectorRunItemErrorRepository::create_many(
         db,
@@ -239,6 +394,32 @@ pub(crate) async fn finish_connector_run(
     })
 }
 
+async fn cancelled_response_or_ownership_error(
+    db: &mut AsyncPgConnection,
+    run_id: i32,
+    worker_id: Option<&str>,
+) -> Result<ConnectorRunExecutionResponse, ApiError> {
+    let run = ConnectorRunRepository::mark_cancelled_if_requested(db, run_id, worker_id)
+        .await
+        .map_err(ApiError::from)?
+        .unwrap_or(ConnectorRunRepository::find(db, run_id).await?);
+    if run.status != "cancelled" {
+        return Err(ApiError::ServiceUnavailable);
+    }
+
+    Ok(ConnectorRunExecutionResponse {
+        source: run.source.clone(),
+        target: run.target.clone(),
+        imported: 0,
+        failed: 0,
+        run,
+        data: Vec::new(),
+        items: Vec::new(),
+        errors: Vec::new(),
+        item_errors: Vec::new(),
+    })
+}
+
 async fn execute_payload_for_target(
     db: &mut AsyncPgConnection,
     source: &str,
@@ -247,12 +428,43 @@ async fn execute_payload_for_target(
     payload: Value,
 ) -> Result<ConnectorExecution, ApiError> {
     match target {
+        "calendar_events" => match serde_json::from_value::<CalendarEventImportRequest>(payload) {
+            Ok(request) => {
+                execute_calendar_event_items(
+                    db,
+                    source,
+                    run_id,
+                    request.items,
+                    request.snapshot_complete,
+                )
+                .await
+            }
+            Err(error) => Ok(payload_error(error)),
+        },
         "work_cards" => match serde_json::from_value::<WorkCardImportRequest>(payload) {
-            Ok(request) => execute_work_card_items(db, source, request.items).await,
+            Ok(request) => {
+                execute_work_card_items(
+                    db,
+                    source,
+                    run_id,
+                    request.items,
+                    request.snapshot_complete,
+                )
+                .await
+            }
             Err(error) => Ok(payload_error(error)),
         },
         "notifications" => match serde_json::from_value::<NotificationImportRequest>(payload) {
-            Ok(request) => execute_notification_items(db, source, request.items).await,
+            Ok(request) => {
+                execute_notification_items(
+                    db,
+                    source,
+                    run_id,
+                    request.items,
+                    request.snapshot_complete,
+                )
+                .await
+            }
             Err(error) => Ok(payload_error(error)),
         },
         "service_health" => match serde_json::from_value::<ServiceHealthImportRequest>(payload) {
@@ -267,15 +479,104 @@ async fn execute_payload_for_target(
                 "target is not supported".to_owned(),
                 None,
             )],
+            snapshot_complete: None,
+            archived_count: 0,
         }),
     }
+}
+
+pub(crate) async fn execute_calendar_event_items(
+    db: &mut AsyncPgConnection,
+    source: &str,
+    run_id: i32,
+    items: Vec<CalendarEventImportItem>,
+    snapshot_complete: Option<bool>,
+) -> Result<ConnectorExecution, ApiError> {
+    let connector = ConnectorRepository::find_by_source(db, source).await?;
+    let mut data = Vec::new();
+    let mut run_items = Vec::new();
+    let mut errors = Vec::new();
+
+    for item in items {
+        let external_id = item.external_id.clone();
+        let raw_item = raw_item_json(&item);
+        let (Some(starts_at), Some(ends_at)) = (item.starts_at, item.ends_at) else {
+            errors.push(connector_error(
+                Some(external_id),
+                "starts_at and ends_at are required".to_owned(),
+                raw_item,
+            ));
+            continue;
+        };
+        let event = validate_request(NewCalendarEvent {
+            source: source.to_owned(),
+            external_id: item.external_id,
+            title: item.title,
+            body: item.body,
+            organizer: item.organizer,
+            location: item.location,
+            starts_at,
+            ends_at,
+            time_zone: item.time_zone,
+            is_all_day: item.is_all_day,
+            is_cancelled: item.is_cancelled,
+            web_url: item.web_url,
+            join_url: item.join_url,
+            connector_id: Some(connector.id),
+            owner_user_id: connector.owner_user_id,
+            maintainer_id: connector.maintainer_id,
+            source_updated_at: None,
+            last_seen_run_id: Some(run_id),
+            archived_at: None,
+        });
+
+        match event {
+            Ok(event) => match CalendarEventRepository::upsert_from_connector(db, event).await {
+                Ok(event) => {
+                    run_items.push(imported_run_item(
+                        Some(event.external_id.clone()),
+                        Some(event.id),
+                        raw_item,
+                    ));
+                    data.push(to_json_value(&event)?);
+                }
+                Err(error) => errors.push(connector_error(
+                    Some(external_id),
+                    error.to_string(),
+                    raw_item,
+                )),
+            },
+            Err(error) => errors.push(connector_error(
+                Some(external_id),
+                api_error_message(&error),
+                raw_item,
+            )),
+        }
+    }
+
+    let archived_count = if should_reconcile(snapshot_complete, errors.len()) {
+        CalendarEventRepository::archive_missing_for_connector_run(db, connector.id, run_id).await?
+    } else {
+        0
+    };
+
+    Ok(ConnectorExecution {
+        data,
+        items: run_items,
+        errors,
+        snapshot_complete,
+        archived_count,
+    })
 }
 
 pub(crate) async fn execute_work_card_items(
     db: &mut AsyncPgConnection,
     source: &str,
+    run_id: i32,
     items: Vec<WorkCardImportItem>,
+    snapshot_complete: Option<bool>,
 ) -> Result<ConnectorExecution, ApiError> {
+    let connector = ConnectorRepository::find_by_source(db, source).await?;
     let mut data = Vec::new();
     let mut run_items = Vec::new();
     let mut errors = Vec::new();
@@ -292,6 +593,12 @@ pub(crate) async fn execute_work_card_items(
             assignee: item.assignee,
             due_at: item.due_at,
             url: item.url,
+            connector_id: Some(connector.id),
+            owner_user_id: connector.owner_user_id,
+            maintainer_id: connector.maintainer_id,
+            source_updated_at: None,
+            last_seen_run_id: Some(run_id),
+            archived_at: None,
         });
 
         match work_card {
@@ -318,18 +625,29 @@ pub(crate) async fn execute_work_card_items(
         }
     }
 
+    let archived_count = if should_reconcile(snapshot_complete, errors.len()) {
+        WorkCardRepository::archive_missing_for_connector_run(db, connector.id, run_id).await?
+    } else {
+        0
+    };
+
     Ok(ConnectorExecution {
         data,
         items: run_items,
         errors,
+        snapshot_complete,
+        archived_count,
     })
 }
 
 pub(crate) async fn execute_notification_items(
     db: &mut AsyncPgConnection,
     source: &str,
+    run_id: i32,
     items: Vec<NotificationImportItem>,
+    snapshot_complete: Option<bool>,
 ) -> Result<ConnectorExecution, ApiError> {
+    let connector = ConnectorRepository::find_by_source(db, source).await?;
     let mut data = Vec::new();
     let mut run_items = Vec::new();
     let mut errors = Vec::new();
@@ -345,6 +663,12 @@ pub(crate) async fn execute_notification_items(
             severity: item.severity,
             is_read: item.is_read,
             url: item.url,
+            connector_id: Some(connector.id),
+            owner_user_id: connector.owner_user_id,
+            maintainer_id: connector.maintainer_id,
+            source_updated_at: None,
+            last_seen_run_id: Some(run_id),
+            archived_at: None,
         });
 
         match notification {
@@ -373,10 +697,18 @@ pub(crate) async fn execute_notification_items(
         }
     }
 
+    let archived_count = if should_reconcile(snapshot_complete, errors.len()) {
+        NotificationRepository::archive_missing_for_connector_run(db, connector.id, run_id).await?
+    } else {
+        0
+    };
+
     Ok(ConnectorExecution {
         data,
         items: run_items,
         errors,
+        snapshot_complete,
+        archived_count,
     })
 }
 
@@ -450,6 +782,8 @@ pub(crate) async fn execute_service_health_items(
         data,
         items: run_items,
         errors,
+        snapshot_complete: None,
+        archived_count: 0,
     })
 }
 
@@ -463,6 +797,10 @@ fn connector_error(
         message,
         raw_item,
     }
+}
+
+fn should_reconcile(snapshot_complete: Option<bool>, failure_count: usize) -> bool {
+    snapshot_complete == Some(true) && failure_count == 0
 }
 
 fn connector_run_error_message(errors: &[ConnectorImportError]) -> Option<String> {
@@ -503,6 +841,8 @@ fn payload_error(error: serde_json::Error) -> ConnectorExecution {
             format!("payload could not be decoded: {error}"),
             None,
         )],
+        snapshot_complete: None,
+        archived_count: 0,
     }
 }
 
@@ -568,4 +908,17 @@ fn parse_connector_datetime(value: Option<&str>) -> Result<Option<NaiveDateTime>
     Err(format!(
         "last_checked_at is not a supported datetime: {value}"
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_reconcile;
+
+    #[test]
+    fn reconciliation_requires_an_explicit_complete_error_free_snapshot() {
+        assert!(should_reconcile(Some(true), 0));
+        assert!(!should_reconcile(Some(true), 1));
+        assert!(!should_reconcile(Some(false), 0));
+        assert!(!should_reconcile(None, 0));
+    }
 }

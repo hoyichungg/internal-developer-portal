@@ -6,6 +6,8 @@ param(
 
     [string]$DatabaseUrl = $env:DATABASE_URL,
 
+    [string]$RetentionTestDatabaseUrl = $env:RETENTION_TEST_DATABASE_URL,
+
     [string]$ConnectorSecretKey = $(if ($env:CONNECTOR_SECRET_KEY) { $env:CONNECTOR_SECRET_KEY } else { "dev-connector-secret-key" }),
 
     [string]$Port = $(if ($env:ROCKET_PORT) { $env:ROCKET_PORT } else { "8000" })
@@ -20,12 +22,16 @@ $PSNativeCommandUseErrorActionPreference = $false
 
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $DefaultDatabaseUrl = "postgres://postgres:postgres@localhost:5432/app_db"
+$DefaultRetentionTestDatabaseUrl = "postgres://postgres:postgres@localhost:5432/portal_retention_test"
 $ServiceTargetDir = Join-Path $RepoRoot "target\local-services"
 $ClippyTargetDir = Join-Path $RepoRoot "target\validation-clippy"
 $LogDir = Join-Path $RepoRoot "target\local-validation-logs"
 
 if (-not $DatabaseUrl) {
     $DatabaseUrl = $DefaultDatabaseUrl
+}
+if (-not $RetentionTestDatabaseUrl) {
+    $RetentionTestDatabaseUrl = $DefaultRetentionTestDatabaseUrl
 }
 
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
@@ -67,6 +73,25 @@ function Invoke-CommandStep {
                 [Environment]::SetEnvironmentVariable($key, $previousValues[$key], "Process")
             }
         }
+    }
+}
+
+function Assert-SafeRetentionTestDatabaseUrl {
+    try {
+        $uri = [Uri]$RetentionTestDatabaseUrl
+    }
+    catch {
+        throw "RETENTION_TEST_DATABASE_URL must be a valid PostgreSQL URL."
+    }
+
+    if (-not $uri.IsAbsoluteUri -or $uri.Scheme -notin @("postgres", "postgresql")) {
+        throw "RETENTION_TEST_DATABASE_URL must be an absolute postgres:// or postgresql:// URL."
+    }
+
+    $databaseName = [Uri]::UnescapeDataString($uri.AbsolutePath.Trim("/"))
+    $nameSegments = @($databaseName.ToLowerInvariant() -split "[^a-z0-9]+" | Where-Object { $_ })
+    if ($nameSegments -notcontains "test") {
+        throw "Refusing Full validation: retention database '$databaseName' must contain a standalone 'test' segment."
     }
 }
 
@@ -210,22 +235,48 @@ function Start-PortalProcess {
         [string]$Name,
         [string]$FilePath,
         [string]$Stdout,
-        [string]$Stderr
+        [string]$Stderr,
+        [string]$AppEnvironment = "development"
     )
 
-    $env:DATABASE_URL = $DatabaseUrl
-    $env:ROCKET_PORT = $Port
-    $env:CONNECTOR_SECRET_KEY = $ConnectorSecretKey
-    $env:APP_ENV = "development"
+    $processEnvironment = @{
+        DATABASE_URL = $DatabaseUrl
+        ROCKET_PORT = $Port
+        CONNECTOR_SECRET_KEY = $ConnectorSecretKey
+        APP_ENV = $AppEnvironment
+    }
+    if ($AppEnvironment -eq "test") {
+        # Full validation uses a separate guarded database for retention. The
+        # ordinary integration server/worker must never run global cleanup
+        # against the application DATABASE_URL.
+        $processEnvironment.CONNECTOR_HEALTH_RETENTION_DAYS = "0"
+        $processEnvironment.CONNECTOR_RUN_RETENTION_DAYS = "0"
+        $processEnvironment.AUDIT_LOG_RETENTION_DAYS = "0"
+    }
 
-    Write-Host "Starting $Name from $FilePath"
-    Start-Process `
-        -FilePath $FilePath `
-        -WorkingDirectory $RepoRoot `
-        -WindowStyle Hidden `
-        -RedirectStandardOutput $Stdout `
-        -RedirectStandardError $Stderr `
-        -PassThru
+    $previousValues = @{}
+    foreach ($key in $processEnvironment.Keys) {
+        $previousValues[$key] = [Environment]::GetEnvironmentVariable($key, "Process")
+        [Environment]::SetEnvironmentVariable($key, [string]$processEnvironment[$key], "Process")
+    }
+
+    try {
+        Write-Host "Starting $Name from $FilePath"
+        $process = Start-Process `
+            -FilePath $FilePath `
+            -WorkingDirectory $RepoRoot `
+            -WindowStyle Hidden `
+            -RedirectStandardOutput $Stdout `
+            -RedirectStandardError $Stderr `
+            -PassThru
+    }
+    finally {
+        foreach ($key in $processEnvironment.Keys) {
+            [Environment]::SetEnvironmentVariable($key, $previousValues[$key], "Process")
+        }
+    }
+
+    return $process
 }
 
 function Wait-ForHealth {
@@ -273,7 +324,8 @@ function Start-IsolatedServices {
         -Name "server" `
         -FilePath $serverExe `
         -Stdout (Join-Path $LogDir "server.stdout.log") `
-        -Stderr (Join-Path $LogDir "server.stderr.log")
+        -Stderr (Join-Path $LogDir "server.stderr.log") `
+        -AppEnvironment "test"
 
     Wait-ForHealth
 
@@ -281,7 +333,8 @@ function Start-IsolatedServices {
         -Name "worker" `
         -FilePath $workerExe `
         -Stdout (Join-Path $LogDir "worker.stdout.log") `
-        -Stderr (Join-Path $LogDir "worker.stderr.log")
+        -Stderr (Join-Path $LogDir "worker.stderr.log") `
+        -AppEnvironment "test"
 
     return @($server, $worker)
 }
@@ -335,17 +388,20 @@ try {
                 CONNECTOR_SECRET_KEY = $ConnectorSecretKey
             }
         Invoke-CommandStep `
-            -Name "Rust library tests" `
+            -Name "Rust library tests (database-free)" `
             -FilePath "cargo" `
             -Arguments @("test", "--lib") `
             -Environment @{
-                DATABASE_URL = $DatabaseUrl
+                APP_ENV = "test"
+                DATABASE_URL = "postgres://unused:unused@127.0.0.1:1/fast_validation_no_database"
                 CONNECTOR_SECRET_KEY = $ConnectorSecretKey
             }
         Write-Host ""
         Write-Host "Fast validation passed." -ForegroundColor Green
         exit 0
     }
+
+    Assert-SafeRetentionTestDatabaseUrl
 
     $originalProcesses = @(Get-PortalServiceSnapshots)
     $composeServices = @(Get-RunningComposeServices)
@@ -380,7 +436,9 @@ try {
             -FilePath "cargo" `
             -Arguments @("test") `
             -Environment @{
+                APP_ENV = "test"
                 DATABASE_URL = $DatabaseUrl
+                RETENTION_TEST_DATABASE_URL = $RetentionTestDatabaseUrl
                 CONNECTOR_SECRET_KEY = $ConnectorSecretKey
             }
 

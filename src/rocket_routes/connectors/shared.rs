@@ -35,7 +35,12 @@ pub(crate) fn validate_target(target: String) -> Result<String, ApiError> {
                 &mut errors,
                 "target",
                 &self.target,
-                &["service_health", "work_cards", "notifications"],
+                &[
+                    "service_health",
+                    "work_cards",
+                    "notifications",
+                    "calendar_events",
+                ],
             );
 
             errors
@@ -57,6 +62,8 @@ pub(crate) fn api_error_message(error: &ApiError) -> String {
         ApiError::Forbidden => "permission denied".to_owned(),
         ApiError::NotFound => "resource was not found".to_owned(),
         ApiError::Database(error) => error.to_string(),
+        ApiError::DatabaseUnavailable(error) => error.to_string(),
+        ApiError::ServiceUnavailable => "service is temporarily unavailable".to_owned(),
         ApiError::Internal => "internal server error".to_owned(),
     }
 }

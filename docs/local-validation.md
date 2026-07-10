@@ -25,7 +25,10 @@ cargo test --lib
 ```
 
 It does not stop the server or worker, so it avoids the Windows file-lock
-problem by running only library tests.
+problem by running only library tests. The script gives the library test step
+an unreachable local `DATABASE_URL`; these tests are intentionally
+database-free. PostgreSQL-backed retention coverage lives in the full
+integration suite instead.
 
 ## Full Validation
 
@@ -48,6 +51,28 @@ Full mode:
 8. Stops the isolated services.
 9. Restarts the local services that were running before the script started.
 
+The retention integration test uses a separate database and refuses to run
+unless both safeguards pass:
+
+- `APP_ENV` is exactly `test` (the script sets this for the test process).
+- PostgreSQL's actual `current_database()` name contains a standalone `test`
+  segment, such as `portal_retention_test`.
+
+Create and migrate the default dedicated database once while the Compose
+PostgreSQL service is running:
+
+```powershell
+docker compose up -d postgres
+docker compose exec postgres createdb -U postgres portal_retention_test
+docker compose run --rm -e DATABASE_URL=postgres://postgres:postgres@postgres/portal_retention_test migrate diesel migration run
+```
+
+`RETENTION_TEST_DATABASE_URL` defaults to
+`postgres://postgres:postgres@localhost:5432/portal_retention_test`. The
+retention test never uses the normal application `DATABASE_URL`. The ordinary
+isolated worker started by Full mode has all retention paths disabled; only the
+guarded retention integration test performs cleanup.
+
 Because the integration-test services run from `target\local-services`, Cargo
 can freely rebuild `target\debug` during `cargo test`.
 
@@ -60,8 +85,13 @@ container image from taking over port `8000` after the local server is stopped.
 Run against another database:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\local-validate.ps1 -Mode Full -DatabaseUrl "postgres://postgres:postgres@localhost:5432/app_db"
+powershell -ExecutionPolicy Bypass -File .\scripts\local-validate.ps1 -Mode Full `
+  -DatabaseUrl "postgres://postgres:postgres@localhost:5432/app_db" `
+  -RetentionTestDatabaseUrl "postgres://postgres:postgres@localhost:5432/portal_retention_test"
 ```
+
+The retention database may use a different name, but its name must include a
+standalone `test` segment and it must already have all migrations applied.
 
 Use another HTTP port for the isolated server:
 
@@ -100,3 +130,6 @@ so the tests do not hit an older server on port `8000`:
 docker compose stop app worker
 cargo test
 ```
+
+For the manual full command, set `APP_ENV=test` and
+`RETENTION_TEST_DATABASE_URL` to the migrated dedicated test database first.

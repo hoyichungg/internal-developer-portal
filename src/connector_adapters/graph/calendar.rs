@@ -10,6 +10,7 @@ use super::super::shared::{
 };
 use super::super::ConnectorAdapterResult;
 use super::oauth::graph_access_token;
+use super::{fetch_graph_collection, graph_pagination_limits};
 
 #[derive(Deserialize)]
 struct MicrosoftGraphCalendarConfig {
@@ -22,6 +23,8 @@ struct MicrosoftGraphCalendarConfig {
     lookahead_hours: Option<i64>,
     time_zone: Option<String>,
     top: Option<u64>,
+    max_pages: Option<u64>,
+    max_items: Option<u64>,
     timeout_seconds: Option<u64>,
 }
 
@@ -45,6 +48,11 @@ pub(in crate::connector_adapters) async fn fetch_microsoft_graph_calendar_events
 
     let calendar_view_url = microsoft_graph_calendar_view_url(&config);
     require_url("calendar_view_url", &calendar_view_url)?;
+    let (max_pages, max_items) = graph_pagination_limits(
+        "microsoft_graph_calendar",
+        config.max_pages,
+        config.max_items,
+    )?;
 
     let (start_at, end_at) = graph_calendar_time_window(&config);
     let top = config.top.unwrap_or(25).clamp(1, 50).to_string();
@@ -78,64 +86,36 @@ pub(in crate::connector_adapters) async fn fetch_microsoft_graph_calendar_events
         "https://graph.microsoft.com/Calendars.Read offline_access",
     )
     .await?;
-    let response = send_graph_calendar_request(
-        client.get(&request_url),
+    let prefer = config
+        .time_zone
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(outlook_timezone_preference);
+    let collection = fetch_graph_collection(
+        &client,
+        &request_url,
         &access_token.token,
-        config.time_zone.as_deref(),
+        prefer.as_deref(),
+        "microsoft_graph_calendar",
+        max_pages,
+        max_items,
     )
     .await?;
-    let items = graph_calendar_items(&response)
+    let snapshot_complete = collection.snapshot_complete;
+    let items = collection
+        .items
         .into_iter()
-        .map(normalize_graph_calendar_event)
+        .map(|item| normalize_graph_calendar_event(&item))
         .collect::<Vec<_>>();
 
     Ok(ConnectorAdapterResult {
-        payload: Some(json!({ "items": items })),
+        payload: Some(json!({
+            "items": items,
+            "snapshot_complete": snapshot_complete
+        })),
         updated_config: access_token.updated_config,
     })
-}
-
-async fn send_graph_calendar_request(
-    request: reqwest::RequestBuilder,
-    token: &str,
-    time_zone: Option<&str>,
-) -> Result<Value, String> {
-    let request = request.bearer_auth(token);
-    let request = match time_zone.map(str::trim).filter(|value| !value.is_empty()) {
-        Some(time_zone) => request.header("Prefer", outlook_timezone_preference(time_zone)),
-        None => request,
-    };
-    let response = request
-        .send()
-        .await
-        .map_err(|error| format!("microsoft_graph_calendar request failed: {error}"))?;
-    let status = response.status();
-
-    if !status.is_success() {
-        let body = response.text().await.unwrap_or_default();
-        return Err(format!(
-            "microsoft_graph_calendar request returned {status}: {body}"
-        ));
-    }
-
-    response
-        .json::<Value>()
-        .await
-        .map_err(|error| format!("microsoft_graph_calendar response was not valid JSON: {error}"))
-}
-
-fn graph_calendar_items(response: &Value) -> Vec<&Value> {
-    response
-        .get("value")
-        .or_else(|| response.get("items"))
-        .or_else(|| response.get("events"))
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>()
-        .into_iter()
-        .chain(response.as_array().into_iter().flatten())
-        .collect()
 }
 
 fn normalize_graph_calendar_event(item: &Value) -> Value {
@@ -166,7 +146,16 @@ fn normalize_graph_calendar_event(item: &Value) -> Value {
         "body": graph_calendar_body(item),
         "severity": graph_calendar_severity(item),
         "is_read": false,
-        "url": graph_calendar_url(item)
+        "url": graph_calendar_url(item),
+        "organizer": person_display(item, &["organizer"]),
+        "location": graph_event_location(item),
+        "starts_at": graph_event_datetime_value(item, "start"),
+        "ends_at": graph_event_datetime_value(item, "end"),
+        "time_zone": graph_event_time_zone(item),
+        "is_all_day": field_bool(item, &["isAllDay", "is_all_day"]).unwrap_or(false),
+        "is_cancelled": field_bool(item, &["isCancelled", "is_cancelled"]).unwrap_or(false),
+        "web_url": graph_calendar_web_url(item),
+        "join_url": graph_calendar_join_url(item)
     })
 }
 
@@ -221,21 +210,40 @@ fn graph_event_datetime(item: &Value, field_name: &str) -> Option<String> {
     }
 }
 
-fn graph_calendar_url(item: &Value) -> Option<String> {
+fn graph_event_datetime_value(item: &Value, field_name: &str) -> Option<String> {
+    let datetime = item
+        .get(field_name)
+        .and_then(|value| field_string(value, &["dateTime", "date_time"]))?;
+    normalize_naive_datetime(&datetime)
+}
+
+fn graph_event_time_zone(item: &Value) -> Option<String> {
+    ["start", "end"].into_iter().find_map(|field_name| {
+        item.get(field_name)
+            .and_then(|value| field_string(value, &["timeZone", "time_zone"]))
+    })
+}
+
+fn graph_calendar_web_url(item: &Value) -> Option<String> {
     field_url(item, &["webLink", "web_link", "web_url", "url"])
-        .or_else(|| {
-            field_url(
-                item,
-                &["onlineMeetingUrl", "online_meeting_url", "join_url"],
-            )
-        })
-        .or_else(|| {
-            item.pointer("/onlineMeeting/joinUrl")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|value| value.starts_with("http://") || value.starts_with("https://"))
-                .map(ToOwned::to_owned)
-        })
+}
+
+fn graph_calendar_join_url(item: &Value) -> Option<String> {
+    field_url(
+        item,
+        &["onlineMeetingUrl", "online_meeting_url", "join_url"],
+    )
+    .or_else(|| {
+        item.pointer("/onlineMeeting/joinUrl")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| value.starts_with("http://") || value.starts_with("https://"))
+            .map(ToOwned::to_owned)
+    })
+}
+
+fn graph_calendar_url(item: &Value) -> Option<String> {
+    graph_calendar_web_url(item).or_else(|| graph_calendar_join_url(item))
 }
 
 fn graph_calendar_severity(item: &Value) -> &'static str {
@@ -319,4 +327,56 @@ fn outlook_timezone_preference(time_zone: &str) -> String {
         .replace('"', "\\\"");
 
     format!("outlook.timezone=\"{sanitized}\"")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fetch_microsoft_graph_calendar_events;
+    use crate::connector_adapters::shared::test_support::{MockHttpServer, MockResponse};
+    use serde_json::json;
+
+    #[rocket::async_test]
+    async fn follows_graph_calendar_next_links_and_merges_pages() {
+        let server = MockHttpServer::start(vec![
+            MockResponse::json(
+                r#"{"value":[{"id":"evt-1","subject":"First","start":{"dateTime":"2026-07-10T09:00:00","timeZone":"UTC"},"end":{"dateTime":"2026-07-10T09:30:00","timeZone":"UTC"},"organizer":{"emailAddress":{"name":"Taylor Lin"}},"location":{"displayName":"Teams"}}],"@odata.nextLink":"{{base_url}}/calendar?page=2"}"#,
+            ),
+            MockResponse::json(
+                r#"{"value":[{"id":"evt-2","subject":"Second","start":{"dateTime":"2026-07-10T10:00:00","timeZone":"UTC"},"end":{"dateTime":"2026-07-10T10:30:00","timeZone":"UTC"}}]}"#,
+            ),
+        ]);
+        let config = json!({
+            "adapter": "microsoft_graph_calendar",
+            "calendar_view_url": server.url("/calendar"),
+            "access_token": "test-token",
+            "start_at": "2026-07-10T00:00:00Z",
+            "end_at": "2026-07-11T00:00:00Z",
+            "time_zone": "Taipei Standard Time",
+            "max_pages": 5,
+            "max_items": 10
+        });
+
+        let result = fetch_microsoft_graph_calendar_events(&config.to_string())
+            .await
+            .expect("calendar pages should load");
+        let payload = result.payload.expect("calendar payload");
+        let items = payload["items"].as_array().expect("calendar items");
+
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0]["external_id"], "evt-1");
+        assert_eq!(items[0]["starts_at"], "2026-07-10T09:00:00");
+        assert_eq!(items[0]["ends_at"], "2026-07-10T09:30:00");
+        assert_eq!(items[0]["organizer"], "Taylor Lin");
+        assert_eq!(items[0]["location"], "Teams");
+        assert_eq!(items[1]["external_id"], "evt-2");
+        assert_eq!(payload["snapshot_complete"], true);
+        let requests = server.requests();
+        assert_eq!(requests.len(), 2);
+        assert!(requests
+            .iter()
+            .all(|request| request.contains("authorization: Bearer test-token")));
+        assert!(requests
+            .iter()
+            .all(|request| request.contains("prefer: outlook.timezone=\"Taipei Standard Time\"")));
+    }
 }

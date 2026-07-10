@@ -7,16 +7,18 @@ use utoipa::{Modify, OpenApi as OpenApiDerive};
 
 use crate::api::{ApiErrorResponse, ApiResponse};
 use crate::models::{
-    AuditLog, Connector, ConnectorConfigUpdate, ConnectorRun, ConnectorRunItem,
-    ConnectorRunItemError, ConnectorUpdate, Maintainer, MaintainerMember, NewConnector,
-    NewMaintainer, NewNotification, NewPackage, NewService, NewWorkCard, Notification, Package,
-    Service, ServiceHealthCheck, WorkCard,
+    AuditLog, CalendarEvent, Connector, ConnectorConfigUpdate, ConnectorRun, ConnectorRunItem,
+    ConnectorRunItemError, ConnectorScopeUpdate, ConnectorUpdate, Maintainer, MaintainerMember,
+    NewConnector, NewMaintainer, NewNotification, NewPackage, NewService, NewWorkCard,
+    Notification, NotificationView, Package, Service, ServiceHealthCheck, WorkCard,
 };
 use crate::rocket_routes::authorization::{
-    Credentials, LoginResponse, MeOverviewResponse, MeResponse, UserSummary,
+    Credentials, LoginResponse, MeCapabilities, MeMaintainerAccess, MeOverviewResponse, MeResponse,
+    UserSummary,
 };
 use crate::rocket_routes::connectors::{
-    ConnectorConfigResponse, ConnectorImportError, ConnectorOperationsResponse, ConnectorRunDetail,
+    CalendarEventImportItem, CalendarEventImportRequest, ConnectorConfigResponse,
+    ConnectorImportError, ConnectorOperationsResponse, ConnectorRunDetail,
     ConnectorRunExecutionResponse, ConnectorWorkerStatus, ManualConnectorRunRequest,
     MicrosoftOAuthAuthorizeRequest, MicrosoftOAuthAuthorizeResponse, MicrosoftOAuthCallbackRequest,
     MicrosoftOAuthCallbackResponse, NotificationImportItem, NotificationImportRequest,
@@ -26,8 +28,9 @@ use crate::rocket_routes::dashboard::{
     DashboardResponse, DashboardScope, DashboardSummary, ServiceHealthHistory,
     ServiceHealthHistorySummary,
 };
-use crate::rocket_routes::health::HealthResponse;
+use crate::rocket_routes::health::{HealthResponse, ReadinessChecks, ReadinessResponse};
 use crate::rocket_routes::maintainers::MaintainerMemberRequest;
+use crate::rocket_routes::notifications::NotificationSnoozeRequest;
 use crate::rocket_routes::services::{
     ServiceHealthOverview, ServiceLinks, ServiceOverview, ServiceOwner,
 };
@@ -43,17 +46,22 @@ use crate::validation::FieldViolation;
     paths(
         openapi_json_doc,
         health_doc,
+        livez_doc,
+        readyz_doc,
         login_doc,
         logout_doc,
         me_doc,
         list_users_doc,
         me_overview_doc,
         dashboard_doc,
+        list_calendar_events_doc,
+        get_calendar_event_doc,
         list_connectors_doc,
         connector_operations_doc,
         get_connector_doc,
         create_connector_doc,
         update_connector_doc,
+        update_connector_scope_doc,
         delete_connector_doc,
         get_connector_config_doc,
         upsert_connector_config_doc,
@@ -62,7 +70,9 @@ use crate::validation::FieldViolation;
         list_connector_runs_doc,
         get_connector_run_doc,
         retry_connector_run_doc,
+        cancel_connector_run_doc,
         run_connector_doc,
+        import_calendar_events_doc,
         import_work_cards_doc,
         import_notifications_doc,
         import_service_health_doc,
@@ -92,6 +102,11 @@ use crate::validation::FieldViolation;
         delete_work_card_doc,
         list_notifications_doc,
         get_notification_doc,
+        mark_notification_read_doc,
+        mark_notification_unread_doc,
+        dismiss_notification_doc,
+        snooze_notification_doc,
+        restore_notification_doc,
         create_notification_doc,
         update_notification_doc,
         delete_notification_doc,
@@ -100,6 +115,7 @@ use crate::validation::FieldViolation;
     components(schemas(
         ApiErrorResponse,
         ApiResponse<AuditLog>,
+        ApiResponse<CalendarEvent>,
         ApiResponse<Connector>,
         ApiResponse<ConnectorConfigResponse>,
         ApiResponse<ConnectorOperationsResponse>,
@@ -108,6 +124,7 @@ use crate::validation::FieldViolation;
         ApiResponse<ConnectorRunExecutionResponse>,
         ApiResponse<DashboardResponse>,
         ApiResponse<HealthResponse>,
+        ApiResponse<ReadinessResponse>,
         ApiResponse<LoginResponse>,
         ApiResponse<Maintainer>,
         ApiResponse<MaintainerMember>,
@@ -116,21 +133,27 @@ use crate::validation::FieldViolation;
         ApiResponse<MicrosoftOAuthAuthorizeResponse>,
         ApiResponse<MicrosoftOAuthCallbackResponse>,
         ApiResponse<Notification>,
+        ApiResponse<NotificationView>,
         ApiResponse<Package>,
         ApiResponse<Service>,
         ApiResponse<ServiceOverview>,
         ApiResponse<WorkCard>,
         ApiResponse<Vec<AuditLog>>,
+        ApiResponse<Vec<CalendarEvent>>,
         ApiResponse<Vec<Connector>>,
         ApiResponse<Vec<ConnectorRun>>,
         ApiResponse<Vec<Maintainer>>,
         ApiResponse<Vec<MaintainerMember>>,
         ApiResponse<Vec<Notification>>,
+        ApiResponse<Vec<NotificationView>>,
         ApiResponse<Vec<Package>>,
         ApiResponse<Vec<Service>>,
         ApiResponse<Vec<UserSummary>>,
         ApiResponse<Vec<WorkCard>>,
         AuditLog,
+        CalendarEvent,
+        CalendarEventImportItem,
+        CalendarEventImportRequest,
         Connector,
         ConnectorConfigResponse,
         ConnectorConfigUpdate,
@@ -141,6 +164,7 @@ use crate::validation::FieldViolation;
         ConnectorRunExecutionResponse,
         ConnectorRunItem,
         ConnectorRunItemError,
+        ConnectorScopeUpdate,
         ConnectorUpdate,
         ConnectorWorkerStatus,
         Credentials,
@@ -155,6 +179,8 @@ use crate::validation::FieldViolation;
         MaintainerMemberRequest,
         ManualConnectorRunRequest,
         MeOverviewResponse,
+        MeCapabilities,
+        MeMaintainerAccess,
         MeResponse,
         MicrosoftOAuthAuthorizeRequest,
         MicrosoftOAuthAuthorizeResponse,
@@ -167,9 +193,13 @@ use crate::validation::FieldViolation;
         NewService,
         NewWorkCard,
         Notification,
+        NotificationSnoozeRequest,
+        NotificationView,
         NotificationImportItem,
         NotificationImportRequest,
         Package,
+        ReadinessChecks,
+        ReadinessResponse,
         Service,
         ServiceHealthCheck,
         ServiceHealthHistory,
@@ -189,10 +219,11 @@ use crate::validation::FieldViolation;
         (name = "Docs", description = "Machine-readable API documentation."),
         (name = "Auth", description = "Session and current-user endpoints."),
         (name = "Dashboard", description = "Workday overview and operational summary."),
+        (name = "Calendar", description = "Structured team and personal calendar events."),
         (name = "Catalog", description = "Maintainers, services, packages, work cards, and notifications."),
         (name = "Connectors", description = "Connector registry, configuration, run history, worker operations, and import endpoints."),
         (name = "Audit", description = "Audit log read APIs."),
-        (name = "Health", description = "Service liveness endpoint.")
+        (name = "Health", description = "Process liveness and dependency readiness endpoints.")
     ),
     modifiers(&SecurityAddon)
 )]
@@ -234,9 +265,33 @@ fn openapi_json_doc() {}
     path = "/health",
     tag = "Health",
     operation_id = "getHealth",
-    responses((status = 200, description = "API health status.", body = ApiResponse<HealthResponse>))
+    responses(
+        (status = 200, description = "Compatibility readiness status after a successful database query.", body = ApiResponse<HealthResponse>),
+        (status = 503, description = "Database connection or query is unavailable.", body = ApiErrorResponse)
+    )
 )]
 fn health_doc() {}
+
+#[utoipa::path(
+    get,
+    path = "/livez",
+    tag = "Health",
+    operation_id = "getLiveness",
+    responses((status = 200, description = "The API process is alive. No dependency checks are performed.", body = ApiResponse<HealthResponse>))
+)]
+fn livez_doc() {}
+
+#[utoipa::path(
+    get,
+    path = "/readyz",
+    tag = "Health",
+    operation_id = "getReadiness",
+    responses(
+        (status = 200, description = "The API is ready to serve traffic and PostgreSQL answered a query.", body = ApiResponse<ReadinessResponse>),
+        (status = 503, description = "Database connection or query is unavailable.", body = ApiErrorResponse)
+    )
+)]
+fn readyz_doc() {}
 
 #[utoipa::path(
     post,
@@ -324,6 +379,30 @@ fn dashboard_doc() {}
 
 #[utoipa::path(
     get,
+    path = "/calendar-events",
+    tag = "Calendar",
+    operation_id = "listCalendarEvents",
+    security(("bearer_auth" = [])),
+    responses((status = 200, description = "Visible non-cancelled calendar events around the current local-day window.", body = ApiResponse<Vec<CalendarEvent>>))
+)]
+fn list_calendar_events_doc() {}
+
+#[utoipa::path(
+    get,
+    path = "/calendar-events/{id}",
+    tag = "Calendar",
+    operation_id = "getCalendarEvent",
+    security(("bearer_auth" = [])),
+    params(("id" = i32, Path, description = "Calendar event id.")),
+    responses(
+        (status = 200, description = "Visible calendar event.", body = ApiResponse<CalendarEvent>),
+        (status = 404, description = "Event is missing, archived, or outside the caller's scope.", body = ApiErrorResponse)
+    )
+)]
+fn get_calendar_event_doc() {}
+
+#[utoipa::path(
+    get,
     path = "/connectors",
     tag = "Connectors",
     operation_id = "listConnectors",
@@ -390,6 +469,23 @@ fn create_connector_doc() {}
     )
 )]
 fn update_connector_doc() {}
+
+#[utoipa::path(
+    put,
+    path = "/connectors/{source}/scope",
+    tag = "Connectors",
+    operation_id = "updateConnectorScope",
+    security(("bearer_auth" = [])),
+    params(("source" = String, Path, description = "Connector source key.")),
+    request_body(content = ConnectorScopeUpdate, description = "New global, user, or maintainer visibility. Existing connector-owned work cards and notifications move atomically with the connector.", content_type = "application/json"),
+    responses(
+        (status = 200, description = "Connector and imported record visibility updated.", body = ApiResponse<Connector>),
+        (status = 400, description = "Scope shape or referenced owner is invalid.", body = ApiErrorResponse),
+        (status = 403, description = "Admin role is required.", body = ApiErrorResponse),
+        (status = 404, description = "Connector, user, or maintainer was not found.", body = ApiErrorResponse)
+    )
+)]
+fn update_connector_scope_doc() {}
 
 #[utoipa::path(
     delete,
@@ -479,7 +575,7 @@ fn finish_microsoft_oauth_doc() {}
     security(("bearer_auth" = [])),
     params(
         ("source" = Option<String>, Query, description = "Optional connector source filter."),
-        ("target" = Option<String>, Query, description = "Optional import target filter: service_health, work_cards, or notifications.")
+        ("target" = Option<String>, Query, description = "Optional import target filter: service_health, work_cards, notifications, or calendar_events.")
     ),
     responses(
         (status = 200, description = "Recent connector runs.", body = ApiResponse<Vec<ConnectorRun>>),
@@ -509,15 +605,31 @@ fn get_connector_run_doc() {}
     tag = "Connectors",
     operation_id = "retryConnectorRun",
     security(("bearer_auth" = [])),
-    params(("id" = i32, Path, description = "Failed or partial_success connector run id.")),
+    params(("id" = i32, Path, description = "Failed, partial_success, or cancelled connector run id.")),
     responses(
-        (status = 201, description = "Retry run queued. Only failed or partial_success runs can be retried.", body = ApiResponse<ConnectorRunExecutionResponse>),
+        (status = 201, description = "A new bounded-attempt retry run is queued. Cancelled runs never requeue automatically and require this explicit action.", body = ApiResponse<ConnectorRunExecutionResponse>),
         (status = 400, description = "Run cannot be retried.", body = ApiErrorResponse),
         (status = 403, description = "Admin role is required.", body = ApiErrorResponse),
         (status = 404, description = "Run or connector was not found.", body = ApiErrorResponse)
     )
 )]
 fn retry_connector_run_doc() {}
+
+#[utoipa::path(
+    post,
+    path = "/connectors/runs/{id}/cancel",
+    tag = "Connectors",
+    operation_id = "cancelConnectorRun",
+    security(("bearer_auth" = [])),
+    params(("id" = i32, Path, description = "Queued or running connector run id.")),
+    responses(
+        (status = 200, description = "Queued runs are cancelled immediately. Running runs record a cancellation request that the worker observes before import/finalization.", body = ApiResponse<ConnectorRun>),
+        (status = 400, description = "Only queued or running runs can be cancelled.", body = ApiErrorResponse),
+        (status = 403, description = "Admin role is required.", body = ApiErrorResponse),
+        (status = 404, description = "Run was not found.", body = ApiErrorResponse)
+    )
+)]
+fn cancel_connector_run_doc() {}
 
 #[utoipa::path(
     post,
@@ -538,12 +650,28 @@ fn run_connector_doc() {}
 
 #[utoipa::path(
     post,
+    path = "/connectors/{source}/calendar-events/import",
+    tag = "Connectors",
+    operation_id = "importCalendarEvents",
+    security(("bearer_auth" = [])),
+    params(("source" = String, Path, description = "Connector source key recorded on calendar events and run history.")),
+    request_body(content = CalendarEventImportRequest, description = "Structured calendar event snapshot. Missing events are archived only when snapshot_complete=true and every item succeeds.", content_type = "application/json"),
+    responses(
+        (status = 201, description = "Calendar import run completed.", body = ApiResponse<ConnectorRunExecutionResponse>),
+        (status = 400, description = "Validation failed.", body = ApiErrorResponse),
+        (status = 403, description = "Admin role is required.", body = ApiErrorResponse)
+    )
+)]
+fn import_calendar_events_doc() {}
+
+#[utoipa::path(
+    post,
     path = "/connectors/{source}/work-cards/import",
     tag = "Connectors",
     operation_id = "importWorkCards",
     security(("bearer_auth" = [])),
     params(("source" = String, Path, description = "Connector source key recorded on imported work cards and run history.")),
-    request_body(content = WorkCardImportRequest, description = "Direct import payload for work cards. Each item is upserted by source/external_id and recorded in connector run item history.", content_type = "application/json"),
+    request_body(content = WorkCardImportRequest, description = "Direct import payload for work cards. Each item is upserted by source/external_id and recorded in connector run item history. Set snapshot_complete=true only for an uncapped full snapshot; missing records are archived only when every item succeeds.", content_type = "application/json"),
     responses(
         (status = 201, description = "Import run finished with imported/failed counts and per-item errors.", body = ApiResponse<ConnectorRunExecutionResponse>),
         (status = 400, description = "One or more items failed validation.", body = ApiErrorResponse),
@@ -559,7 +687,7 @@ fn import_work_cards_doc() {}
     operation_id = "importNotifications",
     security(("bearer_auth" = [])),
     params(("source" = String, Path, description = "Connector source key recorded on imported notifications and run history.")),
-    request_body(content = NotificationImportRequest, description = "Direct import payload for system notifications. Items are upserted by source/external_id and visible on dashboard notifications.", content_type = "application/json"),
+    request_body(content = NotificationImportRequest, description = "Direct import payload for system notifications. Items are upserted by source/external_id and visible on dashboard notifications. Set snapshot_complete=true only for an uncapped full snapshot; missing records are archived only when every item succeeds.", content_type = "application/json"),
     responses(
         (status = 201, description = "Import run finished with imported/failed counts and per-item errors.", body = ApiResponse<ConnectorRunExecutionResponse>),
         (status = 400, description = "One or more items failed validation.", body = ApiErrorResponse),
@@ -656,11 +784,26 @@ fn update_work_card_doc() {}
 #[utoipa::path(delete, path = "/work-cards/{id}", tag = "Catalog", operation_id = "deleteWorkCard", security(("bearer_auth" = [])), params(("id" = i32, Path, description = "Work card id.")), responses((status = 204, description = "Work card deleted."), (status = 403, description = "Admin role is required.", body = ApiErrorResponse), (status = 404, description = "Work card was not found.", body = ApiErrorResponse)))]
 fn delete_work_card_doc() {}
 
-#[utoipa::path(get, path = "/notifications", tag = "Catalog", operation_id = "listNotifications", security(("bearer_auth" = [])), responses((status = 200, description = "Notification records.", body = ApiResponse<Vec<Notification>>)))]
+#[utoipa::path(get, path = "/notifications", tag = "Catalog", operation_id = "listNotifications", security(("bearer_auth" = [])), responses((status = 200, description = "Actionable notification records for the current user. Read, dismissed, and actively snoozed records are excluded.", body = ApiResponse<Vec<NotificationView>>)))]
 fn list_notifications_doc() {}
 
-#[utoipa::path(get, path = "/notifications/{id}", tag = "Catalog", operation_id = "getNotification", security(("bearer_auth" = [])), params(("id" = i32, Path, description = "Notification id.")), responses((status = 200, description = "Notification record.", body = ApiResponse<Notification>), (status = 404, description = "Notification was not found.", body = ApiErrorResponse)))]
+#[utoipa::path(get, path = "/notifications/{id}", tag = "Catalog", operation_id = "getNotification", security(("bearer_auth" = [])), params(("id" = i32, Path, description = "Notification id.")), responses((status = 200, description = "Notification record with effective state for the current user.", body = ApiResponse<NotificationView>), (status = 404, description = "Notification was not found or is outside the current user's scope.", body = ApiErrorResponse)))]
 fn get_notification_doc() {}
+
+#[utoipa::path(post, path = "/notifications/{id}/read", tag = "Catalog", operation_id = "markNotificationRead", security(("bearer_auth" = [])), params(("id" = i32, Path, description = "Notification id.")), responses((status = 200, description = "Notification marked read for the current user.", body = ApiResponse<NotificationView>), (status = 404, description = "Notification was not found or is outside the current user's scope.", body = ApiErrorResponse)))]
+fn mark_notification_read_doc() {}
+
+#[utoipa::path(post, path = "/notifications/{id}/unread", tag = "Catalog", operation_id = "markNotificationUnread", security(("bearer_auth" = [])), params(("id" = i32, Path, description = "Notification id.")), responses((status = 200, description = "The current user's read receipt was cleared. Source-level read state remains effective.", body = ApiResponse<NotificationView>), (status = 404, description = "Notification was not found or is outside the current user's scope.", body = ApiErrorResponse)))]
+fn mark_notification_unread_doc() {}
+
+#[utoipa::path(post, path = "/notifications/{id}/dismiss", tag = "Catalog", operation_id = "dismissNotification", security(("bearer_auth" = [])), params(("id" = i32, Path, description = "Notification id.")), responses((status = 200, description = "Notification dismissed for the current user.", body = ApiResponse<NotificationView>), (status = 404, description = "Notification was not found or is outside the current user's scope.", body = ApiErrorResponse)))]
+fn dismiss_notification_doc() {}
+
+#[utoipa::path(post, path = "/notifications/{id}/snooze", tag = "Catalog", operation_id = "snoozeNotification", security(("bearer_auth" = [])), params(("id" = i32, Path, description = "Notification id.")), request_body(content = NotificationSnoozeRequest, content_type = "application/json"), responses((status = 200, description = "Notification snoozed for the current user.", body = ApiResponse<NotificationView>), (status = 400, description = "Snooze time must be in the future.", body = ApiErrorResponse), (status = 404, description = "Notification was not found or is outside the current user's scope.", body = ApiErrorResponse)))]
+fn snooze_notification_doc() {}
+
+#[utoipa::path(post, path = "/notifications/{id}/restore", tag = "Catalog", operation_id = "restoreNotification", security(("bearer_auth" = [])), params(("id" = i32, Path, description = "Notification id.")), responses((status = 200, description = "Dismissal and snooze state cleared for the current user.", body = ApiResponse<NotificationView>), (status = 404, description = "Notification was not found or is outside the current user's scope.", body = ApiErrorResponse)))]
+fn restore_notification_doc() {}
 
 #[utoipa::path(post, path = "/notifications", tag = "Catalog", operation_id = "createNotification", security(("bearer_auth" = [])), request_body(content = NewNotification, content_type = "application/json"), responses((status = 201, description = "Notification created.", body = ApiResponse<Notification>), (status = 400, description = "Validation failed.", body = ApiErrorResponse), (status = 403, description = "Admin role is required.", body = ApiErrorResponse)))]
 fn create_notification_doc() {}
@@ -705,12 +848,25 @@ mod tests {
             .expect("paths object exists");
 
         for path in [
+            "/health",
+            "/livez",
+            "/readyz",
+            "/calendar-events",
+            "/calendar-events/{id}",
+            "/connectors/{source}/calendar-events/import",
             "/connectors/{source}/service-health/import",
             "/connectors/{source}/work-cards/import",
             "/connectors/{source}/notifications/import",
             "/connectors/{source}/runs",
             "/connectors/{source}/config",
+            "/connectors/{source}/scope",
             "/connectors/runs/{id}",
+            "/connectors/runs/{id}/cancel",
+            "/notifications/{id}/read",
+            "/notifications/{id}/unread",
+            "/notifications/{id}/dismiss",
+            "/notifications/{id}/snooze",
+            "/notifications/{id}/restore",
             "/openapi.json",
         ] {
             assert!(paths.contains_key(path), "{path} should be documented");
@@ -740,5 +896,14 @@ mod tests {
             security_schemes.contains_key("bearer_auth"),
             "bearer auth scheme should be documented"
         );
+
+        let readiness_responses = paths
+            .get("/readyz")
+            .and_then(|path| path.get("get"))
+            .and_then(|operation| operation.get("responses"))
+            .and_then(|responses| responses.as_object())
+            .expect("readiness responses exist");
+        assert!(readiness_responses.contains_key("200"));
+        assert!(readiness_responses.contains_key("503"));
     }
 }

@@ -2,8 +2,31 @@ use chrono::{Duration, NaiveDateTime, Utc};
 use diesel::prelude::*;
 use diesel::OptionalExtension;
 use diesel_async::{AsyncConnection, AsyncPgConnection, RunQueryDsl};
+use std::collections::HashMap;
 
 use crate::{models::*, schema::*};
+
+#[derive(Clone, Debug)]
+pub struct RecordAccessScope {
+    pub user_id: i32,
+    pub is_admin: bool,
+    pub maintainer_ids: Vec<i32>,
+}
+
+impl RecordAccessScope {
+    pub fn allows(&self, owner_user_id: Option<i32>, maintainer_id: Option<i32>) -> bool {
+        if self.is_admin {
+            return true;
+        }
+
+        match (owner_user_id, maintainer_id) {
+            (Some(owner_user_id), None) => owner_user_id == self.user_id,
+            (None, Some(maintainer_id)) => self.maintainer_ids.contains(&maintainer_id),
+            (None, None) => true,
+            (Some(_), Some(_)) => false,
+        }
+    }
+}
 
 pub struct ConnectorWorkerRepository;
 
@@ -57,11 +80,24 @@ impl ConnectorWorkerRepository {
 pub struct ConnectorRepository;
 
 impl ConnectorRepository {
-    pub async fn find_multiple(
+    pub async fn find_multiple_for_access(
         c: &mut AsyncPgConnection,
         limit: i64,
+        access: &RecordAccessScope,
     ) -> QueryResult<Vec<Connector>> {
-        connectors::table
+        let mut query = connectors::table.into_boxed();
+        if !access.is_admin {
+            query = query.filter(
+                connectors::owner_user_id
+                    .eq(Some(access.user_id))
+                    .or(connectors::maintainer_id.eq_any(&access.maintainer_ids))
+                    .or(connectors::owner_user_id
+                        .is_null()
+                        .and(connectors::maintainer_id.is_null())),
+            );
+        }
+
+        query
             .order((
                 connectors::updated_at.desc(),
                 connectors::display_name.asc(),
@@ -86,6 +122,90 @@ impl ConnectorRepository {
             .values(new_connector)
             .get_result(c)
             .await
+    }
+
+    pub async fn find_or_create_default(
+        c: &mut AsyncPgConnection,
+        source: &str,
+        kind: &str,
+    ) -> QueryResult<Connector> {
+        diesel::insert_into(connectors::table)
+            .values(NewConnector {
+                source: source.to_owned(),
+                kind: kind.to_owned(),
+                display_name: source.to_owned(),
+                status: "active".to_owned(),
+                scope_type: "global".to_owned(),
+                owner_user_id: None,
+                maintainer_id: None,
+            })
+            .on_conflict(connectors::source)
+            .do_nothing()
+            .execute(c)
+            .await?;
+
+        Self::find_by_source(c, source).await
+    }
+
+    pub async fn update_scope(
+        c: &mut AsyncPgConnection,
+        source: &str,
+        scope_type: &str,
+        owner_user_id: Option<i32>,
+        maintainer_id: Option<i32>,
+    ) -> QueryResult<Connector> {
+        let source = source.to_owned();
+        let scope_type = scope_type.to_owned();
+        c.transaction::<Connector, diesel::result::Error, _>(|conn| {
+            Box::pin(async move {
+                let connector = connectors::table
+                    .filter(connectors::source.eq(&source))
+                    .for_update()
+                    .first::<Connector>(conn)
+                    .await?;
+                let connector = diesel::update(connectors::table.find(connector.id))
+                    .set((
+                        connectors::scope_type.eq(scope_type),
+                        connectors::owner_user_id.eq(owner_user_id),
+                        connectors::maintainer_id.eq(maintainer_id),
+                        connectors::updated_at.eq(diesel::dsl::now),
+                    ))
+                    .get_result::<Connector>(conn)
+                    .await?;
+
+                diesel::update(work_cards::table.filter(work_cards::connector_id.eq(connector.id)))
+                    .set((
+                        work_cards::owner_user_id.eq(owner_user_id),
+                        work_cards::maintainer_id.eq(maintainer_id),
+                        work_cards::updated_at.eq(diesel::dsl::now),
+                    ))
+                    .execute(conn)
+                    .await?;
+                diesel::update(
+                    notifications::table.filter(notifications::connector_id.eq(connector.id)),
+                )
+                .set((
+                    notifications::owner_user_id.eq(owner_user_id),
+                    notifications::maintainer_id.eq(maintainer_id),
+                    notifications::updated_at.eq(diesel::dsl::now),
+                ))
+                .execute(conn)
+                .await?;
+                diesel::update(
+                    calendar_events::table.filter(calendar_events::connector_id.eq(connector.id)),
+                )
+                .set((
+                    calendar_events::owner_user_id.eq(owner_user_id),
+                    calendar_events::maintainer_id.eq(maintainer_id),
+                    calendar_events::updated_at.eq(diesel::dsl::now),
+                ))
+                .execute(conn)
+                .await?;
+
+                Ok(connector)
+            })
+        })
+        .await
     }
 
     pub async fn update_by_source(
@@ -278,6 +398,13 @@ impl ConnectorConfigRepository {
 
 pub struct ConnectorRunRepository;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ConnectorRunRecoveryStats {
+    pub requeued: usize,
+    pub failed: usize,
+    pub cancelled: usize,
+}
+
 impl ConnectorRunRepository {
     pub async fn find(c: &mut AsyncPgConnection, id: i32) -> QueryResult<ConnectorRun> {
         connector_runs::table.find(id).get_result(c).await
@@ -306,35 +433,33 @@ impl ConnectorRunRepository {
             .await
     }
 
-    pub async fn find_failed_for_sources(
+    pub async fn find_failed_for_access(
         c: &mut AsyncPgConnection,
         limit: i64,
-        sources: &[String],
-    ) -> QueryResult<Vec<ConnectorRun>> {
-        if sources.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        connector_runs::table
-            .filter(connector_runs::source.eq_any(sources))
-            .filter(connector_runs::status.eq_any(["failed", "partial_success"]))
-            .order(connector_runs::started_at.desc())
-            .limit(limit)
-            .get_results(c)
-            .await
-    }
-
-    pub async fn find_failed_scoped(
-        c: &mut AsyncPgConnection,
-        limit: i64,
+        maintainer_id: Option<i32>,
         source: Option<&str>,
+        access: &RecordAccessScope,
     ) -> QueryResult<Vec<ConnectorRun>> {
         let mut query = connector_runs::table
+            .inner_join(connectors::table.on(connectors::source.eq(connector_runs::source)))
             .filter(connector_runs::status.eq_any(["failed", "partial_success"]))
+            .select(connector_runs::all_columns)
             .into_boxed();
-
+        if let Some(maintainer_id) = maintainer_id {
+            query = query.filter(connectors::maintainer_id.eq(maintainer_id));
+        }
         if let Some(source) = source {
             query = query.filter(connector_runs::source.eq(source));
+        }
+        if !access.is_admin {
+            query = query.filter(
+                connectors::owner_user_id
+                    .eq(Some(access.user_id))
+                    .or(connectors::maintainer_id.eq_any(&access.maintainer_ids))
+                    .or(connectors::owner_user_id
+                        .is_null()
+                        .and(connectors::maintainer_id.is_null())),
+            );
         }
 
         query
@@ -352,6 +477,86 @@ impl ConnectorRunRepository {
             .values(new_run)
             .get_result(c)
             .await
+    }
+
+    pub async fn create_if_no_pending(
+        c: &mut AsyncPgConnection,
+        new_run: NewConnectorRun,
+    ) -> QueryResult<Option<ConnectorRun>> {
+        let source = new_run.source.clone();
+        let target = new_run.target.clone();
+        c.transaction::<Option<ConnectorRun>, diesel::result::Error, _>(|conn| {
+            Box::pin(async move {
+                connectors::table
+                    .filter(connectors::source.eq(&source))
+                    .select(connectors::id)
+                    .for_update()
+                    .first::<i32>(conn)
+                    .await?;
+                let pending = connector_runs::table
+                    .filter(connector_runs::source.eq(&source))
+                    .filter(connector_runs::target.eq(&target))
+                    .filter(connector_runs::status.eq_any(["queued", "running"]))
+                    .count()
+                    .get_result::<i64>(conn)
+                    .await?
+                    > 0;
+                if pending {
+                    return Ok(None);
+                }
+
+                diesel::insert_into(connector_runs::table)
+                    .values(new_run)
+                    .get_result(conn)
+                    .await
+                    .map(Some)
+            })
+        })
+        .await
+    }
+
+    pub async fn create_retry(
+        c: &mut AsyncPgConnection,
+        parent_run_id: i32,
+        new_run: NewConnectorRun,
+    ) -> QueryResult<Option<ConnectorRun>> {
+        let source = new_run.source.clone();
+        let target = new_run.target.clone();
+        c.transaction::<Option<ConnectorRun>, diesel::result::Error, _>(|conn| {
+            Box::pin(async move {
+                connectors::table
+                    .filter(connectors::source.eq(&source))
+                    .select(connectors::id)
+                    .for_update()
+                    .first::<i32>(conn)
+                    .await?;
+                connector_runs::table
+                    .find(parent_run_id)
+                    .select(connector_runs::id)
+                    .for_update()
+                    .first::<i32>(conn)
+                    .await?;
+
+                let active_run_exists = connector_runs::table
+                    .filter(connector_runs::source.eq(&source))
+                    .filter(connector_runs::target.eq(&target))
+                    .filter(connector_runs::status.eq_any(["queued", "running"]))
+                    .count()
+                    .get_result::<i64>(conn)
+                    .await?
+                    > 0;
+                if active_run_exists {
+                    return Ok(None);
+                }
+
+                diesel::insert_into(connector_runs::table)
+                    .values(new_run)
+                    .get_result(conn)
+                    .await
+                    .map(Some)
+            })
+        })
+        .await
     }
 
     pub async fn has_pending(
@@ -373,12 +578,21 @@ impl ConnectorRunRepository {
     pub async fn claim_next_queued(
         c: &mut AsyncPgConnection,
         worker_id: &str,
+        lease_seconds: i64,
     ) -> QueryResult<Option<ConnectorRun>> {
         c.transaction::<Option<ConnectorRun>, diesel::result::Error, _>(|conn| {
             Box::pin(async move {
+                let now = Utc::now().naive_utc();
                 let queued = connector_runs::table
                     .filter(connector_runs::status.eq("queued"))
-                    .order(connector_runs::started_at.asc())
+                    .filter(connector_runs::next_attempt_at.le(now))
+                    .filter(connector_runs::cancel_requested_at.is_null())
+                    .filter(connector_runs::attempt_count.lt(connector_runs::max_attempts))
+                    .order((
+                        connector_runs::next_attempt_at.asc(),
+                        connector_runs::started_at.asc(),
+                        connector_runs::id.asc(),
+                    ))
                     .for_update()
                     .skip_locked()
                     .first::<ConnectorRun>(conn)
@@ -392,12 +606,315 @@ impl ConnectorRunRepository {
                 diesel::update(connector_runs::table.find(queued.id))
                     .set((
                         connector_runs::status.eq("running"),
-                        connector_runs::claimed_at.eq(Some(Utc::now().naive_utc())),
+                        connector_runs::claimed_at.eq(Some(now)),
                         connector_runs::worker_id.eq(Some(worker_id.to_owned())),
+                        connector_runs::attempt_count.eq(queued.attempt_count + 1),
+                        connector_runs::lease_expires_at
+                            .eq(Some(now + Duration::seconds(lease_seconds))),
+                        connector_runs::heartbeat_at.eq(Some(now)),
+                        connector_runs::finished_at.eq::<Option<NaiveDateTime>>(None),
+                        connector_runs::cancelled_at.eq::<Option<NaiveDateTime>>(None),
                     ))
                     .get_result(conn)
                     .await
                     .map(Some)
+            })
+        })
+        .await
+    }
+
+    pub async fn start_direct_execution(
+        c: &mut AsyncPgConnection,
+        id: i32,
+    ) -> QueryResult<ConnectorRun> {
+        let now = Utc::now().naive_utc();
+        diesel::update(
+            connector_runs::table
+                .find(id)
+                .filter(connector_runs::status.eq("queued")),
+        )
+        .set((
+            connector_runs::status.eq("running"),
+            connector_runs::claimed_at.eq(Some(now)),
+            connector_runs::attempt_count.eq(1),
+            connector_runs::max_attempts.eq(1),
+            connector_runs::heartbeat_at.eq(Some(now)),
+        ))
+        .get_result(c)
+        .await
+    }
+
+    pub async fn renew_lease(
+        c: &mut AsyncPgConnection,
+        id: i32,
+        worker_id: &str,
+        lease_seconds: i64,
+    ) -> QueryResult<bool> {
+        let now = Utc::now().naive_utc();
+        let updated = diesel::update(
+            connector_runs::table
+                .find(id)
+                .filter(connector_runs::status.eq("running"))
+                .filter(connector_runs::worker_id.eq(worker_id))
+                .filter(connector_runs::cancel_requested_at.is_null())
+                .filter(connector_runs::lease_expires_at.gt(now)),
+        )
+        .set((
+            connector_runs::heartbeat_at.eq(Some(now)),
+            connector_runs::lease_expires_at.eq(Some(now + Duration::seconds(lease_seconds))),
+        ))
+        .execute(c)
+        .await?;
+
+        Ok(updated == 1)
+    }
+
+    pub async fn execution_is_active(
+        c: &mut AsyncPgConnection,
+        id: i32,
+        worker_id: Option<&str>,
+    ) -> QueryResult<bool> {
+        let mut query = connector_runs::table
+            .find(id)
+            .filter(connector_runs::status.eq("running"))
+            .filter(connector_runs::cancel_requested_at.is_null())
+            .into_boxed();
+        if let Some(worker_id) = worker_id {
+            let now = Utc::now().naive_utc();
+            query = query
+                .filter(connector_runs::worker_id.eq(worker_id))
+                .filter(connector_runs::lease_expires_at.gt(now));
+        } else {
+            query = query.filter(connector_runs::worker_id.is_null());
+        }
+
+        Ok(query.count().get_result::<i64>(c).await? == 1)
+    }
+
+    pub async fn cancellation_requested(c: &mut AsyncPgConnection, id: i32) -> QueryResult<bool> {
+        Ok(connector_runs::table
+            .find(id)
+            .filter(connector_runs::cancel_requested_at.is_not_null())
+            .count()
+            .get_result::<i64>(c)
+            .await?
+            == 1)
+    }
+
+    pub async fn finalize_if_active(
+        c: &mut AsyncPgConnection,
+        id: i32,
+        worker_id: Option<&str>,
+        state: ConnectorRunStateUpdate,
+    ) -> QueryResult<Option<ConnectorRun>> {
+        let now = Utc::now().naive_utc();
+        let changes = (
+            connector_runs::status.eq(state.status),
+            connector_runs::success_count.eq(state.success_count),
+            connector_runs::failure_count.eq(state.failure_count),
+            connector_runs::duration_ms.eq(state.duration_ms),
+            connector_runs::error_message.eq(state.error_message),
+            connector_runs::finished_at.eq(state.finished_at),
+            connector_runs::snapshot_complete.eq(state.snapshot_complete),
+            connector_runs::archived_count.eq(state.archived_count),
+            connector_runs::lease_expires_at.eq::<Option<NaiveDateTime>>(None),
+            connector_runs::heartbeat_at.eq(Some(now)),
+        );
+
+        if let Some(worker_id) = worker_id {
+            diesel::update(
+                connector_runs::table
+                    .find(id)
+                    .filter(connector_runs::status.eq("running"))
+                    .filter(connector_runs::worker_id.eq(worker_id))
+                    .filter(connector_runs::cancel_requested_at.is_null())
+                    .filter(connector_runs::lease_expires_at.gt(now)),
+            )
+            .set(changes)
+            .get_result(c)
+            .await
+            .optional()
+        } else {
+            diesel::update(
+                connector_runs::table
+                    .find(id)
+                    .filter(connector_runs::status.eq("running"))
+                    .filter(connector_runs::worker_id.is_null())
+                    .filter(connector_runs::cancel_requested_at.is_null()),
+            )
+            .set(changes)
+            .get_result(c)
+            .await
+            .optional()
+        }
+    }
+
+    pub async fn request_cancel(
+        c: &mut AsyncPgConnection,
+        id: i32,
+    ) -> QueryResult<Option<ConnectorRun>> {
+        c.transaction::<Option<ConnectorRun>, diesel::result::Error, _>(|conn| {
+            Box::pin(async move {
+                let run = connector_runs::table
+                    .find(id)
+                    .for_update()
+                    .first::<ConnectorRun>(conn)
+                    .await?;
+                let now = Utc::now().naive_utc();
+
+                match run.status.as_str() {
+                    "queued" => diesel::update(connector_runs::table.find(id))
+                        .set((
+                            connector_runs::status.eq("cancelled"),
+                            connector_runs::cancel_requested_at.eq(Some(now)),
+                            connector_runs::cancelled_at.eq(Some(now)),
+                            connector_runs::finished_at.eq(Some(now)),
+                            connector_runs::lease_expires_at.eq::<Option<NaiveDateTime>>(None),
+                        ))
+                        .get_result(conn)
+                        .await
+                        .map(Some),
+                    "running" => diesel::update(connector_runs::table.find(id))
+                        .set(connector_runs::cancel_requested_at.eq(Some(now)))
+                        .get_result(conn)
+                        .await
+                        .map(Some),
+                    _ => Ok(None),
+                }
+            })
+        })
+        .await
+    }
+
+    pub async fn mark_cancelled_if_requested(
+        c: &mut AsyncPgConnection,
+        id: i32,
+        worker_id: Option<&str>,
+    ) -> QueryResult<Option<ConnectorRun>> {
+        let now = Utc::now().naive_utc();
+        let changes = (
+            connector_runs::status.eq("cancelled"),
+            connector_runs::cancelled_at.eq(Some(now)),
+            connector_runs::finished_at.eq(Some(now)),
+            connector_runs::lease_expires_at.eq::<Option<NaiveDateTime>>(None),
+            connector_runs::heartbeat_at.eq(Some(now)),
+            connector_runs::error_message.eq(Some("cancelled by operator".to_owned())),
+        );
+        if let Some(worker_id) = worker_id {
+            diesel::update(
+                connector_runs::table
+                    .find(id)
+                    .filter(connector_runs::status.eq("running"))
+                    .filter(connector_runs::worker_id.eq(worker_id))
+                    .filter(connector_runs::cancel_requested_at.is_not_null()),
+            )
+            .set(changes)
+            .get_result(c)
+            .await
+            .optional()
+        } else {
+            diesel::update(
+                connector_runs::table
+                    .find(id)
+                    .filter(connector_runs::status.eq("running"))
+                    .filter(connector_runs::worker_id.is_null())
+                    .filter(connector_runs::cancel_requested_at.is_not_null()),
+            )
+            .set(changes)
+            .get_result(c)
+            .await
+            .optional()
+        }
+    }
+
+    pub async fn recover_expired_leases(
+        c: &mut AsyncPgConnection,
+        retry_base_seconds: i64,
+        retry_max_seconds: i64,
+        limit: i64,
+    ) -> QueryResult<ConnectorRunRecoveryStats> {
+        c.transaction::<ConnectorRunRecoveryStats, diesel::result::Error, _>(|conn| {
+            Box::pin(async move {
+                let now = Utc::now().naive_utc();
+                let expired = connector_runs::table
+                    .filter(connector_runs::status.eq("running"))
+                    .filter(connector_runs::lease_expires_at.le(now))
+                    .order((connector_runs::lease_expires_at.asc(), connector_runs::id.asc()))
+                    .limit(limit)
+                    .for_update()
+                    .skip_locked()
+                    .get_results::<ConnectorRun>(conn)
+                    .await?;
+                let mut stats = ConnectorRunRecoveryStats::default();
+
+                for run in expired {
+                    if run.cancel_requested_at.is_some() {
+                        diesel::update(connector_runs::table.find(run.id))
+                            .set((
+                                connector_runs::status.eq("cancelled"),
+                                connector_runs::cancelled_at.eq(Some(now)),
+                                connector_runs::finished_at.eq(Some(now)),
+                                connector_runs::lease_expires_at
+                                    .eq::<Option<NaiveDateTime>>(None),
+                                connector_runs::error_message
+                                    .eq(Some("cancelled after worker lease expired".to_owned())),
+                            ))
+                            .execute(conn)
+                            .await?;
+                        stats.cancelled += 1;
+                    } else if run.attempt_count >= run.max_attempts {
+                        diesel::update(connector_runs::table.find(run.id))
+                            .set((
+                                connector_runs::status.eq("failed"),
+                                connector_runs::finished_at.eq(Some(now)),
+                                connector_runs::lease_expires_at
+                                    .eq::<Option<NaiveDateTime>>(None),
+                                connector_runs::error_message.eq(Some(format!(
+                                    "worker lease expired after {} attempt(s); retry limit reached",
+                                    run.attempt_count
+                                ))),
+                            ))
+                            .execute(conn)
+                            .await?;
+                        diesel::update(
+                            connectors::table.filter(connectors::source.eq(&run.source)),
+                        )
+                        .set((
+                            connectors::status.eq("error"),
+                            connectors::last_run_at.eq(Some(now)),
+                            connectors::updated_at.eq(now),
+                        ))
+                        .execute(conn)
+                        .await?;
+                        stats.failed += 1;
+                    } else {
+                        let backoff_seconds = bounded_retry_backoff_seconds(
+                            run.attempt_count,
+                            retry_base_seconds,
+                            retry_max_seconds,
+                        );
+                        diesel::update(connector_runs::table.find(run.id))
+                            .set((
+                                connector_runs::status.eq("queued"),
+                                connector_runs::next_attempt_at
+                                    .eq(now + Duration::seconds(backoff_seconds)),
+                                connector_runs::claimed_at.eq::<Option<NaiveDateTime>>(None),
+                                connector_runs::worker_id.eq::<Option<String>>(None),
+                                connector_runs::lease_expires_at
+                                    .eq::<Option<NaiveDateTime>>(None),
+                                connector_runs::heartbeat_at.eq::<Option<NaiveDateTime>>(None),
+                                connector_runs::error_message.eq(Some(format!(
+                                    "worker lease expired on attempt {}; retry scheduled in {} second(s)",
+                                    run.attempt_count, backoff_seconds
+                                ))),
+                            ))
+                            .execute(conn)
+                            .await?;
+                        stats.requeued += 1;
+                    }
+                }
+
+                Ok(stats)
             })
         })
         .await
@@ -416,6 +933,10 @@ impl ConnectorRunRepository {
                 connector_runs::duration_ms.eq(state.duration_ms),
                 connector_runs::error_message.eq(state.error_message),
                 connector_runs::finished_at.eq(state.finished_at),
+                connector_runs::snapshot_complete.eq(state.snapshot_complete),
+                connector_runs::archived_count.eq(state.archived_count),
+                connector_runs::lease_expires_at.eq::<Option<NaiveDateTime>>(None),
+                connector_runs::heartbeat_at.eq(Some(Utc::now().naive_utc())),
             ))
             .get_result(c)
             .await
@@ -433,6 +954,19 @@ impl ConnectorRunRepository {
         .execute(c)
         .await
     }
+}
+
+pub(crate) fn bounded_retry_backoff_seconds(
+    attempt_count: i32,
+    base_seconds: i64,
+    max_seconds: i64,
+) -> i64 {
+    let base_seconds = base_seconds.max(1);
+    let max_seconds = max_seconds.max(base_seconds);
+    let exponent = attempt_count.saturating_sub(1).clamp(0, 30) as u32;
+    base_seconds
+        .saturating_mul(1_i64 << exponent)
+        .min(max_seconds)
 }
 
 pub struct ConnectorRunItemErrorRepository;
@@ -1040,20 +1574,215 @@ impl ServiceHealthCheckRepository {
 
 pub struct WorkCardRepository;
 
+pub struct CalendarEventRepository;
+
+impl CalendarEventRepository {
+    pub async fn find(c: &mut AsyncPgConnection, id: i32) -> QueryResult<CalendarEvent> {
+        calendar_events::table.find(id).get_result(c).await
+    }
+
+    pub async fn find_upcoming_for_access(
+        c: &mut AsyncPgConnection,
+        limit: i64,
+        starts_from: NaiveDateTime,
+        starts_before: NaiveDateTime,
+        maintainer_id: Option<i32>,
+        source: Option<&str>,
+        access: &RecordAccessScope,
+    ) -> QueryResult<Vec<CalendarEvent>> {
+        let mut query = calendar_events::table
+            .filter(calendar_events::archived_at.is_null())
+            .filter(calendar_events::is_cancelled.eq(false))
+            .filter(calendar_events::starts_at.ge(starts_from))
+            .filter(calendar_events::starts_at.lt(starts_before))
+            .into_boxed();
+        if let Some(maintainer_id) = maintainer_id {
+            query = query.filter(calendar_events::maintainer_id.eq(maintainer_id));
+        }
+        if let Some(source) = source {
+            query = query.filter(calendar_events::source.eq(source));
+        }
+        if !access.is_admin {
+            query = query.filter(
+                calendar_events::owner_user_id
+                    .eq(Some(access.user_id))
+                    .or(calendar_events::maintainer_id.eq_any(&access.maintainer_ids))
+                    .or(calendar_events::owner_user_id
+                        .is_null()
+                        .and(calendar_events::maintainer_id.is_null())),
+            );
+        }
+
+        query
+            .order((calendar_events::starts_at.asc(), calendar_events::id.asc()))
+            .limit(limit)
+            .get_results(c)
+            .await
+    }
+
+    pub async fn find_by_source_external_id(
+        c: &mut AsyncPgConnection,
+        source: &str,
+        external_id: &str,
+    ) -> QueryResult<CalendarEvent> {
+        calendar_events::table
+            .filter(calendar_events::source.eq(source))
+            .filter(calendar_events::external_id.eq(external_id))
+            .first(c)
+            .await
+    }
+
+    pub async fn create(
+        c: &mut AsyncPgConnection,
+        event: NewCalendarEvent,
+    ) -> QueryResult<CalendarEvent> {
+        diesel::insert_into(calendar_events::table)
+            .values(event)
+            .get_result(c)
+            .await
+    }
+
+    pub async fn update(
+        c: &mut AsyncPgConnection,
+        id: i32,
+        event: NewCalendarEvent,
+    ) -> QueryResult<CalendarEvent> {
+        diesel::update(calendar_events::table.find(id))
+            .set((event, calendar_events::updated_at.eq(diesel::dsl::now)))
+            .get_result(c)
+            .await
+    }
+
+    pub async fn upsert_from_connector(
+        c: &mut AsyncPgConnection,
+        event: NewCalendarEvent,
+    ) -> QueryResult<CalendarEvent> {
+        match Self::find_by_source_external_id(c, &event.source, &event.external_id).await {
+            Ok(existing) => Self::update(c, existing.id, event).await,
+            Err(diesel::result::Error::NotFound) => Self::create(c, event).await,
+            Err(error) => Err(error),
+        }
+    }
+
+    pub async fn archive_missing_for_connector_run(
+        c: &mut AsyncPgConnection,
+        connector_id: i32,
+        run_id: i32,
+    ) -> QueryResult<usize> {
+        let now = Utc::now().naive_utc();
+        diesel::update(
+            calendar_events::table
+                .filter(calendar_events::connector_id.eq(connector_id))
+                .filter(calendar_events::archived_at.is_null())
+                .filter(
+                    calendar_events::last_seen_run_id
+                        .is_null()
+                        .or(calendar_events::last_seen_run_id.ne(run_id)),
+                ),
+        )
+        .set((
+            calendar_events::archived_at.eq(Some(now)),
+            calendar_events::updated_at.eq(now),
+        ))
+        .execute(c)
+        .await
+    }
+}
+
 impl WorkCardRepository {
     pub async fn find(c: &mut AsyncPgConnection, id: i32) -> QueryResult<WorkCard> {
         work_cards::table.find(id).get_result(c).await
     }
 
-    pub async fn find_multiple(
+    pub async fn find_multiple_for_access(
         c: &mut AsyncPgConnection,
         limit: i64,
+        access: &RecordAccessScope,
     ) -> QueryResult<Vec<WorkCard>> {
-        work_cards::table
+        let mut query = work_cards::table
+            .filter(work_cards::archived_at.is_null())
+            .into_boxed();
+        if !access.is_admin {
+            query = query.filter(
+                work_cards::owner_user_id
+                    .eq(Some(access.user_id))
+                    .or(work_cards::maintainer_id.eq_any(&access.maintainer_ids))
+                    .or(work_cards::owner_user_id
+                        .is_null()
+                        .and(work_cards::maintainer_id.is_null())),
+            );
+        }
+
+        query
             .order(work_cards::updated_at.desc())
             .limit(limit)
             .get_results(c)
             .await
+    }
+
+    pub async fn find_open_for_access(
+        c: &mut AsyncPgConnection,
+        limit: i64,
+        maintainer_id: Option<i32>,
+        source: Option<&str>,
+        access: &RecordAccessScope,
+    ) -> QueryResult<Vec<WorkCard>> {
+        let mut query = work_cards::table
+            .filter(work_cards::status.ne("done"))
+            .filter(work_cards::archived_at.is_null())
+            .into_boxed();
+        if let Some(maintainer_id) = maintainer_id {
+            query = query.filter(work_cards::maintainer_id.eq(maintainer_id));
+        }
+        if let Some(source) = source {
+            query = query.filter(work_cards::source.eq(source));
+        }
+        if !access.is_admin {
+            query = query.filter(
+                work_cards::owner_user_id
+                    .eq(Some(access.user_id))
+                    .or(work_cards::maintainer_id.eq_any(&access.maintainer_ids))
+                    .or(work_cards::owner_user_id
+                        .is_null()
+                        .and(work_cards::maintainer_id.is_null())),
+            );
+        }
+
+        query
+            .order(work_cards::updated_at.desc())
+            .limit(limit)
+            .get_results(c)
+            .await
+    }
+
+    pub async fn count_open_for_access(
+        c: &mut AsyncPgConnection,
+        maintainer_id: Option<i32>,
+        source: Option<&str>,
+        access: &RecordAccessScope,
+    ) -> QueryResult<i64> {
+        let mut query = work_cards::table
+            .filter(work_cards::status.ne("done"))
+            .filter(work_cards::archived_at.is_null())
+            .into_boxed();
+        if let Some(maintainer_id) = maintainer_id {
+            query = query.filter(work_cards::maintainer_id.eq(maintainer_id));
+        }
+        if let Some(source) = source {
+            query = query.filter(work_cards::source.eq(source));
+        }
+        if !access.is_admin {
+            query = query.filter(
+                work_cards::owner_user_id
+                    .eq(Some(access.user_id))
+                    .or(work_cards::maintainer_id.eq_any(&access.maintainer_ids))
+                    .or(work_cards::owner_user_id
+                        .is_null()
+                        .and(work_cards::maintainer_id.is_null())),
+            );
+        }
+
+        query.count().get_result(c).await
     }
 
     pub async fn find_by_source_external_id(
@@ -1065,44 +1794,6 @@ impl WorkCardRepository {
             .filter(work_cards::source.eq(source))
             .filter(work_cards::external_id.eq(external_id))
             .first(c)
-            .await
-    }
-
-    pub async fn find_open_scoped(
-        c: &mut AsyncPgConnection,
-        limit: i64,
-        source: Option<&str>,
-    ) -> QueryResult<Vec<WorkCard>> {
-        let mut query = work_cards::table
-            .filter(work_cards::status.ne("done"))
-            .into_boxed();
-
-        if let Some(source) = source {
-            query = query.filter(work_cards::source.eq(source));
-        }
-
-        query
-            .order(work_cards::updated_at.desc())
-            .limit(limit)
-            .get_results(c)
-            .await
-    }
-
-    pub async fn find_open_for_sources(
-        c: &mut AsyncPgConnection,
-        limit: i64,
-        sources: &[String],
-    ) -> QueryResult<Vec<WorkCard>> {
-        if sources.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        work_cards::table
-            .filter(work_cards::source.eq_any(sources))
-            .filter(work_cards::status.ne("done"))
-            .order(work_cards::updated_at.desc())
-            .limit(limit)
-            .get_results(c)
             .await
     }
 
@@ -1145,6 +1836,207 @@ impl WorkCardRepository {
             Self::create(c, work_card).await
         }
     }
+
+    pub async fn archive_missing_for_connector_run(
+        c: &mut AsyncPgConnection,
+        connector_id: i32,
+        run_id: i32,
+    ) -> QueryResult<usize> {
+        let now = Utc::now().naive_utc();
+        diesel::update(
+            work_cards::table
+                .filter(work_cards::connector_id.eq(connector_id))
+                .filter(work_cards::archived_at.is_null())
+                .filter(
+                    work_cards::last_seen_run_id
+                        .is_null()
+                        .or(work_cards::last_seen_run_id.ne(run_id)),
+                ),
+        )
+        .set((
+            work_cards::archived_at.eq(Some(now)),
+            work_cards::updated_at.eq(now),
+        ))
+        .execute(c)
+        .await
+    }
+}
+
+pub struct NotificationReceiptRepository;
+
+impl NotificationReceiptRepository {
+    pub async fn find(
+        c: &mut AsyncPgConnection,
+        notification_id: i32,
+        user_id: i32,
+    ) -> QueryResult<Option<NotificationReceipt>> {
+        notification_receipts::table
+            .filter(notification_receipts::notification_id.eq(notification_id))
+            .filter(notification_receipts::user_id.eq(user_id))
+            .first(c)
+            .await
+            .optional()
+    }
+
+    pub async fn find_for_user_and_notifications(
+        c: &mut AsyncPgConnection,
+        user_id: i32,
+        notification_ids: &[i32],
+    ) -> QueryResult<Vec<NotificationReceipt>> {
+        if notification_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        notification_receipts::table
+            .filter(notification_receipts::user_id.eq(user_id))
+            .filter(notification_receipts::notification_id.eq_any(notification_ids))
+            .get_results(c)
+            .await
+    }
+
+    pub async fn mark_read(
+        c: &mut AsyncPgConnection,
+        notification_id: i32,
+        user_id: i32,
+    ) -> QueryResult<NotificationReceipt> {
+        let now = Utc::now().naive_utc();
+
+        diesel::insert_into(notification_receipts::table)
+            .values((
+                notification_receipts::notification_id.eq(notification_id),
+                notification_receipts::user_id.eq(user_id),
+                notification_receipts::read_at.eq(Some(now)),
+                notification_receipts::dismissed_at.eq::<Option<NaiveDateTime>>(None),
+                notification_receipts::snoozed_until.eq::<Option<NaiveDateTime>>(None),
+            ))
+            .on_conflict((
+                notification_receipts::notification_id,
+                notification_receipts::user_id,
+            ))
+            .do_update()
+            .set((
+                notification_receipts::read_at.eq(Some(now)),
+                notification_receipts::updated_at.eq(now),
+            ))
+            .get_result(c)
+            .await
+    }
+
+    pub async fn mark_unread(
+        c: &mut AsyncPgConnection,
+        notification_id: i32,
+        user_id: i32,
+    ) -> QueryResult<NotificationReceipt> {
+        let now = Utc::now().naive_utc();
+
+        diesel::insert_into(notification_receipts::table)
+            .values((
+                notification_receipts::notification_id.eq(notification_id),
+                notification_receipts::user_id.eq(user_id),
+                notification_receipts::read_at.eq::<Option<NaiveDateTime>>(None),
+                notification_receipts::dismissed_at.eq::<Option<NaiveDateTime>>(None),
+                notification_receipts::snoozed_until.eq::<Option<NaiveDateTime>>(None),
+            ))
+            .on_conflict((
+                notification_receipts::notification_id,
+                notification_receipts::user_id,
+            ))
+            .do_update()
+            .set((
+                notification_receipts::read_at.eq::<Option<NaiveDateTime>>(None),
+                notification_receipts::updated_at.eq(now),
+            ))
+            .get_result(c)
+            .await
+    }
+
+    pub async fn dismiss(
+        c: &mut AsyncPgConnection,
+        notification_id: i32,
+        user_id: i32,
+    ) -> QueryResult<NotificationReceipt> {
+        let now = Utc::now().naive_utc();
+
+        diesel::insert_into(notification_receipts::table)
+            .values((
+                notification_receipts::notification_id.eq(notification_id),
+                notification_receipts::user_id.eq(user_id),
+                notification_receipts::read_at.eq::<Option<NaiveDateTime>>(None),
+                notification_receipts::dismissed_at.eq(Some(now)),
+                notification_receipts::snoozed_until.eq::<Option<NaiveDateTime>>(None),
+            ))
+            .on_conflict((
+                notification_receipts::notification_id,
+                notification_receipts::user_id,
+            ))
+            .do_update()
+            .set((
+                notification_receipts::dismissed_at.eq(Some(now)),
+                notification_receipts::snoozed_until.eq::<Option<NaiveDateTime>>(None),
+                notification_receipts::updated_at.eq(now),
+            ))
+            .get_result(c)
+            .await
+    }
+
+    pub async fn snooze(
+        c: &mut AsyncPgConnection,
+        notification_id: i32,
+        user_id: i32,
+        snoozed_until: NaiveDateTime,
+    ) -> QueryResult<NotificationReceipt> {
+        let now = Utc::now().naive_utc();
+
+        diesel::insert_into(notification_receipts::table)
+            .values((
+                notification_receipts::notification_id.eq(notification_id),
+                notification_receipts::user_id.eq(user_id),
+                notification_receipts::read_at.eq::<Option<NaiveDateTime>>(None),
+                notification_receipts::dismissed_at.eq::<Option<NaiveDateTime>>(None),
+                notification_receipts::snoozed_until.eq(Some(snoozed_until)),
+            ))
+            .on_conflict((
+                notification_receipts::notification_id,
+                notification_receipts::user_id,
+            ))
+            .do_update()
+            .set((
+                notification_receipts::dismissed_at.eq::<Option<NaiveDateTime>>(None),
+                notification_receipts::snoozed_until.eq(Some(snoozed_until)),
+                notification_receipts::updated_at.eq(now),
+            ))
+            .get_result(c)
+            .await
+    }
+
+    pub async fn restore(
+        c: &mut AsyncPgConnection,
+        notification_id: i32,
+        user_id: i32,
+    ) -> QueryResult<NotificationReceipt> {
+        let now = Utc::now().naive_utc();
+
+        diesel::insert_into(notification_receipts::table)
+            .values((
+                notification_receipts::notification_id.eq(notification_id),
+                notification_receipts::user_id.eq(user_id),
+                notification_receipts::read_at.eq::<Option<NaiveDateTime>>(None),
+                notification_receipts::dismissed_at.eq::<Option<NaiveDateTime>>(None),
+                notification_receipts::snoozed_until.eq::<Option<NaiveDateTime>>(None),
+            ))
+            .on_conflict((
+                notification_receipts::notification_id,
+                notification_receipts::user_id,
+            ))
+            .do_update()
+            .set((
+                notification_receipts::dismissed_at.eq::<Option<NaiveDateTime>>(None),
+                notification_receipts::snoozed_until.eq::<Option<NaiveDateTime>>(None),
+                notification_receipts::updated_at.eq(now),
+            ))
+            .get_result(c)
+            .await
+    }
 }
 
 pub struct NotificationRepository;
@@ -1154,15 +2046,136 @@ impl NotificationRepository {
         notifications::table.find(id).get_result(c).await
     }
 
-    pub async fn find_multiple(
+    pub async fn find_actionable_for_access(
         c: &mut AsyncPgConnection,
         limit: i64,
-    ) -> QueryResult<Vec<Notification>> {
-        notifications::table
+        maintainer_id: Option<i32>,
+        source: Option<&str>,
+        access: &RecordAccessScope,
+    ) -> QueryResult<Vec<NotificationView>> {
+        let now = Utc::now().naive_utc();
+        let mut query = notifications::table
+            .left_join(
+                notification_receipts::table.on(notification_receipts::notification_id
+                    .eq(notifications::id)
+                    .and(notification_receipts::user_id.eq(access.user_id))),
+            )
+            .filter(notifications::is_read.eq(false))
+            .filter(notifications::archived_at.is_null())
+            .filter(notification_receipts::read_at.is_null())
+            .filter(notification_receipts::dismissed_at.is_null())
+            .filter(
+                notification_receipts::snoozed_until
+                    .is_null()
+                    .or(notification_receipts::snoozed_until.le(now)),
+            )
+            .select(notifications::all_columns)
+            .into_boxed();
+        if let Some(maintainer_id) = maintainer_id {
+            query = query.filter(notifications::maintainer_id.eq(maintainer_id));
+        }
+        if let Some(source) = source {
+            query = query.filter(notifications::source.eq(source));
+        }
+        if !access.is_admin {
+            query = query.filter(
+                notifications::owner_user_id
+                    .eq(Some(access.user_id))
+                    .or(notifications::maintainer_id.eq_any(&access.maintainer_ids))
+                    .or(notifications::owner_user_id
+                        .is_null()
+                        .and(notifications::maintainer_id.is_null())),
+            );
+        }
+
+        let notifications = query
             .order(notifications::updated_at.desc())
             .limit(limit)
             .get_results(c)
-            .await
+            .await?;
+
+        Self::with_receipts(c, access.user_id, notifications).await
+    }
+
+    pub async fn count_actionable_for_access(
+        c: &mut AsyncPgConnection,
+        maintainer_id: Option<i32>,
+        source: Option<&str>,
+        access: &RecordAccessScope,
+    ) -> QueryResult<i64> {
+        let now = Utc::now().naive_utc();
+        let mut query = notifications::table
+            .left_join(
+                notification_receipts::table.on(notification_receipts::notification_id
+                    .eq(notifications::id)
+                    .and(notification_receipts::user_id.eq(access.user_id))),
+            )
+            .filter(notifications::is_read.eq(false))
+            .filter(notifications::archived_at.is_null())
+            .filter(notification_receipts::read_at.is_null())
+            .filter(notification_receipts::dismissed_at.is_null())
+            .filter(
+                notification_receipts::snoozed_until
+                    .is_null()
+                    .or(notification_receipts::snoozed_until.le(now)),
+            )
+            .into_boxed();
+        if let Some(maintainer_id) = maintainer_id {
+            query = query.filter(notifications::maintainer_id.eq(maintainer_id));
+        }
+        if let Some(source) = source {
+            query = query.filter(notifications::source.eq(source));
+        }
+        if !access.is_admin {
+            query = query.filter(
+                notifications::owner_user_id
+                    .eq(Some(access.user_id))
+                    .or(notifications::maintainer_id.eq_any(&access.maintainer_ids))
+                    .or(notifications::owner_user_id
+                        .is_null()
+                        .and(notifications::maintainer_id.is_null())),
+            );
+        }
+
+        query.count().get_result(c).await
+    }
+
+    pub async fn view_for_user(
+        c: &mut AsyncPgConnection,
+        notification: Notification,
+        user_id: i32,
+    ) -> QueryResult<NotificationView> {
+        let receipt = NotificationReceiptRepository::find(c, notification.id, user_id).await?;
+        Ok(NotificationView::from_record(notification, receipt))
+    }
+
+    async fn with_receipts(
+        c: &mut AsyncPgConnection,
+        user_id: i32,
+        notifications: Vec<Notification>,
+    ) -> QueryResult<Vec<NotificationView>> {
+        let notification_ids = notifications
+            .iter()
+            .map(|notification| notification.id)
+            .collect::<Vec<_>>();
+        let receipts = NotificationReceiptRepository::find_for_user_and_notifications(
+            c,
+            user_id,
+            &notification_ids,
+        )
+        .await?;
+        let mut receipts_by_notification = receipts
+            .into_iter()
+            .map(|receipt| (receipt.notification_id, receipt))
+            .collect::<HashMap<_, _>>();
+
+        Ok(notifications
+            .into_iter()
+            .map(|notification| {
+                let receipt = receipts_by_notification.remove(&notification.id);
+                NotificationView::from_record(notification, receipt)
+            })
+            .collect())
     }
 
     pub async fn find_by_source_external_id(
@@ -1174,44 +2187,6 @@ impl NotificationRepository {
             .filter(notifications::source.eq(source))
             .filter(notifications::external_id.eq(external_id))
             .first(c)
-            .await
-    }
-
-    pub async fn find_unread_scoped(
-        c: &mut AsyncPgConnection,
-        limit: i64,
-        source: Option<&str>,
-    ) -> QueryResult<Vec<Notification>> {
-        let mut query = notifications::table
-            .filter(notifications::is_read.eq(false))
-            .into_boxed();
-
-        if let Some(source) = source {
-            query = query.filter(notifications::source.eq(source));
-        }
-
-        query
-            .order(notifications::updated_at.desc())
-            .limit(limit)
-            .get_results(c)
-            .await
-    }
-
-    pub async fn find_unread_for_sources(
-        c: &mut AsyncPgConnection,
-        limit: i64,
-        sources: &[String],
-    ) -> QueryResult<Vec<Notification>> {
-        if sources.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        notifications::table
-            .filter(notifications::source.eq_any(sources))
-            .filter(notifications::is_read.eq(false))
-            .order(notifications::updated_at.desc())
-            .limit(limit)
-            .get_results(c)
             .await
     }
 
@@ -1255,6 +2230,30 @@ impl NotificationRepository {
         } else {
             Self::create(c, notification).await
         }
+    }
+
+    pub async fn archive_missing_for_connector_run(
+        c: &mut AsyncPgConnection,
+        connector_id: i32,
+        run_id: i32,
+    ) -> QueryResult<usize> {
+        let now = Utc::now().naive_utc();
+        diesel::update(
+            notifications::table
+                .filter(notifications::connector_id.eq(connector_id))
+                .filter(notifications::archived_at.is_null())
+                .filter(
+                    notifications::last_seen_run_id
+                        .is_null()
+                        .or(notifications::last_seen_run_id.ne(run_id)),
+                ),
+        )
+        .set((
+            notifications::archived_at.eq(Some(now)),
+            notifications::updated_at.eq(now),
+        ))
+        .execute(c)
+        .await
     }
 }
 
@@ -1349,36 +2348,6 @@ impl DashboardRepository {
 
         if let Some(maintainer_id) = maintainer_id {
             query = query.filter(packages::maintainer_id.eq(maintainer_id));
-        }
-
-        query.count().get_result(c).await
-    }
-
-    pub async fn open_work_cards_scoped(
-        c: &mut AsyncPgConnection,
-        source: Option<&str>,
-    ) -> QueryResult<i64> {
-        let mut query = work_cards::table
-            .filter(work_cards::status.ne("done"))
-            .into_boxed();
-
-        if let Some(source) = source {
-            query = query.filter(work_cards::source.eq(source));
-        }
-
-        query.count().get_result(c).await
-    }
-
-    pub async fn unread_notifications_scoped(
-        c: &mut AsyncPgConnection,
-        source: Option<&str>,
-    ) -> QueryResult<i64> {
-        let mut query = notifications::table
-            .filter(notifications::is_read.eq(false))
-            .into_boxed();
-
-        if let Some(source) = source {
-            query = query.filter(notifications::source.eq(source));
         }
 
         query.count().get_result(c).await

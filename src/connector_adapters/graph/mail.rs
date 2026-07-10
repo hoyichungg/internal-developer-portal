@@ -10,6 +10,7 @@ use super::super::shared::{
 };
 use super::super::ConnectorAdapterResult;
 use super::oauth::graph_access_token;
+use super::{fetch_graph_collection, graph_pagination_limits};
 
 #[derive(Deserialize)]
 struct MicrosoftGraphMailConfig {
@@ -27,6 +28,8 @@ struct MicrosoftGraphMailConfig {
     filter: Option<String>,
     orderby: Option<String>,
     top: Option<u64>,
+    max_pages: Option<u64>,
+    max_items: Option<u64>,
     timeout_seconds: Option<u64>,
 }
 
@@ -49,6 +52,8 @@ pub(in crate::connector_adapters) async fn fetch_microsoft_graph_mail_messages(
 
     let messages_url = microsoft_graph_mail_messages_url(&config);
     require_url("messages_url", &messages_url)?;
+    let (max_pages, max_items) =
+        graph_pagination_limits("microsoft_graph_mail", config.max_pages, config.max_items)?;
     let request_url = append_query_params(&messages_url, &graph_mail_query_params(&config));
 
     let client = reqwest::Client::builder()
@@ -64,54 +69,30 @@ pub(in crate::connector_adapters) async fn fetch_microsoft_graph_mail_messages(
         "https://graph.microsoft.com/Mail.Read offline_access",
     )
     .await?;
-    let response = send_graph_mail_request(client.get(&request_url), &access_token.token).await?;
-    let items = graph_mail_items(&response)
+    let collection = fetch_graph_collection(
+        &client,
+        &request_url,
+        &access_token.token,
+        None,
+        "microsoft_graph_mail",
+        max_pages,
+        max_items,
+    )
+    .await?;
+    let snapshot_complete = collection.snapshot_complete;
+    let items = collection
+        .items
         .into_iter()
-        .map(normalize_graph_mail_message)
+        .map(|item| normalize_graph_mail_message(&item))
         .collect::<Vec<_>>();
 
     Ok(ConnectorAdapterResult {
-        payload: Some(json!({ "items": items })),
+        payload: Some(json!({
+            "items": items,
+            "snapshot_complete": snapshot_complete
+        })),
         updated_config: access_token.updated_config,
     })
-}
-
-async fn send_graph_mail_request(
-    request: reqwest::RequestBuilder,
-    token: &str,
-) -> Result<Value, String> {
-    let response = request
-        .bearer_auth(token)
-        .send()
-        .await
-        .map_err(|error| format!("microsoft_graph_mail request failed: {error}"))?;
-    let status = response.status();
-
-    if !status.is_success() {
-        let body = response.text().await.unwrap_or_default();
-        return Err(format!(
-            "microsoft_graph_mail request returned {status}: {body}"
-        ));
-    }
-
-    response
-        .json::<Value>()
-        .await
-        .map_err(|error| format!("microsoft_graph_mail response was not valid JSON: {error}"))
-}
-
-fn graph_mail_items(response: &Value) -> Vec<&Value> {
-    response
-        .get("value")
-        .or_else(|| response.get("items"))
-        .or_else(|| response.get("messages"))
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>()
-        .into_iter()
-        .chain(response.as_array().into_iter().flatten())
-        .collect()
 }
 
 fn normalize_graph_mail_message(item: &Value) -> Value {
@@ -287,4 +268,43 @@ fn graph_mail_query_params(config: &MicrosoftGraphMailConfig) -> Vec<(&'static s
     }
 
     params
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fetch_microsoft_graph_mail_messages;
+    use crate::connector_adapters::shared::test_support::{MockHttpServer, MockResponse};
+    use serde_json::json;
+
+    #[rocket::async_test]
+    async fn follows_graph_mail_next_links_and_honors_max_items() {
+        let server = MockHttpServer::start(vec![
+            MockResponse::json(
+                r#"{"value":[{"id":"mail-1","subject":"First"}],"@odata.nextLink":"{{base_url}}/mail?page=2"}"#,
+            ),
+            MockResponse::json(
+                r#"{"value":[{"id":"mail-2","subject":"Second"},{"id":"mail-3","subject":"Third"}]}"#,
+            ),
+        ]);
+        let config = json!({
+            "adapter": "microsoft_graph_mail",
+            "messages_url": server.url("/mail"),
+            "access_token": "test-token",
+            "received_after": "2026-07-09T00:00:00Z",
+            "max_pages": 5,
+            "max_items": 2
+        });
+
+        let result = fetch_microsoft_graph_mail_messages(&config.to_string())
+            .await
+            .expect("mail pages should load");
+        let payload = result.payload.expect("mail payload");
+        let items = payload["items"].as_array().expect("mail items");
+
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0]["external_id"], "mail-1");
+        assert_eq!(items[1]["external_id"], "mail-2");
+        assert_eq!(payload["snapshot_complete"], false);
+        assert_eq!(server.requests().len(), 2);
+    }
 }

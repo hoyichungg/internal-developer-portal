@@ -13,6 +13,7 @@ import {
   TextInput,
   Title
 } from "@mantine/core";
+import { notifications } from "@mantine/notifications";
 import {
   IconAlertTriangle,
   IconArrowRight,
@@ -35,6 +36,8 @@ import { ViewFrame } from "../../components/ViewFrame";
 import { useAsyncData } from "../../hooks/useAsyncData";
 import { useRefresh } from "../../hooks/useRefresh";
 import type {
+  ApiId,
+  CalendarEvent,
   ConnectorDrillTarget,
   DashboardPriorityItem,
   DateTimeString,
@@ -44,15 +47,23 @@ import type {
   Service,
   ServiceHealthHistory
 } from "../../types/api";
+import { showError } from "../../utils/notifications";
+import {
+  performNotificationAction,
+  snoozeUntilForPreset,
+  type NotificationAction
+} from "../records/notificationActions";
 
 export function DashboardView({
   client,
+  canManageConnectors = true,
   onOpenService,
   onOpenConnector,
   onOpenWorkCard,
   onOpenNotification
 }: {
   client: ApiClient;
+  canManageConnectors?: boolean;
   onOpenService: (serviceId: string | number) => void;
   onOpenConnector: (target: ConnectorDrillTarget) => void;
   onOpenWorkCard: (workCardId: string | number) => void;
@@ -62,10 +73,44 @@ export function DashboardView({
     () => client.get<MeOverviewResponse>("/me/overview"),
     [client]
   );
+  const [pendingNotificationAction, setPendingNotificationAction] = useState<{
+    notificationId: ApiId;
+    action: QuickNotificationAction;
+  } | null>(null);
+  const [notificationActionError, setNotificationActionError] = useState<Error | null>(null);
 
   useRefresh(actions.reload);
 
   const overview = data.value;
+
+  async function runNotificationAction(
+    notification: Notification,
+    action: QuickNotificationAction
+  ) {
+    if (pendingNotificationAction) {
+      return;
+    }
+
+    setPendingNotificationAction({ notificationId: notification.id, action });
+    setNotificationActionError(null);
+    try {
+      await performNotificationAction(client, notification.id, action, {
+        snoozedUntil: action === "snooze" ? snoozeUntilForPreset("one-hour") : undefined
+      });
+      await actions.reload();
+      notifications.show({
+        title: quickActionSuccessTitle(action),
+        message: notification.title,
+        color: "teal"
+      });
+    } catch (error) {
+      const normalized = error instanceof Error ? error : new Error(String(error));
+      setNotificationActionError(normalized);
+      showError(normalized);
+    } finally {
+      setPendingNotificationAction(null);
+    }
+  }
 
   return (
     <ViewFrame
@@ -77,21 +122,35 @@ export function DashboardView({
     >
       {overview && (
         <Stack gap="lg">
-          <SimpleGrid cols={{ base: 1, sm: 2, lg: 5 }}>
+          <SimpleGrid cols={{ base: 1, sm: 2, lg: canManageConnectors ? 6 : 5 }}>
             <Metric label="My services" value={overview.summary.services} />
-            <Metric label="Today first" value={attentionCount(overview)} />
+            <Metric
+              label="Meetings"
+              value={todayCalendarEvents(overview.today_calendar_events).length}
+            />
+            <Metric
+              label="Today first"
+              value={attentionCount(overview, canManageConnectors)}
+            />
             <Metric label="Open work" value={overview.summary.open_work_cards} />
             <Metric label="Messages" value={overview.summary.unread_notifications} />
-            <Metric label="Failed runs" value={overview.summary.failed_connector_runs} />
+            {canManageConnectors && (
+              <Metric label="Failed runs" value={overview.summary.failed_connector_runs} />
+            )}
           </SimpleGrid>
 
           <OperationsWarning operations={overview.operations} />
+
+          <DataPanel title="Today's meetings">
+            <CalendarEventList events={overview.today_calendar_events} />
+          </DataPanel>
 
           <Grid>
             <Grid.Col span={{ base: 12, lg: 7 }}>
               <DataPanel title="Daily workbench">
                 <DailyWorkbench
                   overview={overview}
+                  showConnectorOperations={canManageConnectors}
                   onOpenService={onOpenService}
                   onOpenConnector={onOpenConnector}
                   onOpenWorkCard={onOpenWorkCard}
@@ -113,6 +172,9 @@ export function DashboardView({
                 <MessageList
                   notifications={overview.unread_notifications}
                   onOpenNotification={onOpenNotification}
+                  onAction={runNotificationAction}
+                  pendingAction={pendingNotificationAction}
+                  actionError={notificationActionError}
                 />
               </DataPanel>
             </Grid.Col>
@@ -181,22 +243,24 @@ export function DashboardView({
           </DataPanel>
 
           <Grid>
-            <Grid.Col span={{ base: 12, lg: 6 }}>
-              <DataPanel title="Failed connector runs">
-                <DataTable
-                  rows={overview.failed_connector_runs}
-                  columns={[
-                    ["source", "Source"],
-                    ["target", "Target"],
-                    ["status", "Status", StatusBadge],
-                    ["failure_count", "Failed"],
-                    ["started_at", "Started", DateCell]
-                  ]}
-                />
-              </DataPanel>
-            </Grid.Col>
+            {canManageConnectors && (
+              <Grid.Col span={{ base: 12, lg: 6 }}>
+                <DataPanel title="Failed connector runs">
+                  <DataTable
+                    rows={overview.failed_connector_runs}
+                    columns={[
+                      ["source", "Source"],
+                      ["target", "Target"],
+                      ["status", "Status", StatusBadge],
+                      ["failure_count", "Failed"],
+                      ["started_at", "Started", DateCell]
+                    ]}
+                  />
+                </DataPanel>
+              </Grid.Col>
+            )}
 
-            <Grid.Col span={{ base: 12, lg: 6 }}>
+            <Grid.Col span={{ base: 12, lg: canManageConnectors ? 6 : 12 }}>
               <DataPanel title="Packages">
                 <DataTable
                   rows={overview.packages}
@@ -214,6 +278,81 @@ export function DashboardView({
       )}
     </ViewFrame>
   );
+}
+
+function CalendarEventList({ events }: { events?: CalendarEvent[] }) {
+  const today = todayCalendarEvents(events);
+  if (today.length === 0) {
+    return <EmptyText>No meetings today</EmptyText>;
+  }
+
+  return (
+    <Stack gap={0} className="calendarEventList">
+      {today.map((event) => {
+        const actionUrl = event.join_url || event.web_url;
+        return (
+          <Group
+            key={String(event.id)}
+            justify="space-between"
+            align="center"
+            wrap="nowrap"
+            className="calendarEventRow"
+          >
+            <Group gap="md" wrap="nowrap" className="calendarEventIdentity">
+              <Box className="calendarEventTime">
+                <Text fw={800}>{event.is_all_day ? "All day" : formatMeetingTime(event.starts_at)}</Text>
+                {!event.is_all_day && (
+                  <Text size="xs" c="dimmed">
+                    {formatMeetingTime(event.ends_at)}
+                  </Text>
+                )}
+              </Box>
+              <Box className="calendarEventCopy">
+                <Text fw={760}>{event.title}</Text>
+                <Text size="sm" c="dimmed" lineClamp={1}>
+                  {[event.organizer, event.location, event.time_zone].filter(Boolean).join(" - ") ||
+                    event.source}
+                </Text>
+              </Box>
+            </Group>
+            {actionUrl && (
+              <Button
+                component="a"
+                href={actionUrl}
+                target="_blank"
+                rel="noreferrer"
+                size="compact-sm"
+                variant="light"
+                rightSection={<IconExternalLink size={14} />}
+              >
+                {event.join_url ? "Join" : "Open"}
+              </Button>
+            )}
+          </Group>
+        );
+      })}
+    </Stack>
+  );
+}
+
+function todayCalendarEvents(events?: CalendarEvent[]): CalendarEvent[] {
+  const now = new Date();
+  return (events || []).filter((event) => {
+    const startsAt = new Date(event.starts_at);
+    return (
+      Number.isFinite(startsAt.getTime()) &&
+      startsAt.getFullYear() === now.getFullYear() &&
+      startsAt.getMonth() === now.getMonth() &&
+      startsAt.getDate() === now.getDate()
+    );
+  });
+}
+
+function formatMeetingTime(value: DateTimeString): string {
+  const date = new Date(value);
+  return Number.isFinite(date.getTime())
+    ? date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+    : value;
 }
 
 type WorkbenchFilter =
@@ -257,12 +396,14 @@ const workbenchSorts: { label: string; value: WorkbenchSort }[] = [
 
 function DailyWorkbench({
   overview,
+  showConnectorOperations,
   onOpenService,
   onOpenConnector,
   onOpenWorkCard,
   onOpenNotification
 }: {
   overview: MeOverviewResponse;
+  showConnectorOperations: boolean;
   onOpenService: (serviceId: string | number) => void;
   onOpenConnector: (target: ConnectorDrillTarget) => void;
   onOpenWorkCard: (workCardId: string | number) => void;
@@ -271,7 +412,24 @@ function DailyWorkbench({
   const [kindFilter, setKindFilter] = useState<WorkbenchFilter>("all");
   const [sortMode, setSortMode] = useState<WorkbenchSort>("impact");
   const [query, setQuery] = useState("");
-  const allItems = useMemo(() => buildWorkbenchItems(overview), [overview]);
+  const allItems = useMemo(
+    () =>
+      buildWorkbenchItems(overview).filter(
+        (item) =>
+          showConnectorOperations ||
+          (item.kind !== "connector_run" && item.kind !== "operations")
+      ),
+    [overview, showConnectorOperations]
+  );
+  const availableFilters = useMemo(
+    () =>
+      showConnectorOperations
+        ? workbenchFilters
+        : workbenchFilters.filter(
+            (item) => item.value !== "connector_run" && item.value !== "operations"
+          ),
+    [showConnectorOperations]
+  );
   const visibleItems = useMemo(
     () => sortWorkbenchItems(filterWorkbenchItems(allItems, kindFilter, query), sortMode),
     [allItems, kindFilter, query, sortMode]
@@ -293,7 +451,7 @@ function DailyWorkbench({
             aria-label="Filter workbench"
             size="sm"
             value={kindFilter}
-            data={workbenchFilters}
+            data={availableFilters}
             onChange={(value) => setKindFilter(value as WorkbenchFilter)}
             className="workbenchFilter"
           />
@@ -558,17 +716,37 @@ function TrendStat({ label, value, tone }: { label: string; value: number; tone?
 
 function MessageList({
   notifications,
-  onOpenNotification
+  onOpenNotification,
+  onAction,
+  pendingAction,
+  actionError
 }: {
   notifications?: Notification[];
   onOpenNotification: (notificationId: string | number) => void;
+  onAction: (notification: Notification, action: QuickNotificationAction) => void;
+  pendingAction: { notificationId: ApiId; action: QuickNotificationAction } | null;
+  actionError: Error | null;
 }) {
   if (!notifications || notifications.length === 0) {
-    return <EmptyText>No unread messages</EmptyText>;
+    return (
+      <Stack gap="sm">
+        {actionError && (
+          <Alert color="red" title="Notification action failed">
+            {actionError.message}
+          </Alert>
+        )}
+        <EmptyText>No unread messages</EmptyText>
+      </Stack>
+    );
   }
 
   return (
     <Stack gap={0} className="messageList">
+      {actionError && (
+        <Alert color="red" title="Notification action failed" mb="sm">
+          {actionError.message}
+        </Alert>
+      )}
       {notifications.map((notification) => (
         <Group
           key={notification.id}
@@ -594,7 +772,39 @@ function MessageList({
             )}
           </Box>
 
-          <Group gap="xs" wrap="nowrap" className="messageActions">
+          <Group gap="xs" wrap="wrap" justify="flex-end" className="messageActions">
+            <Button
+              aria-label={`Mark ${notification.title} read`}
+              size="compact-sm"
+              variant="light"
+              loading={isPendingNotificationAction(pendingAction, notification.id, "read")}
+              disabled={isNotificationActionLocked(pendingAction)}
+              onClick={() => onAction(notification, "read")}
+            >
+              Read
+            </Button>
+            <Button
+              aria-label={`Snooze ${notification.title} for 1 hour`}
+              size="compact-sm"
+              variant="light"
+              color="blue"
+              loading={isPendingNotificationAction(pendingAction, notification.id, "snooze")}
+              disabled={isNotificationActionLocked(pendingAction)}
+              onClick={() => onAction(notification, "snooze")}
+            >
+              1h
+            </Button>
+            <Button
+              aria-label={`Dismiss ${notification.title}`}
+              size="compact-sm"
+              variant="light"
+              color="orange"
+              loading={isPendingNotificationAction(pendingAction, notification.id, "dismiss")}
+              disabled={isNotificationActionLocked(pendingAction)}
+              onClick={() => onAction(notification, "dismiss")}
+            >
+              Dismiss
+            </Button>
             <Button
               size="compact-sm"
               variant="subtle"
@@ -621,6 +831,37 @@ function MessageList({
       ))}
     </Stack>
   );
+}
+
+type QuickNotificationAction = Extract<NotificationAction, "read" | "snooze" | "dismiss">;
+
+function isPendingNotificationAction(
+  pending: { notificationId: ApiId; action: QuickNotificationAction } | null,
+  notificationId: ApiId,
+  action: QuickNotificationAction
+): boolean {
+  return (
+    pending !== null &&
+    String(pending.notificationId) === String(notificationId) &&
+    pending.action === action
+  );
+}
+
+function isNotificationActionLocked(
+  pending: { notificationId: ApiId; action: QuickNotificationAction } | null
+): boolean {
+  return pending !== null;
+}
+
+function quickActionSuccessTitle(action: QuickNotificationAction): string {
+  switch (action) {
+    case "read":
+      return "Marked read";
+    case "snooze":
+      return "Notification snoozed";
+    case "dismiss":
+      return "Notification dismissed";
+  }
 }
 
 type AttentionAction =
@@ -732,12 +973,19 @@ function drillTarget(
   };
 }
 
-function attentionCount(overview: MeOverviewResponse): number {
+function attentionCount(overview: MeOverviewResponse, includeConnectorItems: boolean): number {
   if (Array.isArray(overview.priority_items)) {
-    return overview.priority_items.length;
+    return overview.priority_items.filter(
+      (item) =>
+        includeConnectorItems ||
+        (item.kind !== "connector_run" && item.kind !== "worker" && item.kind !== "health_data")
+    ).length;
   }
 
-  return overview.summary.unhealthy_services + overview.summary.failed_connector_runs;
+  return (
+    overview.summary.unhealthy_services +
+    (includeConnectorItems ? overview.summary.failed_connector_runs : 0)
+  );
 }
 
 function buildAttentionItems(overview: MeOverviewResponse): DashboardPriorityItem[] {

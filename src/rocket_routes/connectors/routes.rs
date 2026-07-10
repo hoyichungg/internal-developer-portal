@@ -1,32 +1,35 @@
 use chrono::Utc;
+use diesel_async::AsyncConnection;
 use rocket::serde::json::Json;
 use rocket_db_pools::Connection;
 use serde_json::json;
 
 use crate::api::{created, ok, ApiError, ApiResult, CreatedApiResult};
-use crate::auth::{require_admin, AuthenticatedUser};
+use crate::auth::{record_access_scope, require_admin, AuthenticatedUser};
 use crate::crypto::{encrypt_connector_config, preserve_redacted_connector_config};
 use crate::models::{
-    Connector, ConnectorConfigUpdate, ConnectorRun, ConnectorUpdate, NewConnector,
+    Connector, ConnectorConfigUpdate, ConnectorRun, ConnectorScopeUpdate, ConnectorUpdate,
+    NewConnector,
 };
 use crate::repositories::{
     ConnectorConfigRepository, ConnectorRepository, ConnectorRunItemErrorRepository,
     ConnectorRunItemRepository, ConnectorRunRepository, ConnectorWorkerRepository,
-    MaintenanceRunRepository, ServiceHealthCheckRepository,
+    MaintainerRepository, MaintenanceRunRepository, ServiceHealthCheckRepository, UserRepository,
 };
 use crate::rocket_routes::audit_logs::record_audit_log;
 use crate::rocket_routes::connectors::runtime::{
-    create_queued_run, create_running_run, execute_claimed_connector_run,
-    execute_notification_items, execute_service_health_items, execute_work_card_items,
-    finish_connector_run,
+    create_queued_retry_run, create_queued_run, create_running_run, execute_calendar_event_items,
+    execute_claimed_connector_run, execute_notification_items, execute_service_health_items,
+    execute_work_card_items, finish_connector_run, settle_cancelled_connector_run,
 };
 use crate::rocket_routes::connectors::shared::{
     validate_source, validate_target, validation_error, validation_error_dynamic,
 };
 use crate::rocket_routes::connectors::types::{
-    ConnectorConfigResponse, ConnectorOperationsResponse, ConnectorRunDetail,
-    ConnectorRunExecutionResponse, ConnectorWorkerStatus, ManualConnectorRunRequest,
-    NotificationImportRequest, ServiceHealthImportRequest, WorkCardImportRequest,
+    CalendarEventImportRequest, ConnectorConfigResponse, ConnectorOperationsResponse,
+    ConnectorRunDetail, ConnectorRunExecutionResponse, ConnectorWorkerStatus,
+    ManualConnectorRunRequest, NotificationImportRequest, ServiceHealthImportRequest,
+    WorkCardImportRequest,
 };
 use crate::rocket_routes::connectors::worker::connector_worker_stale_after_seconds;
 use crate::rocket_routes::DbConn;
@@ -35,9 +38,10 @@ use crate::validation::validate_request;
 #[rocket::get("/connectors")]
 pub async fn get_connectors(
     mut db: Connection<DbConn>,
-    _auth: AuthenticatedUser,
+    auth: AuthenticatedUser,
 ) -> ApiResult<Vec<Connector>> {
-    let connectors = ConnectorRepository::find_multiple(&mut db, 100).await?;
+    let access = record_access_scope(&mut db, &auth).await?;
+    let connectors = ConnectorRepository::find_multiple_for_access(&mut db, 100, &access).await?;
 
     ok(connectors)
 }
@@ -68,11 +72,15 @@ pub async fn get_connector_operations(
 #[rocket::get("/connectors/<source>")]
 pub async fn view_connector(
     mut db: Connection<DbConn>,
-    _auth: AuthenticatedUser,
+    auth: AuthenticatedUser,
     source: String,
 ) -> ApiResult<Connector> {
     let source = validate_source(source)?;
     let connector = ConnectorRepository::find_by_source(&mut db, &source).await?;
+    let access = record_access_scope(&mut db, &auth).await?;
+    if !access.allows(connector.owner_user_id, connector.maintainer_id) {
+        return Err(ApiError::NotFound);
+    }
 
     ok(connector)
 }
@@ -85,6 +93,23 @@ pub async fn create_connector(
 ) -> CreatedApiResult<Connector> {
     require_admin(&auth)?;
     let connector = validate_request(connector.into_inner())?;
+    match connector.scope_type.as_str() {
+        "user" => {
+            UserRepository::find(
+                &mut db,
+                connector.owner_user_id.ok_or(ApiError::BadRequest)?,
+            )
+            .await?;
+        }
+        "maintainer" => {
+            MaintainerRepository::find(
+                &mut db,
+                connector.maintainer_id.ok_or(ApiError::BadRequest)?,
+            )
+            .await?;
+        }
+        _ => {}
+    }
     let connector = ConnectorRepository::create(&mut db, connector).await?;
     record_audit_log(
         &mut db,
@@ -95,6 +120,9 @@ pub async fn create_connector(
         json!({
             "kind": &connector.kind,
             "status": &connector.status,
+            "scope_type": &connector.scope_type,
+            "owner_user_id": connector.owner_user_id,
+            "maintainer_id": connector.maintainer_id,
         }),
     )
     .await?;
@@ -122,6 +150,60 @@ pub async fn update_connector(
         json!({
             "kind": &connector.kind,
             "status": &connector.status,
+        }),
+    )
+    .await?;
+
+    ok(connector)
+}
+
+#[rocket::put("/connectors/<source>/scope", format = "json", data = "<scope>")]
+pub async fn update_connector_scope(
+    mut db: Connection<DbConn>,
+    auth: AuthenticatedUser,
+    source: String,
+    scope: Json<ConnectorScopeUpdate>,
+) -> ApiResult<Connector> {
+    require_admin(&auth)?;
+    let source = validate_source(source)?;
+    let scope = validate_request(scope.into_inner())?;
+    match scope.scope_type.as_str() {
+        "user" => {
+            UserRepository::find(&mut db, scope.owner_user_id.ok_or(ApiError::BadRequest)?).await?;
+        }
+        "maintainer" => {
+            MaintainerRepository::find(&mut db, scope.maintainer_id.ok_or(ApiError::BadRequest)?)
+                .await?;
+        }
+        _ => {}
+    }
+
+    let previous = ConnectorRepository::find_by_source(&mut db, &source).await?;
+    let connector = ConnectorRepository::update_scope(
+        &mut db,
+        &source,
+        &scope.scope_type,
+        scope.owner_user_id,
+        scope.maintainer_id,
+    )
+    .await?;
+    record_audit_log(
+        &mut db,
+        &auth,
+        "update_scope",
+        "connector",
+        &connector.source,
+        json!({
+            "previous": {
+                "scope_type": previous.scope_type,
+                "owner_user_id": previous.owner_user_id,
+                "maintainer_id": previous.maintainer_id,
+            },
+            "current": {
+                "scope_type": &connector.scope_type,
+                "owner_user_id": connector.owner_user_id,
+                "maintainer_id": connector.maintainer_id,
+            }
         }),
     )
     .await?;
@@ -251,10 +333,10 @@ pub async fn retry_connector_run(
     require_admin(&auth)?;
     let original = ConnectorRunRepository::find(&mut db, id).await?;
 
-    if !matches!(original.status.as_str(), "failed" | "partial_success") {
+    if !connector_run_is_retryable(&original.status) {
         return Err(validation_error(
             "status",
-            "must be failed or partial_success",
+            "must be failed, partial_success, or cancelled",
         ));
     }
 
@@ -270,12 +352,12 @@ pub async fn retry_connector_run(
         }
     }
 
-    let run = create_queued_run(
+    let run = create_queued_retry_run(
         &mut db,
         &original.source,
         &original.target,
-        "retry",
         original.payload.clone(),
+        original.id,
     )
     .await?;
     record_audit_log(
@@ -303,6 +385,58 @@ pub async fn retry_connector_run(
         errors: Vec::new(),
         item_errors: Vec::new(),
     })
+}
+
+fn connector_run_is_retryable(status: &str) -> bool {
+    matches!(status, "failed" | "partial_success" | "cancelled")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::connector_run_is_retryable;
+
+    #[test]
+    fn cancelled_runs_require_an_explicit_retry() {
+        for status in ["failed", "partial_success", "cancelled"] {
+            assert!(connector_run_is_retryable(status));
+        }
+        for status in ["queued", "running", "success"] {
+            assert!(!connector_run_is_retryable(status));
+        }
+    }
+}
+
+#[rocket::post("/connectors/runs/<id>/cancel")]
+pub async fn cancel_connector_run(
+    mut db: Connection<DbConn>,
+    auth: AuthenticatedUser,
+    id: i32,
+) -> ApiResult<ConnectorRun> {
+    require_admin(&auth)?;
+    let run = ConnectorRunRepository::find(&mut db, id).await?;
+    if !matches!(run.status.as_str(), "queued" | "running") {
+        return Err(validation_error("status", "must be queued or running"));
+    }
+
+    let run = ConnectorRunRepository::request_cancel(&mut db, id)
+        .await?
+        .ok_or_else(|| validation_error("status", "must still be queued or running"))?;
+    record_audit_log(
+        &mut db,
+        &auth,
+        "cancel",
+        "connector_run",
+        run.id,
+        json!({
+            "source": &run.source,
+            "target": &run.target,
+            "status": &run.status,
+            "cancel_requested_at": run.cancel_requested_at,
+        }),
+    )
+    .await?;
+
+    ok(run)
 }
 
 #[rocket::post("/connectors/<source>/runs", format = "json", data = "<request>")]
@@ -394,6 +528,70 @@ pub async fn run_connector(
 }
 
 #[rocket::post(
+    "/connectors/<source>/calendar-events/import",
+    format = "json",
+    data = "<request>"
+)]
+pub async fn import_calendar_events(
+    mut db: Connection<DbConn>,
+    auth: AuthenticatedUser,
+    source: String,
+    request: Json<CalendarEventImportRequest>,
+) -> CreatedApiResult<ConnectorRunExecutionResponse> {
+    require_admin(&auth)?;
+    let source = validate_source(source)?;
+    let run = create_running_run(&mut db, &source, "calendar_events", "import", None).await?;
+    let run_id = run.id;
+    let request = request.into_inner();
+    let transaction_source = source.clone();
+    let transaction_result = db
+        .transaction::<ConnectorRunExecutionResponse, ApiError, _>(|conn| {
+            Box::pin(async move {
+                let execution = execute_calendar_event_items(
+                    conn,
+                    &transaction_source,
+                    run.id,
+                    request.items,
+                    request.snapshot_complete,
+                )
+                .await?;
+                finish_connector_run(conn, &transaction_source, "calendar_events", run, execution)
+                    .await
+            })
+        })
+        .await;
+    let response = match transaction_result {
+        Ok(response) => response,
+        Err(error) => {
+            if ConnectorRunRepository::cancellation_requested(&mut db, run_id).await? {
+                settle_cancelled_connector_run(&mut db, run_id).await?
+            } else {
+                return Err(error);
+            }
+        }
+    };
+    record_audit_log(
+        &mut db,
+        &auth,
+        "import",
+        "connector_run",
+        response.run.id,
+        json!({
+            "source": &response.source,
+            "target": &response.target,
+            "status": &response.run.status,
+            "success_count": response.run.success_count,
+            "failure_count": response.run.failure_count,
+            "snapshot_complete": response.run.snapshot_complete,
+            "archived_count": response.run.archived_count,
+        }),
+    )
+    .await?;
+
+    created(response)
+}
+
+#[rocket::post(
     "/connectors/<source>/work-cards/import",
     format = "json",
     data = "<request>"
@@ -407,8 +605,36 @@ pub async fn import_work_cards(
     require_admin(&auth)?;
     let source = validate_source(source)?;
     let run = create_running_run(&mut db, &source, "work_cards", "import", None).await?;
-    let execution = execute_work_card_items(&mut db, &source, request.into_inner().items).await?;
-    let response = finish_connector_run(&mut db, &source, "work_cards", run, execution).await?;
+    let run_id = run.id;
+    let request = request.into_inner();
+    let items = request.items;
+    let snapshot_complete = request.snapshot_complete;
+    let transaction_source = source.clone();
+    let transaction_result = db
+        .transaction::<ConnectorRunExecutionResponse, ApiError, _>(|conn| {
+            Box::pin(async move {
+                let execution = execute_work_card_items(
+                    conn,
+                    &transaction_source,
+                    run.id,
+                    items,
+                    snapshot_complete,
+                )
+                .await?;
+                finish_connector_run(conn, &transaction_source, "work_cards", run, execution).await
+            })
+        })
+        .await;
+    let response = match transaction_result {
+        Ok(response) => response,
+        Err(error) => {
+            if ConnectorRunRepository::cancellation_requested(&mut db, run_id).await? {
+                settle_cancelled_connector_run(&mut db, run_id).await?
+            } else {
+                return Err(error);
+            }
+        }
+    };
     record_audit_log(
         &mut db,
         &auth,
@@ -421,6 +647,8 @@ pub async fn import_work_cards(
             "status": &response.run.status,
             "success_count": response.run.success_count,
             "failure_count": response.run.failure_count,
+            "snapshot_complete": response.run.snapshot_complete,
+            "archived_count": response.run.archived_count,
         }),
     )
     .await?;
@@ -442,9 +670,37 @@ pub async fn import_notifications(
     require_admin(&auth)?;
     let source = validate_source(source)?;
     let run = create_running_run(&mut db, &source, "notifications", "import", None).await?;
-    let execution =
-        execute_notification_items(&mut db, &source, request.into_inner().items).await?;
-    let response = finish_connector_run(&mut db, &source, "notifications", run, execution).await?;
+    let run_id = run.id;
+    let request = request.into_inner();
+    let items = request.items;
+    let snapshot_complete = request.snapshot_complete;
+    let transaction_source = source.clone();
+    let transaction_result = db
+        .transaction::<ConnectorRunExecutionResponse, ApiError, _>(|conn| {
+            Box::pin(async move {
+                let execution = execute_notification_items(
+                    conn,
+                    &transaction_source,
+                    run.id,
+                    items,
+                    snapshot_complete,
+                )
+                .await?;
+                finish_connector_run(conn, &transaction_source, "notifications", run, execution)
+                    .await
+            })
+        })
+        .await;
+    let response = match transaction_result {
+        Ok(response) => response,
+        Err(error) => {
+            if ConnectorRunRepository::cancellation_requested(&mut db, run_id).await? {
+                settle_cancelled_connector_run(&mut db, run_id).await?
+            } else {
+                return Err(error);
+            }
+        }
+    };
     record_audit_log(
         &mut db,
         &auth,
@@ -457,6 +713,8 @@ pub async fn import_notifications(
             "status": &response.run.status,
             "success_count": response.run.success_count,
             "failure_count": response.run.failure_count,
+            "snapshot_complete": response.run.snapshot_complete,
+            "archived_count": response.run.archived_count,
         }),
     )
     .await?;
@@ -478,9 +736,29 @@ pub async fn import_service_health(
     require_admin(&auth)?;
     let source = validate_source(source)?;
     let run = create_running_run(&mut db, &source, "service_health", "import", None).await?;
-    let execution =
-        execute_service_health_items(&mut db, &source, run.id, request.into_inner().items).await?;
-    let response = finish_connector_run(&mut db, &source, "service_health", run, execution).await?;
+    let run_id = run.id;
+    let items = request.into_inner().items;
+    let transaction_source = source.clone();
+    let transaction_result = db
+        .transaction::<ConnectorRunExecutionResponse, ApiError, _>(|conn| {
+            Box::pin(async move {
+                let execution =
+                    execute_service_health_items(conn, &transaction_source, run.id, items).await?;
+                finish_connector_run(conn, &transaction_source, "service_health", run, execution)
+                    .await
+            })
+        })
+        .await;
+    let response = match transaction_result {
+        Ok(response) => response,
+        Err(error) => {
+            if ConnectorRunRepository::cancellation_requested(&mut db, run_id).await? {
+                settle_cancelled_connector_run(&mut db, run_id).await?
+            } else {
+                return Err(error);
+            }
+        }
+    };
     record_audit_log(
         &mut db,
         &auth,

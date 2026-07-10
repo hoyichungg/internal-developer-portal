@@ -182,7 +182,12 @@ impl Validate for ManualConnectorRunRequest {
                 &mut errors,
                 "target",
                 target,
-                &["service_health", "work_cards", "notifications"],
+                &[
+                    "service_health",
+                    "work_cards",
+                    "notifications",
+                    "calendar_events",
+                ],
             );
         }
 
@@ -191,9 +196,38 @@ impl Validate for ManualConnectorRunRequest {
 }
 
 #[derive(Deserialize, Serialize, ToSchema)]
+pub struct CalendarEventImportRequest {
+    /// Calendar events to import. Items are upserted by `(source, external_id)`.
+    pub items: Vec<CalendarEventImportItem>,
+    /// `true` only when `items` is the complete configured calendar window.
+    #[serde(default)]
+    pub snapshot_complete: Option<bool>,
+}
+
+#[derive(Deserialize, Serialize, ToSchema)]
+pub struct CalendarEventImportItem {
+    pub external_id: String,
+    pub title: String,
+    pub body: Option<String>,
+    pub organizer: Option<String>,
+    pub location: Option<String>,
+    pub starts_at: Option<NaiveDateTime>,
+    pub ends_at: Option<NaiveDateTime>,
+    pub time_zone: Option<String>,
+    pub is_all_day: bool,
+    pub is_cancelled: bool,
+    pub web_url: Option<String>,
+    pub join_url: Option<String>,
+}
+
+#[derive(Deserialize, Serialize, ToSchema)]
 pub struct WorkCardImportRequest {
     /// Work card records to import. Items are upserted by `(source, external_id)`.
     pub items: Vec<WorkCardImportItem>,
+    /// `true` only when `items` is the complete source snapshot. Missing records are archived
+    /// after every item imports successfully. Omitted/false payloads never archive records.
+    #[serde(default)]
+    pub snapshot_complete: Option<bool>,
 }
 
 #[derive(Deserialize, Serialize, ToSchema)]
@@ -218,6 +252,10 @@ pub struct WorkCardImportItem {
 pub struct NotificationImportRequest {
     /// Notification records to import. Items are upserted by `(source, external_id)`.
     pub items: Vec<NotificationImportItem>,
+    /// `true` only when `items` is the complete source snapshot. Missing records are archived
+    /// after every item imports successfully. Omitted/false payloads never archive records.
+    #[serde(default)]
+    pub snapshot_complete: Option<bool>,
 }
 
 #[derive(Deserialize, Serialize, ToSchema)]
@@ -272,6 +310,8 @@ pub(crate) struct ConnectorExecution {
     pub(crate) data: Vec<Value>,
     pub(crate) items: Vec<ConnectorRunItemDraft>,
     pub(crate) errors: Vec<ConnectorImportError>,
+    pub(crate) snapshot_complete: Option<bool>,
+    pub(crate) archived_count: usize,
 }
 
 pub(crate) struct ConnectorRunItemDraft {

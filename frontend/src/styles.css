@@ -203,6 +203,35 @@ body {
   transform: translateY(-1px);
 }
 
+.calendarEventList {
+  border-top: 1px solid var(--mantine-color-default-border);
+}
+
+.calendarEventRow {
+  min-height: 72px;
+  padding-block: 10px;
+  border-bottom: 1px solid var(--mantine-color-default-border);
+}
+
+.calendarEventIdentity,
+.calendarEventCopy {
+  min-width: 0;
+}
+
+.calendarEventIdentity {
+  flex: 1 1 auto;
+}
+
+.calendarEventTime {
+  flex: 0 0 84px;
+  padding-left: 10px;
+  border-left: 3px solid var(--mantine-color-blue-6);
+}
+
+.calendarEventCopy {
+  flex: 1 1 auto;
+}
+
 .workbenchSurface {
   min-width: 0;
 }

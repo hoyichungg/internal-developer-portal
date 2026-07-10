@@ -22,7 +22,7 @@ export function LoginScreen({
 }: {
   onLogin: (credentials: LoginRequest) => Promise<void>;
 }) {
-  const [username, setUsername] = useState("admin");
+  const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");

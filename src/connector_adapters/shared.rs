@@ -209,3 +209,162 @@ pub(super) fn normalize_naive_datetime(value: &str) -> Option<String> {
 
     None
 }
+
+#[cfg(test)]
+pub(super) mod test_support {
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::sync::{Arc, Mutex};
+    use std::thread::{self, JoinHandle};
+    use std::time::{Duration, Instant};
+
+    pub(crate) struct MockResponse {
+        status: u16,
+        body: String,
+    }
+
+    impl MockResponse {
+        pub(crate) fn json(body: impl Into<String>) -> Self {
+            Self {
+                status: 200,
+                body: body.into(),
+            }
+        }
+
+        pub(crate) fn with_status(status: u16, body: impl Into<String>) -> Self {
+            Self {
+                status,
+                body: body.into(),
+            }
+        }
+    }
+
+    pub(crate) struct MockHttpServer {
+        base_url: String,
+        requests: Arc<Mutex<Vec<String>>>,
+        handle: Option<JoinHandle<()>>,
+    }
+
+    impl MockHttpServer {
+        pub(crate) fn start(responses: Vec<MockResponse>) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock HTTP server");
+            listener
+                .set_nonblocking(true)
+                .expect("set mock listener nonblocking");
+            let base_url = format!(
+                "http://{}",
+                listener.local_addr().expect("read mock server address")
+            );
+            let response_base_url = base_url.clone();
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let thread_requests = Arc::clone(&requests);
+            let handle = thread::spawn(move || {
+                for response in responses {
+                    let deadline = Instant::now() + Duration::from_secs(3);
+                    let mut stream = loop {
+                        match listener.accept() {
+                            Ok((stream, _)) => break stream,
+                            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                                if Instant::now() >= deadline {
+                                    return;
+                                }
+                                thread::sleep(Duration::from_millis(5));
+                            }
+                            Err(_) => return,
+                        }
+                    };
+
+                    let Ok(request) = read_request(&mut stream) else {
+                        return;
+                    };
+                    thread_requests
+                        .lock()
+                        .expect("lock mock requests")
+                        .push(request);
+
+                    let body = response.body.replace("{{base_url}}", &response_base_url);
+                    let reason = match response.status {
+                        200 => "OK",
+                        400 => "Bad Request",
+                        401 => "Unauthorized",
+                        403 => "Forbidden",
+                        404 => "Not Found",
+                        429 => "Too Many Requests",
+                        500 => "Internal Server Error",
+                        503 => "Service Unavailable",
+                        _ => "Mock Response",
+                    };
+                    let headers = format!(
+                        "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        response.status,
+                        reason,
+                        body.len()
+                    );
+                    if stream.write_all(headers.as_bytes()).is_err() {
+                        return;
+                    }
+                    if stream.write_all(body.as_bytes()).is_err() {
+                        return;
+                    }
+                }
+            });
+
+            Self {
+                base_url,
+                requests,
+                handle: Some(handle),
+            }
+        }
+
+        pub(crate) fn url(&self, path: &str) -> String {
+            format!("{}{}", self.base_url, path)
+        }
+
+        pub(crate) fn requests(&self) -> Vec<String> {
+            self.requests.lock().expect("lock mock requests").clone()
+        }
+    }
+
+    impl Drop for MockHttpServer {
+        fn drop(&mut self) {
+            if let Some(handle) = self.handle.take() {
+                let _ = handle.join();
+            }
+        }
+    }
+
+    fn read_request(stream: &mut TcpStream) -> std::io::Result<String> {
+        stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+        let mut bytes = Vec::new();
+        let mut buffer = [0_u8; 4_096];
+
+        loop {
+            let read = stream.read(&mut buffer)?;
+            if read == 0 {
+                break;
+            }
+            bytes.extend_from_slice(&buffer[..read]);
+
+            let Some(header_end) = bytes.windows(4).position(|window| window == b"\r\n\r\n") else {
+                continue;
+            };
+            let header_size = header_end + 4;
+            let headers = String::from_utf8_lossy(&bytes[..header_size]);
+            let content_length = headers
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().ok())
+                        .flatten()
+                })
+                .unwrap_or(0);
+
+            if bytes.len() >= header_size + content_length {
+                break;
+            }
+        }
+
+        Ok(String::from_utf8_lossy(&bytes).into_owned())
+    }
+}

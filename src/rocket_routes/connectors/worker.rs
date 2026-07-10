@@ -1,7 +1,12 @@
 use chrono::{NaiveDateTime, Utc};
-use diesel_async::{AsyncConnection, AsyncPgConnection};
+use diesel::sql_types::Text;
+use diesel::{sql_query, QueryableByName};
+use diesel_async::{AsyncConnection, AsyncPgConnection, RunQueryDsl};
 use serde_json::json;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration as StdDuration, Instant};
+use tokio::sync::watch;
 
 use crate::api::ApiError;
 use crate::models::{
@@ -13,7 +18,9 @@ use crate::repositories::{
     ConnectorWorkerRepository, MaintenanceRunRepository, ServiceHealthCheckRepository,
 };
 use crate::rocket_routes::audit_logs::record_system_audit_log;
-use crate::rocket_routes::connectors::runtime::{create_queued_run, execute_claimed_connector_run};
+use crate::rocket_routes::connectors::runtime::{
+    configured_connector_run_max_attempts, create_queued_run, execute_leased_connector_run,
+};
 use crate::rocket_routes::connectors::shared::count_as_i32;
 
 const DEFAULT_HEALTH_RETENTION_DAYS: i64 = 30;
@@ -21,6 +28,10 @@ const DEFAULT_RUN_RETENTION_DAYS: i64 = 90;
 const DEFAULT_AUDIT_LOG_RETENTION_DAYS: i64 = 365;
 const DEFAULT_RETENTION_CLEANUP_INTERVAL_SECONDS: u64 = 60 * 60;
 const DEFAULT_WORKER_HEARTBEAT_INTERVAL_SECONDS: u64 = 15;
+const DEFAULT_RUN_LEASE_SECONDS: u64 = 60;
+const DEFAULT_RUN_LEASE_RENEW_INTERVAL_SECONDS: u64 = 15;
+const DEFAULT_RUN_RETRY_BASE_SECONDS: u64 = 5;
+const DEFAULT_RUN_RETRY_MAX_SECONDS: u64 = 300;
 pub(crate) const DEFAULT_WORKER_STALE_AFTER_SECONDS: i64 = 45;
 
 #[derive(Clone, Copy)]
@@ -35,6 +46,37 @@ struct ConnectorRetentionCleanup {
     health_checks_deleted: usize,
     runs_deleted: usize,
     audit_logs_deleted: usize,
+}
+
+#[derive(Clone, Copy)]
+struct ConnectorRunLeasePolicy {
+    lease_seconds: i64,
+    renew_interval: StdDuration,
+    retry_base_seconds: i64,
+    retry_max_seconds: i64,
+}
+
+struct RunLeaseRenewal {
+    stop: watch::Sender<bool>,
+    lease_lost: Arc<AtomicBool>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+struct ConnectorWorkerLoopConfig {
+    database_url: String,
+    poll_ms: u64,
+    heartbeat_interval_seconds: u64,
+    scheduler_enabled: bool,
+    retention_policy: ConnectorRetentionPolicy,
+    lease_policy: ConnectorRunLeasePolicy,
+    worker_id: String,
+    worker_started_at: NaiveDateTime,
+}
+
+#[derive(QueryableByName)]
+struct CurrentDatabaseName {
+    #[diesel(sql_type = Text)]
+    database_name: String,
 }
 
 #[derive(Clone, Copy)]
@@ -74,20 +116,74 @@ impl ConnectorRetentionPolicy {
     }
 }
 
-pub fn spawn_connector_background_worker() {
-    tokio::spawn(run_connector_worker_forever());
+impl ConnectorRunLeasePolicy {
+    fn from_env() -> Result<Self, String> {
+        let lease_seconds =
+            strict_positive_env_u64("CONNECTOR_RUN_LEASE_SECONDS", DEFAULT_RUN_LEASE_SECONDS)?;
+        let renew_interval_seconds = strict_positive_env_u64(
+            "CONNECTOR_RUN_LEASE_RENEW_INTERVAL_SECONDS",
+            DEFAULT_RUN_LEASE_RENEW_INTERVAL_SECONDS,
+        )?;
+        let retry_base_seconds = strict_positive_env_u64(
+            "CONNECTOR_RUN_RETRY_BASE_SECONDS",
+            DEFAULT_RUN_RETRY_BASE_SECONDS,
+        )?;
+        let retry_max_seconds = strict_positive_env_u64(
+            "CONNECTOR_RUN_RETRY_MAX_SECONDS",
+            DEFAULT_RUN_RETRY_MAX_SECONDS,
+        )?;
+        let max_attempts = strict_positive_env_u64(
+            "CONNECTOR_RUN_MAX_ATTEMPTS",
+            configured_connector_run_max_attempts() as u64,
+        )?;
+
+        if renew_interval_seconds >= lease_seconds {
+            return Err(
+                "CONNECTOR_RUN_LEASE_RENEW_INTERVAL_SECONDS must be less than CONNECTOR_RUN_LEASE_SECONDS"
+                    .to_owned(),
+            );
+        }
+        if retry_max_seconds < retry_base_seconds {
+            return Err(
+                "CONNECTOR_RUN_RETRY_MAX_SECONDS must be greater than or equal to CONNECTOR_RUN_RETRY_BASE_SECONDS"
+                    .to_owned(),
+            );
+        }
+        if max_attempts > i32::MAX as u64 {
+            return Err(
+                "CONNECTOR_RUN_MAX_ATTEMPTS must fit in a signed 32-bit integer".to_owned(),
+            );
+        }
+
+        Ok(Self {
+            lease_seconds: lease_seconds as i64,
+            renew_interval: StdDuration::from_secs(renew_interval_seconds),
+            retry_base_seconds: retry_base_seconds as i64,
+            retry_max_seconds: retry_max_seconds as i64,
+        })
+    }
 }
 
-pub async fn run_connector_worker_forever() {
-    if !env_flag("CONNECTOR_WORKER_ENABLED", true) {
+pub fn spawn_connector_background_worker() {
+    tokio::spawn(async {
+        if let Err(error) = run_connector_worker_forever().await {
+            rocket::error!("connector background worker stopped during startup: {error}");
+        }
+    });
+}
+
+pub async fn run_connector_worker_forever() -> Result<(), String> {
+    if !strict_env_flag("CONNECTOR_WORKER_ENABLED", true)? {
         rocket::info!("connector background worker is disabled");
-        return;
+        return Ok(());
     }
 
-    let Ok(database_url) = std::env::var("DATABASE_URL") else {
-        rocket::warn!("connector background worker disabled: DATABASE_URL is not set");
-        return;
-    };
+    crate::config::AppConfig::from_env().map_err(|error| error.to_string())?;
+
+    let database_url = std::env::var("DATABASE_URL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "connector worker requires DATABASE_URL when enabled".to_owned())?;
 
     let poll_ms = env_u64("CONNECTOR_WORKER_POLL_MS", 500);
     let heartbeat_interval_seconds = env_u64(
@@ -96,10 +192,19 @@ pub async fn run_connector_worker_forever() {
     );
     let scheduler_enabled = env_flag("CONNECTOR_SCHEDULER_ENABLED", true);
     let retention_policy = ConnectorRetentionPolicy::from_env();
+    let lease_policy = ConnectorRunLeasePolicy::from_env()?;
     let worker_id = format!("connector-worker-{}", uuid::Uuid::new_v4());
     let worker_started_at = Utc::now().naive_utc();
 
     rocket::info!("connector background worker started: {}", worker_id);
+    rocket::info!(
+        "connector run leases enabled: lease={}s, renew={}s, max_attempts={}, retry_backoff={}..{}s",
+        lease_policy.lease_seconds,
+        lease_policy.renew_interval.as_secs(),
+        configured_connector_run_max_attempts(),
+        lease_policy.retry_base_seconds,
+        lease_policy.retry_max_seconds,
+    );
     if retention_policy.enabled() {
         rocket::info!(
             "connector retention enabled: health={:?} days, runs={:?} days, audit_logs={:?} days, interval={}s",
@@ -109,27 +214,32 @@ pub async fn run_connector_worker_forever() {
             retention_policy.cleanup_interval.as_secs()
         );
     }
-    run_connector_worker_loop(
+    run_connector_worker_loop(ConnectorWorkerLoopConfig {
         database_url,
         poll_ms,
         heartbeat_interval_seconds,
         scheduler_enabled,
         retention_policy,
+        lease_policy,
         worker_id,
         worker_started_at,
-    )
+    })
     .await;
+
+    Ok(())
 }
 
-async fn run_connector_worker_loop(
-    database_url: String,
-    poll_ms: u64,
-    heartbeat_interval_seconds: u64,
-    scheduler_enabled: bool,
-    retention_policy: ConnectorRetentionPolicy,
-    worker_id: String,
-    worker_started_at: NaiveDateTime,
-) {
+async fn run_connector_worker_loop(config: ConnectorWorkerLoopConfig) {
+    let ConnectorWorkerLoopConfig {
+        database_url,
+        poll_ms,
+        heartbeat_interval_seconds,
+        scheduler_enabled,
+        retention_policy,
+        lease_policy,
+        worker_id,
+        worker_started_at,
+    } = config;
     let poll = StdDuration::from_millis(poll_ms);
     let heartbeat_interval = StdDuration::from_secs(heartbeat_interval_seconds);
     let mut last_retention_cleanup_at: Option<Instant> = None;
@@ -156,7 +266,34 @@ async fn run_connector_worker_loop(
                 loop {
                     let mut reconnect = false;
 
-                    if retention_cleanup_due(&retention_policy, last_retention_cleanup_at) {
+                    match ConnectorRunRepository::recover_expired_leases(
+                        &mut db,
+                        lease_policy.retry_base_seconds,
+                        lease_policy.retry_max_seconds,
+                        100,
+                    )
+                    .await
+                    {
+                        Ok(stats)
+                            if stats.requeued > 0 || stats.failed > 0 || stats.cancelled > 0 =>
+                        {
+                            rocket::warn!(
+                                "connector lease recovery: requeued={}, failed={}, cancelled={}",
+                                stats.requeued,
+                                stats.failed,
+                                stats.cancelled
+                            );
+                        }
+                        Ok(_) => {}
+                        Err(error) => {
+                            rocket::error!("connector lease recovery failed: {:?}", error);
+                            reconnect = true;
+                        }
+                    }
+
+                    if !reconnect
+                        && retention_cleanup_due(&retention_policy, last_retention_cleanup_at)
+                    {
                         let cleanup_started_at = Utc::now().naive_utc();
                         if let Err(error) = record_worker_heartbeat(
                             &mut db,
@@ -252,7 +389,14 @@ async fn run_connector_worker_loop(
 
                     if !reconnect {
                         for _ in 0..5 {
-                            match process_one_queued_run(&mut db, heartbeat).await {
+                            match process_one_queued_run(
+                                &mut db,
+                                heartbeat,
+                                &database_url,
+                                lease_policy,
+                            )
+                            .await
+                            {
                                 Ok(true) => {
                                     last_heartbeat_at = Some(Instant::now());
                                 }
@@ -301,8 +445,15 @@ async fn run_connector_worker_loop(
 async fn process_one_queued_run(
     db: &mut AsyncPgConnection,
     heartbeat: WorkerHeartbeatContext<'_>,
+    database_url: &str,
+    lease_policy: ConnectorRunLeasePolicy,
 ) -> Result<bool, ApiError> {
-    let Some(run) = ConnectorRunRepository::claim_next_queued(db, heartbeat.worker_id).await?
+    let Some(run) = ConnectorRunRepository::claim_next_queued(
+        db,
+        heartbeat.worker_id,
+        lease_policy.lease_seconds,
+    )
+    .await?
     else {
         return Ok(false);
     };
@@ -317,8 +468,24 @@ async fn process_one_queued_run(
         );
     }
 
-    if let Err(error) = execute_claimed_connector_run(db, run).await {
+    let lease_renewal = RunLeaseRenewal::spawn(
+        database_url.to_owned(),
+        run_id,
+        heartbeat.worker_id.to_owned(),
+        lease_policy,
+    );
+    let execution = execute_leased_connector_run(db, run, heartbeat.worker_id).await;
+    let lease_lost = lease_renewal.stop().await;
+
+    if let Err(error) = execution {
         let error_message = format!("{:?}", error);
+        if lease_lost {
+            rocket::warn!(
+                "connector worker {} lost lease ownership while processing run {}",
+                heartbeat.worker_id,
+                run_id
+            );
+        }
         if let Err(heartbeat_error) =
             record_worker_heartbeat(db, heartbeat, "error", Some(run_id), Some(error_message)).await
         {
@@ -348,6 +515,91 @@ async fn process_one_queued_run(
     }
 
     Ok(true)
+}
+
+impl RunLeaseRenewal {
+    fn spawn(
+        database_url: String,
+        run_id: i32,
+        worker_id: String,
+        policy: ConnectorRunLeasePolicy,
+    ) -> Self {
+        let (stop, mut stop_rx) = watch::channel(false);
+        let lease_lost = Arc::new(AtomicBool::new(false));
+        let task_lease_lost = Arc::clone(&lease_lost);
+        let task = tokio::spawn(async move {
+            let mut last_successful_renewal = Instant::now();
+            loop {
+                tokio::select! {
+                    changed = stop_rx.changed() => {
+                        if changed.is_err() || *stop_rx.borrow() {
+                            break;
+                        }
+                    }
+                    _ = tokio::time::sleep(policy.renew_interval) => {
+                        let renewed = match AsyncPgConnection::establish(&database_url).await {
+                            Ok(mut lease_db) => ConnectorRunRepository::renew_lease(
+                                &mut lease_db,
+                                run_id,
+                                &worker_id,
+                                policy.lease_seconds,
+                            )
+                            .await,
+                            Err(error) => {
+                                rocket::warn!(
+                                    "connector run {} lease heartbeat could not connect: {:?}",
+                                    run_id,
+                                    error
+                                );
+                                if last_successful_renewal.elapsed()
+                                    >= StdDuration::from_secs(policy.lease_seconds as u64)
+                                {
+                                    task_lease_lost.store(true, Ordering::Release);
+                                    break;
+                                }
+                                continue;
+                            }
+                        };
+
+                        match renewed {
+                            Ok(true) => last_successful_renewal = Instant::now(),
+                            Ok(false) => {
+                                task_lease_lost.store(true, Ordering::Release);
+                                break;
+                            }
+                            Err(error) => {
+                                rocket::warn!(
+                                    "connector run {} lease heartbeat failed: {:?}",
+                                    run_id,
+                                    error
+                                );
+                                if last_successful_renewal.elapsed()
+                                    >= StdDuration::from_secs(policy.lease_seconds as u64)
+                                {
+                                    task_lease_lost.store(true, Ordering::Release);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        Self {
+            stop,
+            lease_lost,
+            task,
+        }
+    }
+
+    async fn stop(self) -> bool {
+        let _ = self.stop.send(true);
+        if self.task.await.is_err() {
+            self.lease_lost.store(true, Ordering::Release);
+        }
+        AtomicBool::load(self.lease_lost.as_ref(), Ordering::Acquire)
+    }
 }
 
 fn heartbeat_due(last_heartbeat_at: Option<Instant>, heartbeat_interval: StdDuration) -> bool {
@@ -450,6 +702,119 @@ async fn cleanup_connector_retention(
         })
     })
     .await
+}
+
+/// Runs one retention pass for database integration coverage.
+///
+/// This deliberately refuses to execute unless both `APP_ENV=test` and the
+/// actual PostgreSQL `current_database()` name contain a standalone `test`
+/// segment. Keeping the guard inside this function ensures it runs on the same
+/// connection immediately before the destructive cleanup.
+#[doc(hidden)]
+pub async fn run_guarded_retention_cleanup_for_test(
+    db: &mut AsyncPgConnection,
+    health_retention_days: Option<i64>,
+    run_retention_days: Option<i64>,
+    audit_log_retention_days: Option<i64>,
+    worker_id: &str,
+) -> Result<(usize, usize, usize), String> {
+    ensure_safe_test_database(db, "retention test cleanup").await?;
+
+    let policy = ConnectorRetentionPolicy {
+        health_retention_days,
+        run_retention_days,
+        audit_log_retention_days,
+        cleanup_interval: StdDuration::from_secs(DEFAULT_RETENTION_CLEANUP_INTERVAL_SECONDS),
+    };
+    let cleanup = cleanup_connector_retention(db, &policy, worker_id, Utc::now().naive_utc())
+        .await
+        .map_err(|error| format!("retention test cleanup failed: {error:?}"))?;
+
+    Ok((
+        cleanup.health_checks_deleted,
+        cleanup.runs_deleted,
+        cleanup.audit_logs_deleted,
+    ))
+}
+
+/// Claims one queued run using the production repository semantics.
+/// Available only for guarded database integration coverage.
+#[doc(hidden)]
+pub async fn claim_connector_run_for_test(
+    db: &mut AsyncPgConnection,
+    worker_id: &str,
+    lease_seconds: i64,
+) -> Result<Option<i32>, String> {
+    ensure_safe_test_database(db, "connector lease claim test").await?;
+    ConnectorRunRepository::claim_next_queued(db, worker_id, lease_seconds)
+        .await
+        .map(|run| run.map(|run| run.id))
+        .map_err(|error| format!("connector lease claim test failed: {error}"))
+}
+
+/// Recovers expired leases using the production repository semantics.
+/// Returns `(requeued, failed, cancelled)` for guarded integration coverage.
+#[doc(hidden)]
+pub async fn recover_connector_runs_for_test(
+    db: &mut AsyncPgConnection,
+    retry_base_seconds: i64,
+    retry_max_seconds: i64,
+) -> Result<(usize, usize, usize), String> {
+    ensure_safe_test_database(db, "connector lease recovery test").await?;
+    let stats = ConnectorRunRepository::recover_expired_leases(
+        db,
+        retry_base_seconds,
+        retry_max_seconds,
+        100,
+    )
+    .await
+    .map_err(|error| format!("connector lease recovery test failed: {error}"))?;
+    Ok((stats.requeued, stats.failed, stats.cancelled))
+}
+
+/// Requests cancellation using the production repository state transition.
+/// Returns the resulting run status for guarded integration coverage.
+#[doc(hidden)]
+pub async fn request_connector_run_cancel_for_test(
+    db: &mut AsyncPgConnection,
+    run_id: i32,
+) -> Result<Option<String>, String> {
+    ensure_safe_test_database(db, "connector cancellation test").await?;
+    ConnectorRunRepository::request_cancel(db, run_id)
+        .await
+        .map(|run| run.map(|run| run.status))
+        .map_err(|error| format!("connector cancellation test failed: {error}"))
+}
+
+async fn ensure_safe_test_database(
+    db: &mut AsyncPgConnection,
+    operation: &str,
+) -> Result<(), String> {
+    if !matches!(std::env::var("APP_ENV").as_deref(), Ok("test")) {
+        return Err(format!(
+            "refusing {operation}: APP_ENV must be exactly 'test'"
+        ));
+    }
+
+    let database_name = sql_query("SELECT current_database()::text AS database_name")
+        .get_result::<CurrentDatabaseName>(db)
+        .await
+        .map_err(|error| format!("failed to read current_database(): {error}"))?
+        .database_name;
+    if !is_safe_test_database_name(&database_name) {
+        return Err(format!(
+            "refusing {operation}: database '{database_name}' must contain a standalone 'test' segment"
+        ));
+    }
+
+    Ok(())
+}
+
+fn is_safe_test_database_name(database_name: &str) -> bool {
+    database_name
+        .to_ascii_lowercase()
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .any(|segment| segment == "test")
 }
 
 async fn record_retention_cleanup_failure(
@@ -560,6 +925,19 @@ fn env_u64(name: &str, default: u64) -> u64 {
         .unwrap_or(default)
 }
 
+fn strict_positive_env_u64(name: &str, default: u64) -> Result<u64, String> {
+    match std::env::var(name) {
+        Ok(value) => value
+            .trim()
+            .parse::<u64>()
+            .ok()
+            .filter(|value| *value > 0)
+            .ok_or_else(|| format!("{name} must be a positive integer")),
+        Err(std::env::VarError::NotPresent) => Ok(default),
+        Err(std::env::VarError::NotUnicode(_)) => Err(format!("{name} must contain valid Unicode")),
+    }
+}
+
 pub(crate) fn connector_worker_stale_after_seconds() -> i64 {
     env_u64(
         "CONNECTOR_WORKER_STALE_AFTER_SECONDS",
@@ -581,232 +959,39 @@ fn env_retention_days(name: &str, default: i64) -> Option<i64> {
     }
 }
 
+fn strict_env_flag(name: &str, default: bool) -> Result<bool, String> {
+    match std::env::var(name) {
+        Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" => Ok(true),
+            "0" | "false" | "no" => Ok(false),
+            _ => Err(format!("{name} must be one of: true, false, 1, 0, yes, no")),
+        },
+        Err(std::env::VarError::NotPresent) => Ok(default),
+        Err(std::env::VarError::NotUnicode(_)) => Err(format!("{name} must contain valid Unicode")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::models::{
-        ConnectorRun, NewAuditLog, NewConnectorRun, NewMaintainer, NewService,
-        NewServiceHealthCheck,
-    };
-    use crate::repositories::{MaintainerRepository, MaintenanceRunRepository, ServiceRepository};
-    use crate::schema::{audit_logs, connector_runs, maintenance_runs};
-    use diesel::prelude::*;
-    use diesel_async::RunQueryDsl;
+    use super::is_safe_test_database_name;
+    use crate::repositories::bounded_retry_backoff_seconds;
 
-    #[tokio::test]
-    async fn retention_cleanup_deletes_old_health_checks_finished_runs_and_audit_logs() {
-        dotenvy::dotenv().ok();
-        let database_url =
-            std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for retention test");
-        let mut db = AsyncPgConnection::establish(&database_url)
-            .await
-            .expect("test database should be reachable");
-        let suffix = uuid::Uuid::new_v4().simple().to_string();
-        let source = format!("retention_{suffix}");
-        let stale_at = Utc::now().naive_utc() - chrono::Duration::days(120);
-        let old_at = Utc::now().naive_utc() - chrono::Duration::days(45);
-        let fresh_at = Utc::now().naive_utc();
-        let maintainer = MaintainerRepository::create(
-            &mut db,
-            NewMaintainer {
-                display_name: format!("Retention {suffix}"),
-                email: format!("retention-{suffix}@example.test"),
-            },
-        )
-        .await
-        .expect("maintainer should be created");
-        let service = ServiceRepository::create(
-            &mut db,
-            NewService {
-                source: source.clone(),
-                external_id: Some("retention-service".to_owned()),
-                maintainer_id: maintainer.id,
-                slug: format!("retention-{suffix}"),
-                name: "Retention Service".to_owned(),
-                lifecycle_status: "active".to_owned(),
-                health_status: "healthy".to_owned(),
-                description: None,
-                repository_url: None,
-                dashboard_url: None,
-                runbook_url: None,
-                last_checked_at: Some(fresh_at),
-            },
-        )
-        .await
-        .expect("service should be created");
-        let old_run = create_finished_retention_run(&mut db, &source, old_at).await;
-        let stale_run = create_finished_retention_run(&mut db, &source, stale_at).await;
-        let fresh_run = create_finished_retention_run(&mut db, &source, fresh_at).await;
-        ServiceHealthCheckRepository::create(
-            &mut db,
-            NewServiceHealthCheck {
-                service_id: service.id,
-                connector_run_id: Some(old_run.id),
-                source: source.clone(),
-                external_id: Some("retention-service".to_owned()),
-                health_status: "healthy".to_owned(),
-                previous_health_status: None,
-                checked_at: old_at,
-                response_time_ms: None,
-                message: None,
-                raw_payload: None,
-            },
-        )
-        .await
-        .expect("old health check should be created");
-        let fresh_check = ServiceHealthCheckRepository::create(
-            &mut db,
-            NewServiceHealthCheck {
-                service_id: service.id,
-                connector_run_id: Some(fresh_run.id),
-                source: source.clone(),
-                external_id: Some("retention-service".to_owned()),
-                health_status: "healthy".to_owned(),
-                previous_health_status: None,
-                checked_at: fresh_at,
-                response_time_ms: None,
-                message: None,
-                raw_payload: None,
-            },
-        )
-        .await
-        .expect("fresh health check should be created");
-        let old_audit_log = AuditLogRepository::create(
-            &mut db,
-            NewAuditLog {
-                actor_user_id: None,
-                action: "retention_old".to_owned(),
-                resource_type: "retention".to_owned(),
-                resource_id: Some(format!("old-{suffix}")),
-                metadata: None,
-            },
-        )
-        .await
-        .expect("old audit log should be created");
-        diesel::update(audit_logs::table.find(old_audit_log.id))
-            .set(audit_logs::created_at.eq(old_at))
-            .execute(&mut db)
-            .await
-            .expect("old audit log should be aged");
-        let fresh_audit_log = AuditLogRepository::create(
-            &mut db,
-            NewAuditLog {
-                actor_user_id: None,
-                action: "retention_fresh".to_owned(),
-                resource_type: "retention".to_owned(),
-                resource_id: Some(format!("fresh-{suffix}")),
-                metadata: None,
-            },
-        )
-        .await
-        .expect("fresh audit log should be created");
-        let policy = ConnectorRetentionPolicy {
-            health_retention_days: Some(30),
-            run_retention_days: Some(90),
-            audit_log_retention_days: Some(30),
-            cleanup_interval: StdDuration::from_secs(3600),
-        };
-
-        let cleanup = cleanup_connector_retention(
-            &mut db,
-            &policy,
-            "retention-test-worker",
-            Utc::now().naive_utc(),
-        )
-        .await
-        .expect("retention cleanup should run");
-
-        assert_eq!(cleanup.health_checks_deleted, 1);
-        assert_eq!(cleanup.runs_deleted, 1);
-        assert_eq!(cleanup.audit_logs_deleted, 1);
-        let maintenance_run =
-            MaintenanceRunRepository::find_recent(&mut db, 5, Some("retention_cleanup"))
-                .await
-                .expect("maintenance run history should load")
-                .into_iter()
-                .find(|run| run.worker_id.as_deref() == Some("retention-test-worker"))
-                .expect("retention cleanup should write maintenance history");
-        assert_eq!(maintenance_run.status, "success");
-        assert_eq!(maintenance_run.health_checks_deleted, 1);
-        assert_eq!(maintenance_run.connector_runs_deleted, 1);
-        assert_eq!(maintenance_run.audit_logs_deleted, 1);
-        assert!(ConnectorRunRepository::find(&mut db, old_run.id)
-            .await
-            .is_ok());
-        assert!(matches!(
-            ConnectorRunRepository::find(&mut db, stale_run.id).await,
-            Err(diesel::result::Error::NotFound)
-        ));
-        assert!(ConnectorRunRepository::find(&mut db, fresh_run.id)
-            .await
-            .is_ok());
-        assert!(matches!(
-            audit_logs::table
-                .find(old_audit_log.id)
-                .select(audit_logs::id)
-                .first::<i32>(&mut db)
-                .await,
-            Err(diesel::result::Error::NotFound)
-        ));
-        assert!(audit_logs::table
-            .find(fresh_audit_log.id)
-            .select(audit_logs::id)
-            .first::<i32>(&mut db)
-            .await
-            .is_ok());
-        let fresh_checks = ServiceHealthCheckRepository::find_by_run(&mut db, fresh_run.id)
-            .await
-            .expect("fresh run checks should load");
-        assert!(fresh_checks.iter().any(|check| check.id == fresh_check.id));
-
-        ServiceRepository::delete(&mut db, service.id)
-            .await
-            .expect("service should be cleaned up");
-        diesel::delete(connector_runs::table.find(old_run.id))
-            .execute(&mut db)
-            .await
-            .expect("old run should be cleaned up");
-        diesel::delete(connector_runs::table.find(fresh_run.id))
-            .execute(&mut db)
-            .await
-            .expect("fresh run should be cleaned up");
-        diesel::delete(audit_logs::table.find(fresh_audit_log.id))
-            .execute(&mut db)
-            .await
-            .expect("fresh audit log should be cleaned up");
-        diesel::delete(maintenance_runs::table.find(maintenance_run.id))
-            .execute(&mut db)
-            .await
-            .expect("maintenance run should be cleaned up");
-        MaintainerRepository::delete(&mut db, maintainer.id)
-            .await
-            .expect("maintainer should be cleaned up");
+    #[test]
+    fn retention_test_database_name_requires_standalone_test_segment() {
+        assert!(is_safe_test_database_name("portal_retention_test"));
+        assert!(is_safe_test_database_name("test-portal"));
+        assert!(is_safe_test_database_name("TEST"));
+        assert!(!is_safe_test_database_name("app_db"));
+        assert!(!is_safe_test_database_name("production"));
+        assert!(!is_safe_test_database_name("contest"));
     }
 
-    async fn create_finished_retention_run(
-        db: &mut AsyncPgConnection,
-        source: &str,
-        finished_at: NaiveDateTime,
-    ) -> ConnectorRun {
-        ConnectorRunRepository::create(
-            db,
-            NewConnectorRun {
-                source: source.to_owned(),
-                target: "service_health".to_owned(),
-                status: "success".to_owned(),
-                success_count: 1,
-                failure_count: 0,
-                duration_ms: 1,
-                error_message: None,
-                started_at: finished_at,
-                finished_at: Some(finished_at),
-                trigger: "manual".to_owned(),
-                payload: None,
-                claimed_at: None,
-                worker_id: None,
-            },
-        )
-        .await
-        .expect("retention test run should be created")
+    #[test]
+    fn connector_retry_backoff_is_exponential_and_bounded() {
+        assert_eq!(bounded_retry_backoff_seconds(1, 5, 300), 5);
+        assert_eq!(bounded_retry_backoff_seconds(2, 5, 300), 10);
+        assert_eq!(bounded_retry_backoff_seconds(3, 5, 300), 20);
+        assert_eq!(bounded_retry_backoff_seconds(20, 5, 300), 300);
+        assert_eq!(bounded_retry_backoff_seconds(0, 0, 0), 1);
     }
 }

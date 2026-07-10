@@ -5,6 +5,7 @@ import { IconPlus } from "@tabler/icons-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { FormEvent } from "react";
 
+import { isApiError } from "../../api/client";
 import type { ApiClient } from "../../api/client";
 import type {
   ApiId,
@@ -17,7 +18,10 @@ import type {
   ConnectorRun,
   ConnectorRunDetail,
   ConnectorRunExecutionResponse,
-  NewConnectorPayload
+  ConnectorScopePayload,
+  Maintainer,
+  NewConnectorPayload,
+  UserSummary
 } from "../../types/api";
 import { ViewFrame } from "../../components/ViewFrame";
 import { ConnectorsSkeleton } from "../../components/LoadingState";
@@ -28,11 +32,13 @@ import { ConnectorCreateForm } from "./ConnectorCreateForm";
 import { ConnectorOperationsPanel } from "./ConnectorOperationsPanel";
 import { ConnectorRegistry } from "./ConnectorRegistry";
 import { ConnectorRunsPanel } from "./ConnectorRunsPanel";
+import { ConnectorScopeForm } from "./ConnectorScopeForm";
 import {
   connectorConfigFromResponse,
   connectorConfigFromTemplate,
   defaultConnectorConfig
 } from "./connectorConfig";
+import type { ConnectorConfigLoadState } from "./connectorConfig";
 
 type ConnectorViewOptions = {
   preserveRunDetail?: boolean;
@@ -71,6 +77,8 @@ export function ConnectorsView({
   const [operations, setOperations] = useState<ConnectorOperationsResponse | null>(null);
   const [selectedSource, setSelectedSource] = useState("");
   const [config, setConfig] = useState<ConnectorConfigForm>(defaultConnectorConfig);
+  const [configLoadState, setConfigLoadState] = useState<ConnectorConfigLoadState>("idle");
+  const [configLoadError, setConfigLoadError] = useState<Error | null>(null);
   const [runs, setRuns] = useState<ConnectorRun[]>([]);
   const [runDetail, setRunDetail] = useState<ConnectorRunDetail | null>(null);
   const [loading, setLoading] = useState(true);
@@ -79,8 +87,15 @@ export function ConnectorsView({
   const [runLoading, setRunLoading] = useState(false);
   const [oauthLoading, setOauthLoading] = useState(false);
   const [retryingRunId, setRetryingRunId] = useState<string | number | null>(null);
+  const [cancellingRunId, setCancellingRunId] = useState<string | number | null>(null);
   const [runDetailLoading, setRunDetailLoading] = useState(false);
   const [createOpened, createModal] = useDisclosure(false);
+  const [scopeOpened, scopeModal] = useDisclosure(false);
+  const [scopeSaving, setScopeSaving] = useState(false);
+  const [maintainers, setMaintainers] = useState<Maintainer[]>([]);
+  const [users, setUsers] = useState<UserSummary[]>([]);
+  const [scopeOptionsLoading, setScopeOptionsLoading] = useState(false);
+  const [scopeOptionsError, setScopeOptionsError] = useState<string | null>(null);
   const selectedSourceRef = useRef("");
   const detailsRequestSeqRef = useRef(0);
   const reloadRequestSeqRef = useRef(0);
@@ -90,6 +105,7 @@ export function ConnectorsView({
   const appliedDrillTargetKeyRef = useRef("");
   const selected = connectors.find((connector) => connector.source === selectedSource);
   const initialLoading = loading && connectors.length === 0;
+  const configEditable = configLoadState === "ready" || configLoadState === "missing";
 
   useEffect(() => {
     selectedSourceRef.current = selectedSource;
@@ -104,26 +120,43 @@ export function ConnectorsView({
   const loadConnectorDetails = useCallback(
     async (source: string, options: ConnectorViewOptions = {}) => {
       const requestSeq = ++detailsRequestSeqRef.current;
-      try {
-        if (!options.preserveRunDetail) {
-          runDetailRequestSeqRef.current += 1;
-          setRunDetail(null);
-        }
-        const [configResponse, runResponse] = await Promise.all([
-          client
-            .get<ConnectorConfigResponse>(`/connectors/${encodeURIComponent(source)}/config`)
-            .catch(() => null),
-          client.get<ConnectorRun[]>(`/connectors/runs?source=${encodeURIComponent(source)}`)
-        ]);
-        if (requestSeq !== detailsRequestSeqRef.current) {
-          return;
-        }
-        setRuns(runResponse);
-        setConfig(connectorConfigFromResponse(configResponse));
-      } catch (error) {
-        if (requestSeq === detailsRequestSeqRef.current) {
-          showError(error);
-        }
+      setConfigLoadState("loading");
+      setConfigLoadError(null);
+      if (!options.preserveRunDetail) {
+        runDetailRequestSeqRef.current += 1;
+        setRunDetail(null);
+      }
+
+      const [configResult, runsResult] = await Promise.allSettled([
+        client
+          .get<ConnectorConfigResponse>(`/connectors/${encodeURIComponent(source)}/config`)
+          .catch((error: unknown) => {
+            if (isApiError(error) && error.status === 404) {
+              return null;
+            }
+            throw error;
+          }),
+        client.get<ConnectorRun[]>(`/connectors/runs?source=${encodeURIComponent(source)}`)
+      ]);
+
+      if (requestSeq !== detailsRequestSeqRef.current) {
+        return;
+      }
+
+      if (configResult.status === "fulfilled") {
+        setConfig(connectorConfigFromResponse(configResult.value));
+        setConfigLoadState(configResult.value ? "ready" : "missing");
+      } else {
+        const error = toError(configResult.reason);
+        setConfigLoadError(error);
+        setConfigLoadState("error");
+        showError(error);
+      }
+
+      if (runsResult.status === "fulfilled") {
+        setRuns(runsResult.value);
+      } else {
+        showError(runsResult.reason);
       }
     },
     [client]
@@ -196,6 +229,8 @@ export function ConnectorsView({
         detailsRequestSeqRef.current += 1;
         runDetailRequestSeqRef.current += 1;
         setConfig(defaultConnectorConfig);
+        setConfigLoadState("idle");
+        setConfigLoadError(null);
         setRuns([]);
         setRunDetail(null);
       }
@@ -216,6 +251,33 @@ export function ConnectorsView({
     appliedDrillTargetKeyRef.current = drillKey;
     reload(drillTarget?.source || undefined, { runId: drillTarget?.runId });
   }, []);
+
+  useEffect(() => {
+    if (!createOpened && !scopeOpened) {
+      return;
+    }
+
+    let active = true;
+    setScopeOptionsLoading(true);
+    setScopeOptionsError(null);
+    Promise.all([client.get<Maintainer[]>("/maintainers"), client.get<UserSummary[]>("/users")])
+      .then(([nextMaintainers, nextUsers]) => {
+        if (!active) return;
+        setMaintainers(nextMaintainers);
+        setUsers(nextUsers);
+      })
+      .catch((error: unknown) => {
+        if (!active) return;
+        setScopeOptionsError(toError(error).message);
+      })
+      .finally(() => {
+        if (active) setScopeOptionsLoading(false);
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [client, createOpened, scopeOpened]);
 
   useEffect(() => {
     if (!initialLoadStartedRef.current || !hasConnectorDrillTarget(drillTarget)) {
@@ -269,7 +331,12 @@ export function ConnectorsView({
         source: String(form.get("source") || ""),
         kind: String(form.get("kind") || ""),
         display_name: String(form.get("display_name") || ""),
-        status: String(form.get("status") || "active")
+        status: String(form.get("status") || "active"),
+        scope_type: String(form.get("scope_type")) as NewConnectorPayload["scope_type"],
+        owner_user_id:
+          form.get("scope_type") === "user" ? Number(form.get("owner_user_id")) : null,
+        maintainer_id:
+          form.get("scope_type") === "maintainer" ? Number(form.get("maintainer_id")) : null
       };
       const connector = await client.post<Connector>("/connectors", payload);
       event.currentTarget.reset();
@@ -285,7 +352,7 @@ export function ConnectorsView({
 
   async function saveConfig(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!selected) {
+    if (!selected || !configEditable) {
       return;
     }
     setSaving(true);
@@ -309,6 +376,31 @@ export function ConnectorsView({
     }
   }
 
+  async function updateConnectorScope(payload: ConnectorScopePayload) {
+    if (!selected) return;
+
+    setScopeSaving(true);
+    try {
+      const connector = await client.put<Connector>(
+        `/connectors/${encodeURIComponent(selected.source)}/scope`,
+        payload
+      );
+      setConnectors((current) =>
+        current.map((item) => (item.source === connector.source ? connector : item))
+      );
+      scopeModal.close();
+      notifications.show({
+        title: "Visibility updated",
+        message: connector.display_name,
+        color: "teal"
+      });
+    } catch (error) {
+      showError(error);
+    } finally {
+      setScopeSaving(false);
+    }
+  }
+
   async function saveSelectedConfig(selectedConnector: Connector) {
     JSON.parse(config.config);
     JSON.parse(config.sample_payload);
@@ -325,7 +417,7 @@ export function ConnectorsView({
   }
 
   async function connectMicrosoft() {
-    if (!selected) {
+    if (!selected || !configEditable) {
       return;
     }
     const source = selected.source;
@@ -344,7 +436,7 @@ export function ConnectorsView({
   }
 
   async function runConnector(mode: string) {
-    if (!selected) {
+    if (!selected || !configEditable) {
       return;
     }
     const runSource = selected.source;
@@ -397,6 +489,31 @@ export function ConnectorsView({
     }
   }
 
+  async function cancelRun(run: ConnectorRun) {
+    setCancellingRunId(run.id);
+    try {
+      const cancelled = await client.post<ConnectorRun>(
+        `/connectors/runs/${encodeURIComponent(run.id)}/cancel`,
+        {}
+      );
+      notifications.show({
+        title: cancelled.status === "cancelled" ? "Run cancelled" : "Cancellation requested",
+        message: `${cancelled.source} / ${cancelled.target}`,
+        color: "orange"
+      });
+      await loadConnectorDetails(run.source, { preserveRunDetail: true });
+      await loadOperations();
+      await loadRunDetail(run.id, { source: run.source });
+      if (cancelled.status === "running") {
+        scheduleRunRefresh(run.source, run.id);
+      }
+    } catch (error) {
+      showError(error);
+    } finally {
+      setCancellingRunId(null);
+    }
+  }
+
   function applyTemplate(templateId: string) {
     const nextConfig = connectorConfigFromTemplate(templateId);
 
@@ -432,7 +549,33 @@ export function ConnectorsView({
           onCreate={createConnector}
           onCancel={createModal.close}
           submitting={creating}
+          maintainers={maintainers}
+          users={users}
+          scopeOptionsLoading={scopeOptionsLoading}
+          scopeOptionsError={scopeOptionsError}
         />
+      </Modal>
+
+      <Modal
+        opened={scopeOpened}
+        onClose={scopeModal.close}
+        title="Edit connector visibility"
+        size="md"
+        centered
+      >
+        {selected && (
+          <ConnectorScopeForm
+            key={`${selected.source}-${selected.scope_type}-${selected.owner_user_id}-${selected.maintainer_id}`}
+            connector={selected}
+            maintainers={maintainers}
+            users={users}
+            optionsLoading={scopeOptionsLoading}
+            optionsError={scopeOptionsError}
+            saving={scopeSaving}
+            onSave={updateConnectorScope}
+            onCancel={scopeModal.close}
+          />
+        )}
       </Modal>
 
       <Stack gap="md">
@@ -452,10 +595,16 @@ export function ConnectorsView({
               <ConnectorConfigEditor
                 selected={selected}
                 config={config}
+                configLoadState={configLoadState}
+                configLoadError={configLoadError}
                 onConfigChange={setConfig}
+                onRetryConfig={() =>
+                  selected && loadConnectorDetails(selected.source, { preserveRunDetail: true })
+                }
                 onRun={runConnector}
                 onSave={saveConfig}
                 onConnectMicrosoft={connectMicrosoft}
+                onEditScope={scopeModal.open}
                 onApplyTemplate={applyTemplate}
                 runLoading={runLoading}
                 oauthLoading={oauthLoading}
@@ -468,6 +617,8 @@ export function ConnectorsView({
                 onSelectRun={loadRunDetail}
                 onRetryRun={retryRun}
                 retryingRunId={retryingRunId}
+                onCancelRun={cancelRun}
+                cancellingRunId={cancellingRunId}
                 onOpenService={onOpenService}
               />
             </Stack>
@@ -480,4 +631,8 @@ export function ConnectorsView({
 
 function microsoftOAuthRedirectUri(): string {
   return `${window.location.origin}/oauth/microsoft/callback`;
+}
+
+function toError(error: unknown): Error {
+  return error instanceof Error ? error : new Error(String(error));
 }

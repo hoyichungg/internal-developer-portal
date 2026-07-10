@@ -28,12 +28,18 @@ pub(crate) fn validate_connector_config_adapter(
         "erp_private_messages" | "erp_messages_http" | "erp_http" => {
             validate_erp_private_messages(errors, target, config)
         }
-        "calendar_sample" | "calendar" => validate_sample_array(errors, target, config, "events"),
+        "calendar_sample" | "calendar" => validate_sample_array(
+            errors,
+            target,
+            config,
+            "events",
+            &["calendar_events", "notifications"],
+        ),
         "outlook_mail_sample" | "outlook" => {
-            validate_sample_array(errors, target, config, "messages")
+            validate_sample_array(errors, target, config, "messages", &["notifications"])
         }
         "erp_messages_sample" | "erp_messages" | "erp" => {
-            validate_sample_array(errors, target, config, "messages")
+            validate_sample_array(errors, target, config, "messages", &["notifications"])
         }
         _ => errors.push(FieldViolation::new(
             "config",
@@ -64,6 +70,7 @@ fn validate_azure_devops(errors: &mut Vec<FieldViolation>, target: &str, config:
         &["wiql_url", "work_items_url", "base_url", "web_url_base"],
     );
     validate_positive_u64(errors, config, "timeout_seconds");
+    validate_u64_range(errors, config, "max_items", 1, 10_000);
 }
 
 fn adapter_name<'a>(errors: &mut Vec<FieldViolation>, config: &'a Value) -> Option<&'a str> {
@@ -91,7 +98,12 @@ fn validate_monitoring(errors: &mut Vec<FieldViolation>, target: &str, config: &
 }
 
 fn validate_graph_calendar(errors: &mut Vec<FieldViolation>, target: &str, config: &Value) {
-    require_target(errors, "microsoft_graph_calendar", target, "notifications");
+    require_one_of_targets(
+        errors,
+        "microsoft_graph_calendar",
+        target,
+        &["calendar_events", "notifications"],
+    );
     validate_url_fields(
         errors,
         config,
@@ -105,6 +117,8 @@ fn validate_graph_calendar(errors: &mut Vec<FieldViolation>, target: &str, confi
     validate_positive_u64(errors, config, "timeout_seconds");
     validate_u64_range(errors, config, "top", 1, 50);
     validate_i64_range(errors, config, "lookahead_hours", 1, 168);
+    validate_u64_range(errors, config, "max_pages", 1, 100);
+    validate_u64_range(errors, config, "max_items", 1, 10_000);
 }
 
 fn validate_graph_mail(errors: &mut Vec<FieldViolation>, target: &str, config: &Value) {
@@ -123,6 +137,8 @@ fn validate_graph_mail(errors: &mut Vec<FieldViolation>, target: &str, config: &
     validate_positive_u64(errors, config, "timeout_seconds");
     validate_u64_range(errors, config, "top", 1, 50);
     validate_i64_range(errors, config, "lookback_hours", 1, 720);
+    validate_u64_range(errors, config, "max_pages", 1, 100);
+    validate_u64_range(errors, config, "max_items", 1, 10_000);
 }
 
 fn validate_erp_private_messages(errors: &mut Vec<FieldViolation>, target: &str, config: &Value) {
@@ -136,6 +152,7 @@ fn validate_erp_private_messages(errors: &mut Vec<FieldViolation>, target: &str,
     validate_u64_range(errors, config, "top", 1, 100);
     validate_u64_range(errors, config, "limit", 1, 100);
     validate_i64_range(errors, config, "lookback_hours", 1, 720);
+    validate_boolean(errors, config, "snapshot_complete");
     if let Some(header) = field_string(config, &["api_key_header"]) {
         if !valid_header_name(&header) {
             errors.push(FieldViolation::new(
@@ -151,13 +168,9 @@ fn validate_sample_array(
     target: &str,
     config: &Value,
     field: &'static str,
+    targets: &[&str],
 ) {
-    require_target(
-        errors,
-        "sample notification adapter",
-        target,
-        "notifications",
-    );
+    require_one_of_targets(errors, "sample notification adapter", target, targets);
     if let Some(value) = config.get(field) {
         if !value.is_array() {
             errors.push(FieldViolation::new(
@@ -173,6 +186,20 @@ fn require_target(errors: &mut Vec<FieldViolation>, adapter: &str, target: &str,
         errors.push(FieldViolation::new(
             "target",
             format!("{adapter} config requires target {expected}"),
+        ));
+    }
+}
+
+fn require_one_of_targets(
+    errors: &mut Vec<FieldViolation>,
+    adapter: &str,
+    target: &str,
+    expected: &[&str],
+) {
+    if !expected.contains(&target) {
+        errors.push(FieldViolation::new(
+            "target",
+            format!("{adapter} config requires target {}", expected.join(" or ")),
         ));
     }
 }
@@ -280,6 +307,15 @@ fn validate_i64_range(
     }
 }
 
+fn validate_boolean(errors: &mut Vec<FieldViolation>, config: &Value, field: &'static str) {
+    if config.get(field).is_some_and(|value| !value.is_boolean()) {
+        errors.push(FieldViolation::new(
+            "config",
+            format!("{field} must be a boolean"),
+        ));
+    }
+}
+
 fn has_non_empty(config: &Value, field: &str) -> bool {
     field_string(config, &[field]).is_some()
 }
@@ -333,19 +369,58 @@ mod tests {
 
     #[test]
     fn accepts_graph_calendar_oauth_setup_without_tokens() {
-        let errors = validate(
+        for target in ["calendar_events", "notifications"] {
+            let errors = validate(
+                target,
+                json!({
+                    "adapter": "microsoft_graph_calendar",
+                    "tenant_id": "organizations",
+                    "client_id": "client-id",
+                    "scope": "https://graph.microsoft.com/Calendars.Read offline_access",
+                    "lookahead_hours": 24,
+                    "top": 25
+                }),
+            );
+
+            assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+        }
+    }
+
+    #[test]
+    fn validates_connector_collection_safety_limits() {
+        let graph_errors = validate(
             "notifications",
             json!({
-                "adapter": "microsoft_graph_calendar",
-                "tenant_id": "organizations",
-                "client_id": "client-id",
-                "scope": "https://graph.microsoft.com/Calendars.Read offline_access",
-                "lookahead_hours": 24,
-                "top": 25
+                "adapter": "microsoft_graph_mail",
+                "max_pages": 0,
+                "max_items": 10_001
             }),
         );
+        let azure_errors = validate(
+            "work_cards",
+            json!({
+                "adapter": "azure_devops",
+                "organization": "acme",
+                "project": "portal",
+                "max_items": -1
+            }),
+        );
+        let messages = graph_errors
+            .iter()
+            .chain(&azure_errors)
+            .map(|error| error.message.as_str())
+            .collect::<Vec<_>>();
 
-        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+        assert!(messages
+            .iter()
+            .any(|message| message.contains("max_pages must be an integer from 1 to 100")));
+        assert!(
+            messages
+                .iter()
+                .filter(|message| message.contains("max_items must be an integer from 1 to 10000"))
+                .count()
+                >= 2
+        );
     }
 
     #[test]
@@ -481,5 +556,21 @@ mod tests {
         assert!(messages
             .iter()
             .any(|message| message.contains("timeout_seconds must be a positive integer")));
+    }
+
+    #[test]
+    fn rejects_non_boolean_erp_snapshot_declaration() {
+        let errors = validate(
+            "notifications",
+            json!({
+                "adapter": "erp_private_messages",
+                "messages_url": "https://erp.example.test/messages",
+                "snapshot_complete": "yes"
+            }),
+        );
+
+        assert!(errors
+            .iter()
+            .any(|error| error.message == "snapshot_complete must be a boolean"));
     }
 }

@@ -2,13 +2,15 @@ use rocket::serde::Serialize;
 use rocket_db_pools::Connection;
 
 use crate::api::{ok, ApiResult};
-use crate::auth::AuthenticatedUser;
+use crate::auth::{record_access_scope, AuthenticatedUser};
 use crate::models::{
-    ConnectorRun, ConnectorWorker, Notification, Package, Service, ServiceHealthCheck, WorkCard,
+    CalendarEvent, ConnectorRun, ConnectorWorker, NotificationView, Package, Service,
+    ServiceHealthCheck, WorkCard,
 };
 use crate::repositories::{
-    ConnectorRunRepository, ConnectorWorkerRepository, DashboardRepository, NotificationRepository,
-    PackageRepository, ServiceHealthCheckRepository, ServiceRepository, WorkCardRepository,
+    CalendarEventRepository, ConnectorRunRepository, ConnectorWorkerRepository,
+    DashboardRepository, NotificationRepository, PackageRepository, ServiceHealthCheckRepository,
+    ServiceRepository, WorkCardRepository,
 };
 use crate::rocket_routes::connectors::connector_worker_stale_after_seconds;
 use crate::rocket_routes::DbConn;
@@ -42,8 +44,9 @@ pub struct DashboardResponse {
     pub priority_items: Vec<DashboardPriorityItem>,
     pub health_history: ServiceHealthHistory,
     pub service_health: Vec<Service>,
+    pub calendar_events: Vec<CalendarEvent>,
     pub work_cards: Vec<WorkCard>,
-    pub notifications: Vec<Notification>,
+    pub notifications: Vec<NotificationView>,
     pub recent_packages: Vec<Package>,
 }
 
@@ -95,10 +98,15 @@ pub struct DashboardPriorityContext {
 #[rocket::get("/dashboard?<maintainer_id>&<source>")]
 pub async fn dashboard(
     mut db: Connection<DbConn>,
-    _auth: AuthenticatedUser,
+    auth: AuthenticatedUser,
     maintainer_id: Option<i32>,
     source: Option<String>,
 ) -> ApiResult<DashboardResponse> {
+    let access = record_access_scope(&mut db, &auth).await?;
+    let now = Utc::now().naive_utc();
+    if maintainer_id.is_some_and(|id| !auth.is_admin() && !access.maintainer_ids.contains(&id)) {
+        return Err(crate::api::ApiError::Forbidden);
+    }
     let scope = DashboardScope {
         maintainer_id,
         source,
@@ -131,14 +139,18 @@ pub async fn dashboard(
         .await?,
         active_packages: DashboardRepository::active_packages_scoped(&mut db, scope.maintainer_id)
             .await?,
-        open_work_cards: DashboardRepository::open_work_cards_scoped(
+        open_work_cards: WorkCardRepository::count_open_for_access(
             &mut db,
+            scope.maintainer_id,
             scope.source.as_deref(),
+            &access,
         )
         .await?,
-        unread_notifications: DashboardRepository::unread_notifications_scoped(
+        unread_notifications: NotificationRepository::count_actionable_for_access(
             &mut db,
+            scope.maintainer_id,
             scope.source.as_deref(),
+            &access,
         )
         .await?,
     };
@@ -150,12 +162,40 @@ pub async fn dashboard(
         scope.source.as_deref(),
     )
     .await?;
-    let work_cards =
-        WorkCardRepository::find_open_scoped(&mut db, 10, scope.source.as_deref()).await?;
-    let notifications =
-        NotificationRepository::find_unread_scoped(&mut db, 10, scope.source.as_deref()).await?;
-    let failed_connector_runs =
-        ConnectorRunRepository::find_failed_scoped(&mut db, 25, scope.source.as_deref()).await?;
+    let work_cards = WorkCardRepository::find_open_for_access(
+        &mut db,
+        10,
+        scope.maintainer_id,
+        scope.source.as_deref(),
+        &access,
+    )
+    .await?;
+    let notifications = NotificationRepository::find_actionable_for_access(
+        &mut db,
+        10,
+        scope.maintainer_id,
+        scope.source.as_deref(),
+        &access,
+    )
+    .await?;
+    let calendar_events = CalendarEventRepository::find_upcoming_for_access(
+        &mut db,
+        100,
+        now - Duration::hours(18),
+        now + Duration::hours(42),
+        scope.maintainer_id,
+        scope.source.as_deref(),
+        &access,
+    )
+    .await?;
+    let failed_connector_runs = ConnectorRunRepository::find_failed_for_access(
+        &mut db,
+        25,
+        scope.maintainer_id,
+        scope.source.as_deref(),
+        &access,
+    )
+    .await?;
     let recent_packages =
         PackageRepository::find_recent_for_maintainer(&mut db, 5, scope.maintainer_id).await?;
     let health_checks = ServiceHealthCheckRepository::find_recent_scoped(
@@ -166,7 +206,6 @@ pub async fn dashboard(
         scope.source.as_deref(),
     )
     .await?;
-    let now = Utc::now().naive_utc();
     let health_history = build_service_health_history(health_checks, HEALTH_HISTORY_WINDOW_HOURS);
     let latest_health_check_at = health_history
         .recent_checks
@@ -204,6 +243,7 @@ pub async fn dashboard(
         priority_items,
         health_history,
         service_health,
+        calendar_events,
         work_cards,
         notifications,
         recent_packages,
@@ -213,7 +253,7 @@ pub async fn dashboard(
 pub fn build_dashboard_priority_items(
     services: &[Service],
     work_cards: &[WorkCard],
-    notifications: &[Notification],
+    notifications: &[NotificationView],
     failed_connector_runs: &[ConnectorRun],
     context: DashboardPriorityContext,
 ) -> Vec<DashboardPriorityItem> {

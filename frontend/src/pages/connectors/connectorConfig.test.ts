@@ -65,6 +65,58 @@ describe("connectorConfigDiagnostics", () => {
     expect(config).not.toBeNull();
     expect(connectorConfigDiagnostics(config as ConnectorConfigForm)).toEqual([]);
   });
+
+  it("requires ERP snapshot reconciliation to be an explicit boolean", () => {
+    const messages = connectorConfigDiagnostics(
+      connectorConfigForm({
+        config: JSON.stringify({
+          adapter: "erp_private_messages",
+          messages_url: "https://erp.example.test/messages",
+          snapshot_complete: "yes"
+        })
+      })
+    ).map((diagnostic) => diagnostic.message);
+
+    expect(messages).toContain("snapshot_complete must be a boolean.");
+  });
+
+  it("validates Graph and Azure collection safety limits", () => {
+    const graphMessages = connectorConfigDiagnostics(
+      connectorConfigForm({
+        config: JSON.stringify({
+          adapter: "microsoft_graph_mail",
+          max_pages: 0,
+          max_items: 10001
+        })
+      })
+    ).map((diagnostic) => diagnostic.message);
+    const azureMessages = connectorConfigDiagnostics(
+      connectorConfigForm({
+        target: "work_cards",
+        config: JSON.stringify({
+          adapter: "azure_devops",
+          organization: "acme",
+          project: "portal",
+          max_items: -1
+        })
+      })
+    ).map((diagnostic) => diagnostic.message);
+
+    expect(graphMessages).toContain("max_pages must be an integer from 1 to 100.");
+    expect(graphMessages).toContain("max_items must be an integer from 1 to 10000.");
+    expect(azureMessages).toContain("max_items must be an integer from 1 to 10000.");
+  });
+
+  it.each([
+    "azure_devops_work_cards",
+    "microsoft_graph_calendar",
+    "outlook_mail_notifications"
+  ])("ships a valid bounded connector template: %s", (templateId) => {
+    const config = connectorConfigFromTemplate(templateId);
+
+    expect(config).not.toBeNull();
+    expect(connectorConfigDiagnostics(config as ConnectorConfigForm)).toEqual([]);
+  });
 });
 
 function connectorConfigForm(overrides: Partial<ConnectorConfigForm>): ConnectorConfigForm {

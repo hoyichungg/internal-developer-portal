@@ -1,11 +1,14 @@
-import { screen, within } from "@testing-library/react";
+import { notifications } from "@mantine/notifications";
+import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { DashboardView } from "./DashboardView";
 import type { MeOverviewResponse } from "../../types/api";
 import { createMockApiClient } from "../../test/mockApiClient";
 import { renderWithProviders } from "../../test/render";
+
+afterEach(() => notifications.clean());
 
 describe("DashboardView daily workbench", () => {
   it("routes each today-first item to the expected detail surface", async () => {
@@ -38,6 +41,11 @@ describe("DashboardView daily workbench", () => {
       screen.getByRole("button", { name: "Details Fix blocked deployment" })
     ).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Details Incident summary" })).toBeInTheDocument();
+    expect(screen.getByText("Platform standup")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Join" })).toHaveAttribute(
+      "href",
+      "https://teams.example.test/platform-standup"
+    );
 
     await user.click(screen.getByRole("button", { name: "Overview Identity API" }));
     expect(onOpenService).toHaveBeenCalledWith(7);
@@ -94,11 +102,136 @@ describe("DashboardView daily workbench", () => {
     const rows = within(workbench).getAllByTestId("workbench-row");
     expect(within(rows[0]).getByText("Incident summary")).toBeInTheDocument();
   });
+
+  it("marks a message read and reloads the actionable list and summary", async () => {
+    const user = userEvent.setup();
+    let currentOverview = overviewWithPriorityItems();
+    const message = currentOverview.unread_notifications[0];
+    const { client, calls } = createMockApiClient({
+      "GET /me/overview": () => currentOverview,
+      "POST /notifications/73/read": () => {
+        currentOverview = {
+          ...currentOverview,
+          unread_notifications: [],
+          priority_items: currentOverview.priority_items.filter(
+            (item) => item.key !== "notification-73"
+          ),
+          summary: { ...currentOverview.summary, unread_notifications: 0 }
+        };
+        return { ...message, is_read: true, read_at: "2026-07-10T08:15:00" };
+      }
+    });
+
+    renderWithProviders(
+      <DashboardView
+        client={client}
+        onOpenService={vi.fn()}
+        onOpenConnector={vi.fn()}
+        onOpenWorkCard={vi.fn()}
+        onOpenNotification={vi.fn()}
+      />
+    );
+
+    await user.click(await screen.findByRole("button", { name: "Mark Incident summary read" }));
+
+    expect(await screen.findByText("No unread messages")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Mark Incident summary read" })).not.toBeInTheDocument();
+    expect(screen.getAllByText("Messages")[0].parentElement).toHaveTextContent("0");
+    expect(calls.filter((call) => call.path === "/me/overview")).toHaveLength(2);
+    expect(calls).toContainEqual({
+      method: "POST",
+      path: "/notifications/73/read",
+      body: undefined
+    });
+  });
+
+  it("snoozes a message for one hour and sends a backend-compatible timestamp", async () => {
+    const user = userEvent.setup();
+    let currentOverview = overviewWithPriorityItems();
+    const message = currentOverview.unread_notifications[0];
+    const { client, calls } = createMockApiClient({
+      "GET /me/overview": () => currentOverview,
+      "POST /notifications/73/snooze": (body) => {
+        currentOverview = {
+          ...currentOverview,
+          unread_notifications: [],
+          priority_items: currentOverview.priority_items.filter(
+            (item) => item.key !== "notification-73"
+          ),
+          summary: { ...currentOverview.summary, unread_notifications: 0 }
+        };
+        return {
+          ...message,
+          snoozed_until: (body as { snoozed_until: string }).snoozed_until
+        };
+      }
+    });
+
+    renderWithProviders(
+      <DashboardView
+        client={client}
+        onOpenService={vi.fn()}
+        onOpenConnector={vi.fn()}
+        onOpenWorkCard={vi.fn()}
+        onOpenNotification={vi.fn()}
+      />
+    );
+
+    await user.click(
+      await screen.findByRole("button", { name: "Snooze Incident summary for 1 hour" })
+    );
+
+    expect(await screen.findByText("No unread messages")).toBeInTheDocument();
+    const snoozeCall = calls.find((call) => call.path === "/notifications/73/snooze");
+    expect((snoozeCall?.body as { snoozed_until: string }).snoozed_until).toMatch(
+      /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/
+    );
+    expect(calls.filter((call) => call.path === "/me/overview")).toHaveLength(2);
+  });
+
+  it("keeps a message actionable when a quick action fails", async () => {
+    const user = userEvent.setup();
+    const { client, calls } = createMockApiClient({
+      "GET /me/overview": overviewWithPriorityItems(),
+      "POST /notifications/73/dismiss": () =>
+        Promise.reject(new Error("Could not save notification receipt"))
+    });
+
+    renderWithProviders(
+      <DashboardView
+        client={client}
+        onOpenService={vi.fn()}
+        onOpenConnector={vi.fn()}
+        onOpenWorkCard={vi.fn()}
+        onOpenNotification={vi.fn()}
+      />
+    );
+
+    await user.click(await screen.findByRole("button", { name: "Dismiss Incident summary" }));
+
+    expect((await screen.findAllByText("Could not save notification receipt")).length).toBeGreaterThan(0);
+    expect(screen.getByRole("button", { name: "Mark Incident summary read" })).toBeInTheDocument();
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Dismiss Incident summary" })).toBeEnabled()
+    );
+    expect(calls.filter((call) => call.path === "/me/overview")).toHaveLength(1);
+  });
 });
 
 function overviewWithPriorityItems(): MeOverviewResponse {
   return {
-    user: { id: 1, username: "admin", roles: ["admin"] },
+    user: {
+      id: 1,
+      username: "admin",
+      roles: ["admin"],
+      capabilities: {
+        manage_connectors: true,
+        view_audit: true,
+        manage_maintainers: true,
+        view_user_directory: true
+      },
+      maintainer_access: []
+    },
     maintainers: [],
     services: [
       {
@@ -120,6 +253,32 @@ function overviewWithPriorityItems(): MeOverviewResponse {
       }
     ],
     packages: [],
+    today_calendar_events: [
+      {
+        id: 81,
+        source: "graph-calendar",
+        external_id: "evt-standup",
+        title: "Platform standup",
+        body: "Daily engineering sync",
+        organizer: "Taylor Lin",
+        location: "Teams",
+        starts_at: localTodayAt(9, 30),
+        ends_at: localTodayAt(10, 0),
+        time_zone: "Taipei Standard Time",
+        is_all_day: false,
+        is_cancelled: false,
+        web_url: "https://outlook.example.test/events/evt-standup",
+        join_url: "https://teams.example.test/platform-standup",
+        connector_id: 12,
+        owner_user_id: 1,
+        maintainer_id: null,
+        source_updated_at: null,
+        last_seen_run_id: 90,
+        archived_at: null,
+        created_at: localTodayAt(8, 0),
+        updated_at: localTodayAt(8, 0)
+      }
+    ],
     open_work_cards: [
       {
         id: 42,
@@ -144,9 +303,19 @@ function overviewWithPriorityItems(): MeOverviewResponse {
         body: "Production incident review starts at 14:00.",
         severity: "critical",
         is_read: false,
+        source_is_read: false,
         url: null,
         created_at: "2026-05-19T00:00:00",
-        updated_at: "2026-05-19T00:04:00"
+        updated_at: "2026-05-19T00:04:00",
+        connector_id: 12,
+        owner_user_id: 1,
+        maintainer_id: null,
+        source_updated_at: "2026-05-19T00:04:00",
+        last_seen_run_id: 91,
+        archived_at: null,
+        read_at: null,
+        dismissed_at: null,
+        snoozed_until: null
       }
     ],
     failed_connector_runs: [
@@ -163,7 +332,17 @@ function overviewWithPriorityItems(): MeOverviewResponse {
         finished_at: "2026-05-19T00:01:00",
         trigger: "scheduled",
         claimed_at: null,
-        worker_id: "worker-1"
+        worker_id: "worker-1",
+        attempt_count: 1,
+        max_attempts: 3,
+        next_attempt_at: "2026-05-19T00:00:00",
+        lease_expires_at: null,
+        heartbeat_at: "2026-05-19T00:00:15",
+        cancel_requested_at: null,
+        cancelled_at: null,
+        parent_run_id: null,
+        snapshot_complete: null,
+        archived_count: 0
       }
     ],
     priority_items: [
@@ -241,9 +420,19 @@ function overviewWithPriorityItems(): MeOverviewResponse {
       services: 1,
       unhealthy_services: 1,
       packages: 0,
+      today_calendar_events: 1,
       open_work_cards: 1,
       unread_notifications: 1,
       failed_connector_runs: 1
     }
   };
+}
+
+function localTodayAt(hours: number, minutes: number): string {
+  const date = new Date();
+  date.setHours(hours, minutes, 0, 0);
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(
+    date.getHours()
+  )}:${pad(date.getMinutes())}:00`;
 }

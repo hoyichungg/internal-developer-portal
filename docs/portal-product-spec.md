@@ -200,6 +200,7 @@ The project already has:
 - Azure DevOps work card adapter.
 - Generic monitoring service health adapter.
 - Microsoft Graph Calendar adapter for Outlook calendar events.
+- First-class scoped calendar-event records and a today-meetings dashboard.
 - Microsoft Graph Mail adapter for Outlook mail notifications.
 - Microsoft Graph OAuth connect flow, refresh-token handling, and encrypted token rotation.
 - Generic ERP private message HTTP adapter for notification imports.

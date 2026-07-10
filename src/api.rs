@@ -35,6 +35,8 @@ pub enum ApiError {
     Forbidden,
     NotFound,
     Database(DieselError),
+    DatabaseUnavailable(DieselError),
+    ServiceUnavailable,
     Internal,
 }
 
@@ -79,6 +81,11 @@ pub fn internal_server_error() -> ApiError {
     ApiError::Internal
 }
 
+#[rocket::catch(503)]
+pub fn service_unavailable() -> ApiError {
+    ApiError::ServiceUnavailable
+}
+
 impl ApiError {
     fn status(&self) -> Status {
         match self {
@@ -87,6 +94,7 @@ impl ApiError {
             Self::Forbidden => Status::Forbidden,
             Self::NotFound => Status::NotFound,
             Self::Database(_) | Self::Internal => Status::InternalServerError,
+            Self::DatabaseUnavailable(_) | Self::ServiceUnavailable => Status::ServiceUnavailable,
         }
     }
 
@@ -108,6 +116,11 @@ impl ApiError {
             Self::Database(_) | Self::Internal => (
                 "internal_server_error",
                 "An internal server error occurred.",
+                None,
+            ),
+            Self::DatabaseUnavailable(_) | Self::ServiceUnavailable => (
+                "service_unavailable",
+                "The service is temporarily unavailable.",
                 None,
             ),
         };
@@ -133,7 +146,13 @@ impl From<DieselError> for ApiError {
 
 impl<'r> Responder<'r, 'static> for ApiError {
     fn respond_to(self, request: &'r Request<'_>) -> response::Result<'static> {
-        if matches!(self, Self::Database(_) | Self::Internal) {
+        if matches!(
+            self,
+            Self::Database(_)
+                | Self::DatabaseUnavailable(_)
+                | Self::Internal
+                | Self::ServiceUnavailable
+        ) {
             rocket::error!("{:?}", self);
         }
 

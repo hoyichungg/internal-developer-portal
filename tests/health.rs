@@ -23,3 +23,48 @@ fn test_health_endpoint() {
         })
     );
 }
+
+#[test]
+fn test_liveness_endpoint() {
+    let client = Client::new();
+    let response = client
+        .get(format!("{}/livez", common::APP_HOST))
+        .send()
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body: Value = response.json().unwrap();
+    assert_eq!(
+        body,
+        json!({
+            "data": {
+                "status": "ok",
+                "service": "internal-developer-portal-api"
+            }
+        })
+    );
+}
+
+#[test]
+fn test_readiness_endpoint_checks_database() {
+    let client = Client::new();
+    let response = client
+        .get(format!("{}/readyz", common::APP_HOST))
+        .send()
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body: Value = response.json().unwrap();
+    assert_eq!(
+        body,
+        json!({
+            "data": {
+                "status": "ok",
+                "service": "internal-developer-portal-api",
+                "checks": {
+                    "database": "ok"
+                }
+            }
+        })
+    );
+}

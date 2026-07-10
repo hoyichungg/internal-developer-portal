@@ -17,11 +17,13 @@ export type ConnectorConfigDiagnostic = {
 
 type JsonRecord = Record<string, unknown>;
 
+export type ConnectorConfigLoadState = "idle" | "loading" | "ready" | "missing" | "error";
+
 export const defaultConnectorConfig: ConnectorConfigForm = {
   target: "work_cards",
   enabled: true,
   schedule_cron: "",
-  config: JSON.stringify({ adapter: "azure_devops" }, null, 2),
+  config: JSON.stringify({ adapter: "azure_devops", max_items: 1000 }, null, 2),
   sample_payload: JSON.stringify({ items: [] }, null, 2)
 };
 
@@ -66,6 +68,7 @@ export const connectorTemplates: ConnectorTemplate[] = [
       project: "platform",
       wiql: "SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = @project ORDER BY [System.ChangedDate] DESC",
       web_url_base: "https://dev.azure.com/acme/platform/_workitems/edit",
+      max_items: 1000,
       timeout_seconds: 15
     },
     sample_payload: {
@@ -85,7 +88,7 @@ export const connectorTemplates: ConnectorTemplate[] = [
   {
     id: "microsoft_graph_calendar",
     label: "Microsoft Graph calendar",
-    target: "notifications",
+    target: "calendar_events",
     schedule_cron: "@every 15m",
     config: {
       adapter: "microsoft_graph_calendar",
@@ -98,6 +101,8 @@ export const connectorTemplates: ConnectorTemplate[] = [
       time_zone: "UTC",
       lookahead_hours: 24,
       top: 25,
+      max_pages: 20,
+      max_items: 1000,
       timeout_seconds: 15
     },
     sample_payload: {
@@ -106,17 +111,24 @@ export const connectorTemplates: ConnectorTemplate[] = [
           external_id: "evt-standup",
           title: "Calendar: Platform standup",
           body: "Organizer: Taylor Lin | Location: Teams | Starts: 2026-05-19T09:30:00 UTC",
-          severity: "info",
-          is_read: false,
-          url: "https://outlook.office.com/calendar/item/evt-standup"
+          organizer: "Taylor Lin",
+          location: "Teams",
+          starts_at: "2026-05-19T09:30:00",
+          ends_at: "2026-05-19T10:00:00",
+          time_zone: "UTC",
+          is_all_day: false,
+          is_cancelled: false,
+          web_url: "https://outlook.office.com/calendar/item/evt-standup",
+          join_url: "https://teams.microsoft.com/l/meetup-join/evt-standup"
         }
-      ]
+      ],
+      snapshot_complete: true
     }
   },
   {
     id: "calendar_notifications",
-    label: "Calendar notifications",
-    target: "notifications",
+    label: "Sample calendar events",
+    target: "calendar_events",
     schedule_cron: "@every 30m",
     config: {
       adapter: "calendar_sample",
@@ -127,6 +139,7 @@ export const connectorTemplates: ConnectorTemplate[] = [
           organizer: "Taylor Lin",
           location: "Teams",
           starts_at: "2026-05-11T09:30:00Z",
+          ends_at: "2026-05-11T10:00:00Z",
           web_link: "https://calendar.example.test/events/platform-standup"
         }
       ]
@@ -137,11 +150,18 @@ export const connectorTemplates: ConnectorTemplate[] = [
           external_id: "calendar-platform-standup",
           title: "Calendar: Platform standup in 15 minutes",
           body: "Organizer: Taylor Lin | Location: Teams",
-          severity: "info",
-          is_read: false,
-          url: "https://calendar.example.test/events/platform-standup"
+          organizer: "Taylor Lin",
+          location: "Teams",
+          starts_at: "2026-05-11T09:30:00",
+          ends_at: "2026-05-11T10:00:00",
+          time_zone: "UTC",
+          is_all_day: false,
+          is_cancelled: false,
+          web_url: "https://calendar.example.test/events/platform-standup",
+          join_url: null
         }
-      ]
+      ],
+      snapshot_complete: true
     }
   },
   {
@@ -161,6 +181,8 @@ export const connectorTemplates: ConnectorTemplate[] = [
       unread_only: true,
       lookback_hours: 24,
       top: 25,
+      max_pages: 20,
+      max_items: 1000,
       timeout_seconds: 15
     },
     sample_payload: {
@@ -190,6 +212,7 @@ export const connectorTemplates: ConnectorTemplate[] = [
       unread_only: true,
       lookback_hours: 24,
       top: 25,
+      snapshot_complete: false,
       timeout_seconds: 15
     },
     sample_payload: {
@@ -340,14 +363,17 @@ function validateAdapterConfig(
       break;
     case "calendar_sample":
     case "calendar":
-      validateSampleNotificationConfig(diagnostics, target, config, "events");
+      validateSampleNotificationConfig(diagnostics, target, config, "events", [
+        "calendar_events",
+        "notifications"
+      ]);
       break;
     case "outlook_mail_sample":
     case "outlook":
     case "erp_messages_sample":
     case "erp_messages":
     case "erp":
-      validateSampleNotificationConfig(diagnostics, target, config, "messages");
+      validateSampleNotificationConfig(diagnostics, target, config, "messages", ["notifications"]);
       break;
     default:
       diagnostics.push({
@@ -376,6 +402,7 @@ function validateAzureDevOpsConfig(
     "web_url_base"
   ]);
   validatePositiveInteger(diagnostics, config, "timeout_seconds");
+  validateIntegerRange(diagnostics, config, "max_items", 1, 10000);
 }
 
 function validateMonitoringConfig(
@@ -394,7 +421,10 @@ function validateGraphCalendarConfig(
   target: string,
   config: JsonRecord
 ) {
-  requireTarget(diagnostics, "microsoft_graph_calendar", target, "notifications");
+  requireOneOfTargets(diagnostics, "microsoft_graph_calendar", target, [
+    "calendar_events",
+    "notifications"
+  ]);
   validateUrlFields(diagnostics, config, [
     "calendar_view_url",
     "base_url",
@@ -404,6 +434,8 @@ function validateGraphCalendarConfig(
   validatePositiveInteger(diagnostics, config, "timeout_seconds");
   validateIntegerRange(diagnostics, config, "top", 1, 50);
   validateIntegerRange(diagnostics, config, "lookahead_hours", 1, 168);
+  validateIntegerRange(diagnostics, config, "max_pages", 1, 100);
+  validateIntegerRange(diagnostics, config, "max_items", 1, 10000);
 }
 
 function validateGraphMailConfig(
@@ -422,6 +454,8 @@ function validateGraphMailConfig(
   validatePositiveInteger(diagnostics, config, "timeout_seconds");
   validateIntegerRange(diagnostics, config, "top", 1, 50);
   validateIntegerRange(diagnostics, config, "lookback_hours", 1, 720);
+  validateIntegerRange(diagnostics, config, "max_pages", 1, 100);
+  validateIntegerRange(diagnostics, config, "max_items", 1, 10000);
 }
 
 function validateErpPrivateMessagesConfig(
@@ -435,6 +469,7 @@ function validateErpPrivateMessagesConfig(
   validateIntegerRange(diagnostics, config, "top", 1, 100);
   validateIntegerRange(diagnostics, config, "limit", 1, 100);
   validateIntegerRange(diagnostics, config, "lookback_hours", 1, 720);
+  validateBoolean(diagnostics, config, "snapshot_complete");
 
   const apiKeyHeader = stringField(config, "api_key_header");
   if (apiKeyHeader && !/^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/.test(apiKeyHeader)) {
@@ -449,9 +484,10 @@ function validateSampleNotificationConfig(
   diagnostics: ConnectorConfigDiagnostic[],
   target: string,
   config: JsonRecord,
-  itemField: string
+  itemField: string,
+  targets: string[]
 ) {
-  requireTarget(diagnostics, "sample notification adapter", target, "notifications");
+  requireOneOfTargets(diagnostics, "sample notification adapter", target, targets);
 
   const items = config[itemField];
   if (items !== undefined && !Array.isArray(items)) {
@@ -472,6 +508,20 @@ function requireTarget(
     diagnostics.push({
       level: "error",
       message: `${adapter} config requires target ${expected}.`
+    });
+  }
+}
+
+function requireOneOfTargets(
+  diagnostics: ConnectorConfigDiagnostic[],
+  adapter: string,
+  target: string,
+  expected: string[]
+) {
+  if (!expected.includes(target)) {
+    diagnostics.push({
+      level: "error",
+      message: `${adapter} config requires target ${expected.join(" or ")}.`
     });
   }
 }
@@ -550,6 +600,21 @@ function validateIntegerRange(
     diagnostics.push({
       level: "error",
       message: `${field} must be an integer from ${min} to ${max}.`
+    });
+  }
+}
+
+function validateBoolean(
+  diagnostics: ConnectorConfigDiagnostic[],
+  config: JsonRecord,
+  field: string
+) {
+  const value = config[field];
+
+  if (value !== undefined && typeof value !== "boolean") {
+    diagnostics.push({
+      level: "error",
+      message: `${field} must be a boolean.`
     });
   }
 }

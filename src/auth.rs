@@ -6,7 +6,8 @@ use rocket_db_pools::Connection;
 use crate::api::ApiError;
 use crate::models::{Role, Session, User};
 use crate::repositories::{
-    MaintainerMemberRepository, RoleRepository, SessionRepository, UserRepository,
+    MaintainerMemberRepository, RecordAccessScope, RoleRepository, SessionRepository,
+    UserRepository,
 };
 use crate::rocket_routes::DbConn;
 
@@ -85,6 +86,22 @@ pub async fn can_view_maintainer_members(
         Err(diesel::result::Error::NotFound) => Ok(false),
         Err(error) => Err(error.into()),
     }
+}
+
+pub async fn record_access_scope(
+    db: &mut Connection<DbConn>,
+    auth: &AuthenticatedUser,
+) -> Result<RecordAccessScope, ApiError> {
+    let memberships = MaintainerMemberRepository::find_by_user(db, auth.user.id).await?;
+
+    Ok(RecordAccessScope {
+        user_id: auth.user.id,
+        is_admin: auth.is_admin(),
+        maintainer_ids: memberships
+            .into_iter()
+            .map(|membership| membership.maintainer_id)
+            .collect(),
+    })
 }
 
 async fn require_maintainer_member_role(
