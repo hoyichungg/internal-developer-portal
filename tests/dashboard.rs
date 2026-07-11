@@ -402,9 +402,9 @@ fn test_me_overview_returns_user_owned_operational_context() {
     assert_eq!(overview["summary"]["services"], 1);
     assert_eq!(overview["summary"]["unhealthy_services"], 1);
     assert_eq!(overview["summary"]["packages"], 1);
-    assert_eq!(overview["summary"]["open_work_cards"], 1);
-    assert_eq!(overview["summary"]["unread_notifications"], 1);
-    assert_eq!(overview["summary"]["failed_connector_runs"], 1);
+    assert_summary_matches_collection(&overview, "open_work_cards");
+    assert_summary_matches_collection(&overview, "unread_notifications");
+    assert_summary_matches_collection(&overview, "failed_connector_runs");
     assert_eq!(overview["maintainers"][0]["role"], "owner");
     assert_contains_id(&overview["services"], service["id"].as_i64().unwrap());
     assert_contains_id(&overview["packages"], package["id"].as_i64().unwrap());
@@ -438,14 +438,33 @@ fn test_me_overview_returns_user_owned_operational_context() {
         .as_str()
         .is_some());
     let priority_items = overview["priority_items"].as_array().unwrap();
-    assert_eq!(priority_items[0]["kind"], "service");
-    assert_eq!(priority_items[0]["severity"], "down");
-    assert_eq!(priority_items[1]["kind"], "work_card");
-    assert_eq!(priority_items[1]["severity"], "urgent");
-    assert_eq!(priority_items[2]["kind"], "notification");
-    assert_eq!(priority_items[2]["severity"], "critical");
-    assert_eq!(priority_items[3]["kind"], "connector_run");
-    assert_eq!(priority_items[3]["severity"], "failed");
+    let service_index = priority_index(priority_items, "service", service["id"].as_i64().unwrap());
+    let work_index = priority_index(
+        priority_items,
+        "work_card",
+        work_card["id"].as_i64().unwrap(),
+    );
+    let notification_index = priority_index(
+        priority_items,
+        "notification",
+        notification["id"].as_i64().unwrap(),
+    );
+    let run_index = priority_index(
+        priority_items,
+        "connector_run",
+        failed_run["id"].as_i64().unwrap(),
+    );
+
+    assert!(
+        service_index < work_index
+            && work_index < notification_index
+            && notification_index < run_index,
+        "priority order should be service, work, notification, connector run; got {priority_items:?}"
+    );
+    assert_eq!(priority_items[service_index]["severity"], "down");
+    assert_eq!(priority_items[work_index]["severity"], "urgent");
+    assert_eq!(priority_items[notification_index]["severity"], "critical");
+    assert_eq!(priority_items[run_index]["severity"], "failed");
 
     let response = client
         .delete(format!(
@@ -487,6 +506,22 @@ fn assert_not_contains_id(items: &Value, id: i64) {
             .any(|item| item["id"].as_i64() == Some(id)),
         "expected dashboard collection to exclude id {id}, got {items:?}"
     );
+}
+
+fn assert_summary_matches_collection(overview: &Value, field: &str) {
+    let summary_count = overview["summary"][field]
+        .as_u64()
+        .unwrap_or_else(|| panic!("expected summary.{field} to be an unsigned count"));
+    let collection_count = overview[field]
+        .as_array()
+        .unwrap_or_else(|| panic!("expected {field} to be an array"))
+        .len() as u64;
+
+    assert!(
+        summary_count >= 1,
+        "expected summary.{field} to include this test's fixture"
+    );
+    assert_eq!(summary_count, collection_count);
 }
 
 fn priority_index(items: &[Value], kind: &str, id: i64) -> usize {

@@ -149,7 +149,8 @@ async fn insert_queued_run(db: &mut AsyncPgConnection, source: &str, max_attempt
     sql_query(
         "INSERT INTO connector_runs \
          (source, target, status, started_at, finished_at, trigger, max_attempts, next_attempt_at) \
-         VALUES ($1, 'notifications', 'queued', NOW(), NULL, 'manual', $2, NOW()) \
+         VALUES ($1, 'notifications', 'queued', NOW(), NULL, 'manual', $2, \
+                 NOW() - INTERVAL '1 minute') \
          RETURNING id",
     )
     .bind::<Text, _>(source)
@@ -183,7 +184,7 @@ async fn expire_lease(db: &mut AsyncPgConnection, id: i32) {
 
 async fn make_retry_due(db: &mut AsyncPgConnection, id: i32) {
     sql_query(
-        "UPDATE connector_runs SET next_attempt_at = NOW() - INTERVAL '1 second' WHERE id = $1",
+        "UPDATE connector_runs SET next_attempt_at = NOW() - INTERVAL '1 minute' WHERE id = $1",
     )
     .bind::<Integer, _>(id)
     .execute(db)

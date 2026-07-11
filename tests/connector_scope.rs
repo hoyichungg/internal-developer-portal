@@ -1,3 +1,6 @@
+// Keep the test-binary name free of Windows installer keywords such as
+// "update"; otherwise UAC installer detection can reject the unsigned test
+// executable with OS error 740 before the test harness starts.
 use reqwest::{blocking::Client, StatusCode};
 use serde_json::{json, Value};
 

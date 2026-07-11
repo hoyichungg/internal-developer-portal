@@ -623,27 +623,6 @@ impl ConnectorRunRepository {
         .await
     }
 
-    pub async fn start_direct_execution(
-        c: &mut AsyncPgConnection,
-        id: i32,
-    ) -> QueryResult<ConnectorRun> {
-        let now = Utc::now().naive_utc();
-        diesel::update(
-            connector_runs::table
-                .find(id)
-                .filter(connector_runs::status.eq("queued")),
-        )
-        .set((
-            connector_runs::status.eq("running"),
-            connector_runs::claimed_at.eq(Some(now)),
-            connector_runs::attempt_count.eq(1),
-            connector_runs::max_attempts.eq(1),
-            connector_runs::heartbeat_at.eq(Some(now)),
-        ))
-        .get_result(c)
-        .await
-    }
-
     pub async fn renew_lease(
         c: &mut AsyncPgConnection,
         id: i32,

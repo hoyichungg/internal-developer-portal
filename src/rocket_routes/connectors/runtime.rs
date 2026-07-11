@@ -266,11 +266,42 @@ pub(crate) async fn create_running_run(
 ) -> Result<ConnectorRun, ApiError> {
     ConnectorRepository::find_or_create_default(db, source, default_connector_kind(source, target))
         .await?;
-    let run = create_queued_run(db, source, target, trigger, payload).await?;
+    let started_at = Utc::now().naive_utc();
+    let new_run = NewConnectorRun {
+        source: source.to_owned(),
+        target: target.to_owned(),
+        status: "running".to_owned(),
+        success_count: 0,
+        failure_count: 0,
+        duration_ms: 0,
+        error_message: None,
+        started_at,
+        finished_at: None,
+        trigger: trigger.to_owned(),
+        payload,
+        claimed_at: Some(started_at),
+        worker_id: None,
+        attempt_count: 1,
+        max_attempts: 1,
+        next_attempt_at: started_at,
+        lease_expires_at: None,
+        heartbeat_at: Some(started_at),
+        cancel_requested_at: None,
+        cancelled_at: None,
+        parent_run_id: None,
+        snapshot_complete: None,
+        archived_count: 0,
+    };
 
-    ConnectorRunRepository::start_direct_execution(db, run.id)
+    ConnectorRunRepository::create_if_no_pending(db, new_run)
         .await
-        .map_err(ApiError::from)
+        .map_err(ApiError::from)?
+        .ok_or_else(|| {
+            validation_error(
+                "status",
+                "an active run already exists for source and target",
+            )
+        })
 }
 
 pub(crate) async fn finish_connector_run(
