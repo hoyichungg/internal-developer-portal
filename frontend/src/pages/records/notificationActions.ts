@@ -1,5 +1,6 @@
 import type { ApiClient } from "../../api/client";
 import type { ApiId, Notification } from "../../types/api";
+import { isOffsetAwareRfc3339, toUtcRfc3339 } from "../../utils/dateTime";
 
 export type NotificationAction = "read" | "unread" | "dismiss" | "restore" | "snooze";
 export type SnoozePreset = "one-hour" | "tomorrow";
@@ -16,6 +17,9 @@ export async function performNotificationAction(
     if (!options.snoozedUntil) {
       throw new Error("Choose when the notification should return.");
     }
+    if (!isOffsetAwareRfc3339(options.snoozedUntil)) {
+      throw new Error("Snooze time must be RFC3339 with Z or an explicit offset.");
+    }
 
     return client.post<Notification>(path, { snoozed_until: options.snoozedUntil });
   }
@@ -25,7 +29,7 @@ export async function performNotificationAction(
 
 export function snoozeUntilForPreset(preset: SnoozePreset, now = new Date()): string {
   if (preset === "one-hour") {
-    return toNaiveUtc(new Date(now.getTime() + 60 * 60 * 1000));
+    return toUtcRfc3339(new Date(now.getTime() + 60 * 60 * 1000));
   }
 
   const tomorrowMorning = new Date(
@@ -37,10 +41,5 @@ export function snoozeUntilForPreset(preset: SnoozePreset, now = new Date()): st
     0,
     0
   );
-  return toNaiveUtc(tomorrowMorning);
-}
-
-function toNaiveUtc(value: Date): string {
-  // The backend currently accepts a UTC NaiveDateTime, so omit the timezone suffix and milliseconds.
-  return value.toISOString().slice(0, 19);
+  return toUtcRfc3339(tomorrowMorning);
 }

@@ -59,7 +59,7 @@ pub(super) async fn fetch_erp_private_messages(config_json: &str) -> Result<Valu
         config.api_key_header.as_deref(),
     )
     .await?;
-    let items = erp_message_items(&response)
+    let items = erp_message_items(&response)?
         .into_iter()
         .map(normalize_erp_message_notification)
         .collect::<Vec<_>>();
@@ -207,24 +207,34 @@ fn erp_message_severity(item: &Value) -> &'static str {
     "info"
 }
 
-fn erp_message_items(response: &Value) -> Vec<&Value> {
-    response
-        .get("items")
-        .or_else(|| response.get("messages"))
-        .or_else(|| response.get("private_messages"))
-        .or_else(|| response.get("privateMessages"))
-        .or_else(|| response.pointer("/data/items"))
-        .or_else(|| response.pointer("/data/messages"))
-        .or_else(|| response.pointer("/data/private_messages"))
-        .or_else(|| response.pointer("/data/privateMessages"))
-        .or_else(|| response.get("data"))
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>()
-        .into_iter()
-        .chain(response.as_array().into_iter().flatten())
-        .collect()
+fn erp_message_items(response: &Value) -> Result<Vec<&Value>, String> {
+    if let Some(items) = response.as_array() {
+        return Ok(items.iter().collect());
+    }
+
+    for path in [
+        "/items",
+        "/messages",
+        "/private_messages",
+        "/privateMessages",
+        "/data/items",
+        "/data/messages",
+        "/data/private_messages",
+        "/data/privateMessages",
+        "/data",
+    ] {
+        if let Some(value) = response.pointer(path) {
+            let items = value.as_array().ok_or_else(|| {
+                format!("erp_private_messages response field {path} must be an array")
+            })?;
+            return Ok(items.iter().collect());
+        }
+    }
+
+    Err(
+        "erp_private_messages response must include an explicit message collection array"
+            .to_owned(),
+    )
 }
 
 fn erp_private_messages_url(config: &ErpPrivateMessagesConfig) -> Result<String, String> {
@@ -281,4 +291,49 @@ fn erp_private_messages_query_params(
     }
 
     params
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fetch_erp_private_messages;
+    use crate::connector_adapters::shared::test_support::{MockHttpServer, MockResponse};
+    use serde_json::json;
+
+    #[rocket::async_test]
+    async fn rejects_success_response_without_an_explicit_message_collection() {
+        let server = MockHttpServer::start(vec![MockResponse::json(r#"{"status":"ok"}"#)]);
+        let config = json!({
+            "adapter": "erp_private_messages",
+            "messages_url": server.url("/messages"),
+            "snapshot_complete": true
+        });
+
+        let error = fetch_erp_private_messages(&config.to_string())
+            .await
+            .expect_err("an unknown 200 response shape must not become a complete empty snapshot");
+
+        assert!(
+            error.contains("must include an explicit message collection array"),
+            "unexpected error: {error}"
+        );
+        assert_eq!(server.requests().len(), 1);
+    }
+
+    #[rocket::async_test]
+    async fn accepts_an_explicit_empty_message_collection_as_complete() {
+        let server = MockHttpServer::start(vec![MockResponse::json(r#"{"items":[]}"#)]);
+        let config = json!({
+            "adapter": "erp_private_messages",
+            "messages_url": server.url("/messages"),
+            "snapshot_complete": true
+        });
+
+        let payload = fetch_erp_private_messages(&config.to_string())
+            .await
+            .expect("an explicit empty message collection is a valid complete snapshot");
+
+        assert_eq!(payload["snapshot_complete"], true);
+        assert!(payload["items"].as_array().is_some_and(Vec::is_empty));
+        assert_eq!(server.requests().len(), 1);
+    }
 }

@@ -1,4 +1,4 @@
-use chrono::{Duration, Utc};
+use chrono::{Duration, SecondsFormat, Utc};
 use serde_json::{json, Value};
 
 use super::erp::normalize_erp_message_notification;
@@ -128,7 +128,7 @@ fn normalize_outlook_mail_notification(item: &Value) -> Value {
 fn default_sample_notifications(kind: SampleNotificationKind) -> Vec<Value> {
     match kind {
         SampleNotificationKind::Calendar => {
-            let starts_at = Utc::now().naive_utc() + Duration::minutes(15);
+            let starts_at = Utc::now() + Duration::minutes(15);
             let ends_at = starts_at + Duration::minutes(30);
             vec![json!({
                 "external_id": "calendar-platform-standup",
@@ -139,8 +139,8 @@ fn default_sample_notifications(kind: SampleNotificationKind) -> Vec<Value> {
                 "url": "https://calendar.example.test/events/platform-standup",
                 "organizer": "Taylor Lin",
                 "location": "Teams",
-                "starts_at": starts_at.format("%Y-%m-%dT%H:%M:%S").to_string(),
-                "ends_at": ends_at.format("%Y-%m-%dT%H:%M:%S").to_string(),
+                "starts_at": starts_at.to_rfc3339_opts(SecondsFormat::Secs, true),
+                "ends_at": ends_at.to_rfc3339_opts(SecondsFormat::Secs, true),
                 "time_zone": "UTC",
                 "is_all_day": false,
                 "is_cancelled": false,
@@ -204,5 +204,35 @@ fn mail_body(item: &Value) -> Option<String> {
         (Some(sender), None) => Some(format!("From: {sender}")),
         (None, Some(preview)) => Some(preview),
         (None, None) => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{fetch_sample_notifications, SampleNotificationKind};
+    use chrono::{DateTime, Duration, FixedOffset};
+    use serde_json::Value;
+
+    #[test]
+    fn default_calendar_sample_uses_unambiguous_utc_instants() {
+        let payload = fetch_sample_notifications("{}", SampleNotificationKind::Calendar)
+            .expect("default calendar sample");
+        let item = payload["items"]
+            .as_array()
+            .and_then(|items| items.first())
+            .expect("calendar item");
+        let starts_at = parse_timestamp(item, "starts_at");
+        let ends_at = parse_timestamp(item, "ends_at");
+
+        assert_eq!(starts_at.offset().local_minus_utc(), 0);
+        assert_eq!(ends_at - starts_at, Duration::minutes(30));
+        assert!(item["starts_at"]
+            .as_str()
+            .is_some_and(|value| value.ends_with('Z')));
+    }
+
+    fn parse_timestamp(item: &Value, field: &str) -> DateTime<FixedOffset> {
+        DateTime::parse_from_rfc3339(item[field].as_str().expect("timestamp string"))
+            .expect("RFC3339 timestamp")
     }
 }

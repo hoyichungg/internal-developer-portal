@@ -1,4 +1,5 @@
 import { prettyJson } from "../../utils/format";
+import { isOffsetAwareRfc3339 } from "../../utils/dateTime";
 import type { ConnectorConfigForm, ConnectorConfigResponse, JsonValue } from "../../types/api";
 
 type ConnectorTemplate = {
@@ -23,7 +24,17 @@ export const defaultConnectorConfig: ConnectorConfigForm = {
   target: "work_cards",
   enabled: true,
   schedule_cron: "",
-  config: JSON.stringify({ adapter: "azure_devops", max_items: 1000 }, null, 2),
+  config: JSON.stringify(
+    {
+      adapter: "azure_devops",
+      organization: "acme",
+      project: "platform",
+      assignee_user_mappings: {},
+      max_items: 1000
+    },
+    null,
+    2
+  ),
   sample_payload: JSON.stringify({ items: [] }, null, 2)
 };
 
@@ -52,7 +63,7 @@ export const connectorTemplates: ConnectorTemplate[] = [
           repository_url: "https://github.com/acme/identity-api",
           dashboard_url: "https://grafana.example.test/d/identity",
           runbook_url: "https://docs.example.test/runbooks/identity",
-          last_checked_at: null
+          last_checked_at: "2026-05-19T09:15:00+08:00"
         }
       ]
     }
@@ -68,6 +79,7 @@ export const connectorTemplates: ConnectorTemplate[] = [
       project: "platform",
       wiql: "SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = @project ORDER BY [System.ChangedDate] DESC",
       web_url_base: "https://dev.azure.com/acme/platform/_workitems/edit",
+      assignee_user_mappings: {},
       max_items: 1000,
       timeout_seconds: 15
     },
@@ -79,7 +91,12 @@ export const connectorTemplates: ConnectorTemplate[] = [
           status: "in_progress",
           priority: "high",
           assignee: "platform-team",
-          due_at: null,
+          project: "platform",
+          work_item_type: "User Story",
+          assignee_source_id: null,
+          assignee_user_id: null,
+          due_at: "2026-05-20T17:00:00+08:00",
+          source_updated_at: "2026-05-19T09:15:00Z",
           url: "https://dev.azure.com/acme/platform/_workitems/edit/42"
         }
       ]
@@ -98,7 +115,6 @@ export const connectorTemplates: ConnectorTemplate[] = [
       client_secret: "",
       refresh_token: "",
       scope: "https://graph.microsoft.com/Calendars.Read offline_access",
-      time_zone: "UTC",
       lookahead_hours: 24,
       top: 25,
       max_pages: 20,
@@ -110,11 +126,11 @@ export const connectorTemplates: ConnectorTemplate[] = [
         {
           external_id: "evt-standup",
           title: "Calendar: Platform standup",
-          body: "Organizer: Taylor Lin | Location: Teams | Starts: 2026-05-19T09:30:00 UTC",
+          body: "Organizer: Taylor Lin | Location: Teams | Starts: 2026-05-19T09:30:00Z",
           organizer: "Taylor Lin",
           location: "Teams",
-          starts_at: "2026-05-19T09:30:00",
-          ends_at: "2026-05-19T10:00:00",
+          starts_at: "2026-05-19T09:30:00Z",
+          ends_at: "2026-05-19T10:00:00Z",
           time_zone: "UTC",
           is_all_day: false,
           is_cancelled: false,
@@ -152,8 +168,8 @@ export const connectorTemplates: ConnectorTemplate[] = [
           body: "Organizer: Taylor Lin | Location: Teams",
           organizer: "Taylor Lin",
           location: "Teams",
-          starts_at: "2026-05-11T09:30:00",
-          ends_at: "2026-05-11T10:00:00",
+          starts_at: "2026-05-11T09:30:00Z",
+          ends_at: "2026-05-11T10:00:00Z",
           time_zone: "UTC",
           is_all_day: false,
           is_cancelled: false,
@@ -302,11 +318,15 @@ export function connectorConfigDiagnostics(
   }
 
   const parsedSamplePayload = parseJsonValue(config.sample_payload, "Sample payload", diagnostics);
-  if (parsedSamplePayload !== undefined && !hasItemsArray(parsedSamplePayload)) {
-    diagnostics.push({
-      level: "error",
-      message: "Sample payload must include an items array."
-    });
+  if (parsedSamplePayload !== undefined) {
+    if (!hasItemsArray(parsedSamplePayload)) {
+      diagnostics.push({
+        level: "error",
+        message: "Sample payload must include an items array."
+      });
+    } else {
+      validateSamplePayloadDateTimes(diagnostics, config.target, parsedSamplePayload.items);
+    }
   }
 
   return diagnostics;
@@ -403,6 +423,65 @@ function validateAzureDevOpsConfig(
   ]);
   validatePositiveInteger(diagnostics, config, "timeout_seconds");
   validateIntegerRange(diagnostics, config, "max_items", 1, 10000);
+  validateOptionalBoundedString(diagnostics, config, "due_date_field", 128);
+  validateAzureAssigneeMappings(diagnostics, config);
+}
+
+function validateAzureAssigneeMappings(
+  diagnostics: ConnectorConfigDiagnostic[],
+  config: JsonRecord
+) {
+  const value = config.assignee_user_mappings;
+  if (value === undefined) {
+    return;
+  }
+  if (!isRecord(value)) {
+    diagnostics.push({
+      level: "error",
+      message: "assignee_user_mappings must be an object of source descriptors to portal user ids."
+    });
+    return;
+  }
+
+  Object.entries(value).forEach(([descriptor, userId]) => {
+    if (!descriptor.trim() || descriptor.length > 512) {
+      diagnostics.push({
+        level: "error",
+        message: "assignee_user_mappings keys must be non-empty source descriptors of at most 512 characters."
+      });
+    }
+    if (!Number.isInteger(userId) || Number(userId) < 1 || Number(userId) > 2_147_483_647) {
+      diagnostics.push({
+        level: "error",
+        message: "assignee_user_mappings values must be positive portal user ids."
+      });
+    }
+  });
+}
+
+function validateOptionalBoundedString(
+  diagnostics: ConnectorConfigDiagnostic[],
+  config: JsonRecord,
+  field: string,
+  maxLength: number
+) {
+  const value = config[field];
+  if (value === undefined) {
+    return;
+  }
+  if (typeof value !== "string" || !value.trim()) {
+    diagnostics.push({
+      level: "error",
+      message: `${field} must be a non-empty string when provided.`
+    });
+    return;
+  }
+  if (value.trim().length > maxLength) {
+    diagnostics.push({
+      level: "error",
+      message: `${field} must be at most ${maxLength} characters.`
+    });
+  }
 }
 
 function validateMonitoringConfig(
@@ -436,6 +515,8 @@ function validateGraphCalendarConfig(
   validateIntegerRange(diagnostics, config, "lookahead_hours", 1, 168);
   validateIntegerRange(diagnostics, config, "max_pages", 1, 100);
   validateIntegerRange(diagnostics, config, "max_items", 1, 10000);
+  validateOffsetDateTime(diagnostics, config, "start_at", "Config JSON");
+  validateOffsetDateTime(diagnostics, config, "end_at", "Config JSON");
 }
 
 function validateGraphMailConfig(
@@ -494,6 +575,90 @@ function validateSampleNotificationConfig(
     diagnostics.push({
       level: "error",
       message: `${itemField} must be an array when provided.`
+    });
+    return;
+  }
+
+  if (Array.isArray(items) && itemField === "events") {
+    validateDateTimeFieldsInItems(
+      diagnostics,
+      items,
+      ["starts_at", "ends_at"],
+      "Config JSON events"
+    );
+  }
+}
+
+function validateSamplePayloadDateTimes(
+  diagnostics: ConnectorConfigDiagnostic[],
+  target: string,
+  items: unknown[]
+) {
+  switch (target) {
+    case "calendar_events":
+      validateDateTimeFieldsInItems(
+        diagnostics,
+        items,
+        ["starts_at", "ends_at"],
+        "Sample payload items",
+        true
+      );
+      break;
+    case "work_cards":
+      validateDateTimeFieldsInItems(diagnostics, items, ["due_at"], "Sample payload items");
+      break;
+    case "service_health":
+      validateDateTimeFieldsInItems(
+        diagnostics,
+        items,
+        ["last_checked_at"],
+        "Sample payload items"
+      );
+      break;
+  }
+}
+
+function validateDateTimeFieldsInItems(
+  diagnostics: ConnectorConfigDiagnostic[],
+  items: unknown[],
+  fields: string[],
+  location: string,
+  required = false
+) {
+  items.forEach((item, index) => {
+    if (!isRecord(item)) {
+      return;
+    }
+
+    fields.forEach((field) =>
+      validateOffsetDateTime(diagnostics, item, field, `${location}[${index}]`, required)
+    );
+  });
+}
+
+function validateOffsetDateTime(
+  diagnostics: ConnectorConfigDiagnostic[],
+  record: JsonRecord,
+  field: string,
+  location: string,
+  required = false
+) {
+  const value = record[field];
+
+  if (value === undefined || value === null || value === "") {
+    if (required) {
+      diagnostics.push({
+        level: "error",
+        message: `${location}.${field} is required and must be RFC3339 with Z or an explicit offset.`
+      });
+    }
+    return;
+  }
+
+  if (!isOffsetAwareRfc3339(value)) {
+    diagnostics.push({
+      level: "error",
+      message: `${location}.${field} must be RFC3339 with Z or an explicit offset.`
     });
   }
 }
@@ -657,7 +822,7 @@ function parseJsonValue(
   }
 }
 
-function hasItemsArray(value: unknown) {
+function hasItemsArray(value: unknown): value is JsonRecord & { items: unknown[] } {
   return isRecord(value) && Array.isArray(value.items);
 }
 

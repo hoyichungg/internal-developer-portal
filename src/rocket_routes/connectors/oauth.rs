@@ -52,8 +52,8 @@ struct MicrosoftOAuthState {
     data = "<request>"
 )]
 pub async fn start_microsoft_oauth(
-    mut db: Connection<DbConn>,
     auth: AuthenticatedUser,
+    mut db: Connection<DbConn>,
     source: String,
     request: Json<MicrosoftOAuthAuthorizeRequest>,
 ) -> ApiResult<MicrosoftOAuthAuthorizeResponse> {
@@ -142,7 +142,7 @@ pub async fn start_microsoft_oauth(
         state,
         redirect_uri: request.redirect_uri,
         scope,
-        expires_at: expires_at.naive_utc(),
+        expires_at,
     })
 }
 
@@ -152,8 +152,8 @@ pub async fn start_microsoft_oauth(
     data = "<request>"
 )]
 pub async fn finish_microsoft_oauth(
-    mut db: Connection<DbConn>,
     auth: AuthenticatedUser,
+    mut db: Connection<DbConn>,
     request: Json<MicrosoftOAuthCallbackRequest>,
 ) -> ApiResult<MicrosoftOAuthCallbackResponse> {
     require_admin(&auth)?;

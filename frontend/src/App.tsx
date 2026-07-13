@@ -1,33 +1,50 @@
 import { notifications } from "@mantine/notifications";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import { createApiClient, isApiError } from "./api/client";
 import { AccessDenied } from "./components/AccessDenied";
 import { CenterStage } from "./components/CenterStage";
 import { PageLoader } from "./components/LoadingState";
 import { SessionRecoveryScreen } from "./components/SessionRecoveryScreen";
-import { useStoredToken } from "./hooks/useStoredToken";
 import { PortalShell } from "./layout/PortalShell";
 import { AuditView } from "./pages/audit/AuditView";
 import { CatalogView } from "./pages/catalog/CatalogView";
 import { ConnectorsView } from "./pages/connectors/ConnectorsView";
 import { DashboardView } from "./pages/dashboard/DashboardView";
+import {
+  entraLoginStartUrl,
+  hasAuthCallbackParameters,
+  parseEntraAuthCallback,
+  urlWithoutAuthCallbackParameters
+} from "./pages/login/authRouting";
 import { LoginScreen } from "./pages/login/LoginScreen";
 import { NotificationDetailView } from "./pages/records/NotificationDetailView";
 import { WorkCardDetailView } from "./pages/records/WorkCardDetailView";
 import { ServiceOverviewView } from "./pages/services/ServiceOverviewView";
+import { MyWorkView } from "./pages/work/MyWorkView";
+import { myWorkReturnHash } from "./pages/work/myWorkRouting";
+import {
+  clearLegacySessionCredentials,
+  publishSessionEvent,
+  subscribeToSessionEvents
+} from "./sessionEvents";
 import type {
   ApiId,
   ConnectorDrillTarget,
   LoginRequest,
   LoginResponse,
   MeResponse,
-  MicrosoftOAuthCallbackResponse
+  MicrosoftOAuthCallbackResponse,
+  PublicAuthConfig,
+  RevokeAllSessionsResponse
 } from "./types/api";
 
-const TOP_LEVEL_VIEWS = new Set(["dashboard", "connectors", "catalog", "audit"]);
+const TOP_LEVEL_VIEWS = new Set(["dashboard", "my-work", "connectors", "catalog", "audit"]);
+const UNCONFIRMED_ENTRA_SIGN_IN = "Microsoft sign-in could not be confirmed. Try again.";
+const UNCONFIRMED_PASSWORD_SIGN_IN = "Password sign-in could not be confirmed. Try again.";
 type AppView =
   | "dashboard"
+  | "my-work"
   | "connectors"
   | "catalog"
   | "audit"
@@ -127,7 +144,7 @@ function connectorHash(target?: ConnectorDrillTarget | null): string {
   return query ? `#connectors?${query}` : "#connectors";
 }
 
-function microsoftOAuthCallbackParams(): URLSearchParams | null {
+function connectorMicrosoftOAuthCallbackParams(): URLSearchParams | null {
   if (window.location.pathname !== "/oauth/microsoft/callback") {
     return null;
   }
@@ -135,11 +152,11 @@ function microsoftOAuthCallbackParams(): URLSearchParams | null {
   return new URLSearchParams(window.location.search);
 }
 
-function microsoftOAuthRedirectUri(): string {
+function connectorMicrosoftOAuthRedirectUri(): string {
   return `${window.location.origin}/oauth/microsoft/callback`;
 }
 
-function clearMicrosoftOAuthCallbackUrl() {
+function clearConnectorMicrosoftOAuthCallbackUrl() {
   window.history.replaceState(null, "", "/");
 }
 
@@ -156,12 +173,30 @@ function canAccessView(user: MeResponse, view: AppView): boolean {
 
 export default function App() {
   const initialRoute = useMemo(() => routeFromHash(), []);
-  const [token, setToken, storedExpiresAt] = useStoredToken();
+  const initialEntraAuthCallback = useMemo(
+    () =>
+      window.location.pathname === "/" ? parseEntraAuthCallback(window.location.search) : null,
+    []
+  );
   const [user, setUser] = useState<MeResponse | null>(null);
+  const [authConfig, setAuthConfig] = useState<PublicAuthConfig | null>(null);
+  const [authConfigError, setAuthConfigError] = useState<Error | null>(null);
+  const [authConfigAttempt, setAuthConfigAttempt] = useState(0);
+  const [authCallbackError, setAuthCallbackError] = useState<string | null>(() =>
+    initialEntraAuthCallback?.kind === "error" ? initialEntraAuthCallback.message : null
+  );
   const [view, setView] = useState(() => initialRoute.view);
   const [selectedServiceId, setSelectedServiceId] = useState<ApiId | null>(null);
   const [selectedWorkCardId, setSelectedWorkCardId] = useState<ApiId | null>(() =>
     initialRoute.view === "work-card-detail" ? initialRoute.recordId : null
+  );
+  const [selectedWorkCardBackHash, setSelectedWorkCardBackHash] = useState(() =>
+    initialRoute.view === "work-card-detail"
+      ? myWorkReturnHash(initialRoute.params) || "#dashboard"
+      : "#dashboard"
+  );
+  const [myWorkSearchParams, setMyWorkSearchParams] = useState(
+    () => new URLSearchParams(initialRoute.view === "my-work" ? initialRoute.params : undefined)
   );
   const [selectedNotificationId, setSelectedNotificationId] = useState<ApiId | null>(() =>
     initialRoute.view === "notification-detail" ? initialRoute.recordId : null
@@ -174,19 +209,40 @@ export default function App() {
   const [restoreError, setRestoreError] = useState<Error | null>(null);
   const [restoreAttempt, setRestoreAttempt] = useState(0);
   const restoreRequestIdRef = useRef(0);
-  const handledMicrosoftOAuthCallbackRef = useRef("");
+  const sessionGenerationRef = useRef(0);
+  const handledConnectorMicrosoftOAuthCallbackRef = useRef("");
+  const handledEntraAuthCallbackRef = useRef(false);
 
-  const handleUnauthorized = useCallback(() => {
+  const clearSessionState = useCallback(() => {
+    sessionGenerationRef.current += 1;
+    restoreRequestIdRef.current += 1;
     setUser(null);
     setRestoreError(null);
     setBooting(false);
-    setToken(null);
-  }, [setToken]);
+  }, []);
+
+  const requestSessionRestore = useCallback(() => {
+    restoreRequestIdRef.current += 1;
+    setUser(null);
+    setRestoreError(null);
+    setBooting(true);
+    setRestoreAttempt((attempt) => attempt + 1);
+  }, []);
+
+  const handleUnauthorized = useCallback(() => {
+    clearSessionState();
+    publishSessionEvent("signed-out");
+  }, [clearSessionState]);
 
   const client = useMemo(
-    () => createApiClient(token, { onUnauthorized: handleUnauthorized }),
-    [handleUnauthorized, token]
+    () =>
+      createApiClient({
+        onUnauthorized: handleUnauthorized,
+        getSessionGeneration: () => sessionGenerationRef.current
+      }),
+    [handleUnauthorized]
   );
+  const sessionProbeClient = useMemo(() => createApiClient(), []);
 
   useEffect(() => {
     function syncViewFromHash() {
@@ -194,6 +250,14 @@ export default function App() {
       setView(route.view);
       setSelectedServiceId(null);
       setSelectedWorkCardId(route.view === "work-card-detail" ? route.recordId : null);
+      setSelectedWorkCardBackHash(
+        route.view === "work-card-detail"
+          ? myWorkReturnHash(route.params) || "#dashboard"
+          : "#dashboard"
+      );
+      setMyWorkSearchParams(
+        new URLSearchParams(route.view === "my-work" ? route.params : undefined)
+      );
       setSelectedNotificationId(route.view === "notification-detail" ? route.recordId : null);
       setConnectorDrillTarget(
         route.view === "connectors" ? connectorTargetFromParams(route.params) : null
@@ -208,56 +272,62 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    clearLegacySessionCredentials();
+  }, []);
+
+  useLayoutEffect(() => {
+    if (
+      window.location.pathname !== "/" ||
+      !hasAuthCallbackParameters(window.location.search)
+    ) {
+      return;
+    }
+
+    window.history.replaceState(
+      null,
+      "",
+      urlWithoutAuthCallbackParameters(window.location.href)
+    );
+  }, []);
+
+  useEffect(
+    () =>
+      subscribeToSessionEvents((event) => {
+        if (event === "signed-out") {
+          clearSessionState();
+          return;
+        }
+
+        sessionGenerationRef.current += 1;
+        requestSessionRestore();
+      }),
+    [clearSessionState, requestSessionRestore]
+  );
+
+  useEffect(() => {
     const requestId = restoreRequestIdRef.current + 1;
     restoreRequestIdRef.current = requestId;
 
     async function restore() {
-      if (!token) {
-        setUser(null);
-        setRestoreError(null);
-        setBooting(false);
-        return;
-      }
-
-      if (isSessionExpired(storedExpiresAt)) {
-        setUser(null);
-        setRestoreError(null);
-        setBooting(false);
-        setToken(null);
-        return;
-      }
-
       setBooting(true);
       setRestoreError(null);
       setUser(null);
 
       try {
-        const me = await createApiClient(token, {
-          onUnauthorized: handleUnauthorized
-        }).get<MeResponse>("/me");
+        const me = await sessionProbeClient.get<MeResponse>("/me");
         if (restoreRequestIdRef.current !== requestId) {
           return;
         }
 
-        const expiresAt = validSessionExpiry(me.expires_at) ? me.expires_at : storedExpiresAt;
-        if (isSessionExpired(expiresAt)) {
-          setUser(null);
-          setToken(null);
-          return;
-        }
-
         setUser(me);
-        if (me.expires_at && me.expires_at !== storedExpiresAt && validSessionExpiry(me.expires_at)) {
-          setToken(token, me.expires_at);
-        }
+        setAuthCallbackError(null);
       } catch (error) {
         if (restoreRequestIdRef.current !== requestId) {
           return;
         }
 
         if (isApiError(error) && error.status === 401) {
-          setUser(null);
-          setToken(null);
+          clearSessionState();
           return;
         }
 
@@ -276,22 +346,104 @@ export default function App() {
         restoreRequestIdRef.current += 1;
       }
     };
-  }, [handleUnauthorized, restoreAttempt, setToken, token]);
+  }, [clearSessionState, restoreAttempt, sessionProbeClient]);
 
   useEffect(() => {
-    if (!token || !user) {
+    if (user || booting || restoreError || authConfig || authConfigError) {
       return;
     }
 
-    const params = microsoftOAuthCallbackParams();
+    let active = true;
+    setAuthConfigError(null);
+
+    sessionProbeClient
+      .get<PublicAuthConfig>("/auth/config")
+      .then((config) => {
+        if (active) {
+          setAuthConfig(config);
+        }
+      })
+      .catch((error) => {
+        if (active) {
+          setAuthConfigError(error instanceof Error ? error : new Error(String(error)));
+        }
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [
+    authConfig,
+    authConfigAttempt,
+    authConfigError,
+    booting,
+    restoreError,
+    sessionProbeClient,
+    user
+  ]);
+
+  useEffect(() => {
+    if (
+      !initialEntraAuthCallback ||
+      handledEntraAuthCallbackRef.current ||
+      booting ||
+      restoreError
+    ) {
+      return;
+    }
+
+    handledEntraAuthCallbackRef.current = true;
+
+    if (initialEntraAuthCallback.kind === "success") {
+      if (user?.auth_method === "entra") {
+        publishSessionEvent("signed-in");
+        notifications.show({
+          title: "Signed in with Microsoft",
+          message: user.username,
+          color: "teal"
+        });
+      } else {
+        if (user) {
+          notifications.show({
+            title: "Microsoft sign-in failed",
+            message: UNCONFIRMED_ENTRA_SIGN_IN,
+            color: "red"
+          });
+        } else {
+          setAuthCallbackError(UNCONFIRMED_ENTRA_SIGN_IN);
+        }
+      }
+      return;
+    }
+
+    if (user) {
+      setAuthCallbackError(null);
+      notifications.show({
+        title: "Microsoft sign-in failed",
+        message: initialEntraAuthCallback.message,
+        color: "red"
+      });
+    }
+  }, [booting, initialEntraAuthCallback, restoreError, user]);
+
+  useEffect(() => {
+    if (!user) {
+      return;
+    }
+
+    const params = connectorMicrosoftOAuthCallbackParams();
     if (!params) {
       return;
     }
     const callbackKey = params.toString();
-    if (!callbackKey || handledMicrosoftOAuthCallbackRef.current === callbackKey) {
+    if (!callbackKey || handledConnectorMicrosoftOAuthCallbackRef.current === callbackKey) {
       return;
     }
-    handledMicrosoftOAuthCallbackRef.current = callbackKey;
+    handledConnectorMicrosoftOAuthCallbackRef.current = callbackKey;
+    // Keep the values only in this closure. Remove code/state from browser
+    // history before the token-exchange request starts so later same-origin
+    // navigation cannot disclose them through a Referer.
+    clearConnectorMicrosoftOAuthCallbackUrl();
 
     let mounted = true;
     async function finishMicrosoftOAuth() {
@@ -301,7 +453,7 @@ export default function App() {
           {
             code: params.get("code"),
             state: params.get("state") || "",
-            redirect_uri: microsoftOAuthRedirectUri(),
+            redirect_uri: connectorMicrosoftOAuthRedirectUri(),
             error: params.get("error"),
             error_description: params.get("error_description")
           }
@@ -314,7 +466,7 @@ export default function App() {
           message: response.source,
           color: "teal"
         });
-        clearMicrosoftOAuthCallbackUrl();
+        clearConnectorMicrosoftOAuthCallbackUrl();
         openConnectorDrill({ source: response.source });
       } catch (error) {
         if (!mounted) {
@@ -325,7 +477,7 @@ export default function App() {
           message: error instanceof Error ? error.message : String(error),
           color: "red"
         });
-        clearMicrosoftOAuthCallbackUrl();
+        clearConnectorMicrosoftOAuthCallbackUrl();
         handleViewChange("connectors");
       }
     }
@@ -335,17 +487,29 @@ export default function App() {
     return () => {
       mounted = false;
     };
-  }, [client, token, user]);
+  }, [client, user]);
 
   async function handleLogin(credentials: LoginRequest) {
-    const login = await createApiClient(null).post<LoginResponse>("/login", credentials);
-    setBooting(true);
-    setUser(null);
+    if (authConfig?.password_login_enabled !== true) {
+      throw new Error("Password sign-in is disabled.");
+    }
+
+    await createApiClient().post<LoginResponse>("/login", credentials);
+    const me = await sessionProbeClient.get<MeResponse>("/me");
+    if (me.auth_method !== "password") {
+      throw new Error(UNCONFIRMED_PASSWORD_SIGN_IN);
+    }
+
+    sessionGenerationRef.current += 1;
+    restoreRequestIdRef.current += 1;
+    setUser(me);
     setRestoreError(null);
-    setToken(login.token, login.expires_at);
+    setAuthCallbackError(null);
+    setBooting(false);
+    publishSessionEvent("signed-in");
     notifications.show({
       title: "Signed in",
-      message: "Session restored",
+      message: "Session established",
       color: "teal"
     });
   }
@@ -353,31 +517,64 @@ export default function App() {
   async function handleLogout() {
     try {
       await client.post("/logout", {});
-    } catch {
-      // Session might already be expired.
+    } catch (error) {
+      if (isApiError(error) && error.status === 401) {
+        return;
+      }
+
+      notifications.show({
+        title: "Sign out failed",
+        message: error instanceof Error ? error.message : String(error),
+        color: "red"
+      });
+      return;
     }
-    setUser(null);
-    setRestoreError(null);
-    setToken(null);
+    clearSessionState();
+    publishSessionEvent("signed-out");
+  }
+
+  async function handleRevokeAllSessions() {
+    if (!window.confirm("Sign out this account on every device and browser?")) {
+      return;
+    }
+
+    try {
+      const result = await client.post<RevokeAllSessionsResponse>("/sessions/revoke-all", {});
+      clearSessionState();
+      publishSessionEvent("signed-out");
+      notifications.show({
+        title: "Signed out everywhere",
+        message: `${result.revoked_sessions} session${result.revoked_sessions === 1 ? "" : "s"} revoked`,
+        color: "teal"
+      });
+    } catch (error) {
+      if (isApiError(error) && error.status === 401) {
+        return;
+      }
+
+      notifications.show({
+        title: "Could not revoke sessions",
+        message: error instanceof Error ? error.message : String(error),
+        color: "red"
+      });
+    }
   }
 
   function retrySessionRestore() {
-    setRestoreError(null);
-    setBooting(true);
-    setRestoreAttempt((attempt) => attempt + 1);
+    requestSessionRestore();
   }
 
-  function abandonStoredSession() {
-    setUser(null);
-    setRestoreError(null);
-    setBooting(false);
-    setToken(null);
+  function retryAuthConfig() {
+    setAuthConfig(null);
+    setAuthConfigError(null);
+    setAuthConfigAttempt((attempt) => attempt + 1);
   }
 
   function handleViewChange(nextView: AppView) {
     setView(nextView);
     setSelectedServiceId(null);
     setSelectedWorkCardId(null);
+    setSelectedWorkCardBackHash("#dashboard");
     setSelectedNotificationId(null);
     setConnectorDrillTarget(null);
 
@@ -410,7 +607,7 @@ export default function App() {
     }
   }
 
-  function openWorkCardDetail(workCardId: string | number) {
+  function openWorkCardDetail(workCardId: string | number, detailHash?: string) {
     const id = Number(workCardId);
     if (!Number.isInteger(id) || id <= 0) {
       return;
@@ -418,11 +615,13 @@ export default function App() {
 
     setSelectedServiceId(null);
     setSelectedWorkCardId(id);
+    const detailParams = new URLSearchParams(detailHash?.split("?", 2)[1] || "");
+    setSelectedWorkCardBackHash(myWorkReturnHash(detailParams) || "#dashboard");
     setSelectedNotificationId(null);
     setConnectorDrillTarget(null);
     setView("work-card-detail");
 
-    const nextHash = `#work-cards/${id}`;
+    const nextHash = detailHash || `#work-cards/${id}`;
     if (window.location.hash !== nextHash) {
       window.location.hash = nextHash;
     }
@@ -454,23 +653,37 @@ export default function App() {
     );
   }
 
-  if (token && !user && restoreError) {
+  if (!user && restoreError) {
     return (
       <SessionRecoveryScreen
         error={restoreError}
         onRetry={retrySessionRestore}
-        onSignOut={abandonStoredSession}
+        onSignOut={() => void handleLogout()}
       />
     );
   }
 
-  if (!token || !user) {
-    return <LoginScreen onLogin={handleLogin} />;
+  if (!user) {
+    return (
+      <LoginScreen
+        authConfig={authConfig}
+        authConfigError={authConfigError}
+        callbackError={authCallbackError}
+        entraLoginUrl={entraLoginStartUrl(window.location.hash)}
+        onLogin={handleLogin}
+        onRetryAuthConfig={retryAuthConfig}
+      />
+    );
   }
 
   if (!canAccessView(user, view)) {
     return (
-      <PortalShell user={user} view={view} onLogout={handleLogout}>
+      <PortalShell
+        user={user}
+        view={view}
+        onLogout={handleLogout}
+        onRevokeAllSessions={handleRevokeAllSessions}
+      >
         <AccessDenied onGoHome={() => handleViewChange("dashboard")} />
       </PortalShell>
     );
@@ -481,12 +694,16 @@ export default function App() {
       user={user}
       view={
         view === "service-overview" ||
-        view === "work-card-detail" ||
         view === "notification-detail"
           ? "dashboard"
+          : view === "work-card-detail"
+            ? selectedWorkCardBackHash.startsWith("#my-work")
+              ? "my-work"
+              : "dashboard"
           : view
       }
       onLogout={handleLogout}
+      onRevokeAllSessions={handleRevokeAllSessions}
     >
       {view === "dashboard" && (
         <DashboardView
@@ -496,6 +713,20 @@ export default function App() {
           onOpenConnector={openConnectorDrill}
           onOpenWorkCard={openWorkCardDetail}
           onOpenNotification={openNotificationDetail}
+        />
+      )}
+      {view === "my-work" && (
+        <MyWorkView
+          client={client}
+          searchParams={myWorkSearchParams}
+          onNavigate={(hash) => {
+            if (window.location.hash !== hash) {
+              window.location.hash = hash;
+            }
+          }}
+          onOpenWorkCard={(workCardId, detailHash) =>
+            openWorkCardDetail(workCardId, detailHash)
+          }
         />
       )}
       {view === "service-overview" && selectedServiceId && (
@@ -509,7 +740,11 @@ export default function App() {
         <WorkCardDetailView
           client={client}
           workCardId={selectedWorkCardId}
-          onBack={() => handleViewChange("dashboard")}
+          onBack={() => {
+            if (window.location.hash !== selectedWorkCardBackHash) {
+              window.location.hash = selectedWorkCardBackHash;
+            }
+          }}
           onOpenConnector={openConnectorDrill}
         />
       )}
@@ -532,24 +767,4 @@ export default function App() {
       {view === "audit" && <AuditView client={client} />}
     </PortalShell>
   );
-}
-
-function validSessionExpiry(value?: string | null): value is string {
-  return sessionExpiryMilliseconds(value) !== null;
-}
-
-function isSessionExpired(value?: string | null): boolean {
-  const expiresAt = sessionExpiryMilliseconds(value);
-  return expiresAt !== null && expiresAt <= Date.now();
-}
-
-function sessionExpiryMilliseconds(value?: string | null): number | null {
-  if (!value) {
-    return null;
-  }
-
-  // Rocket serializes UTC NaiveDateTime without a timezone suffix. Treat that wire format as UTC.
-  const normalized = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(value) ? value : `${value}Z`;
-  const parsed = Date.parse(normalized);
-  return Number.isFinite(parsed) ? parsed : null;
 }

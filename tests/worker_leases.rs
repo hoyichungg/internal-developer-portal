@@ -1,11 +1,13 @@
-use chrono::NaiveDateTime;
-use diesel::sql_types::{Integer, Nullable, Text, Timestamp};
+use chrono::{DateTime, Utc};
+use diesel::sql_types::{Integer, Nullable, Text, Timestamptz};
 use diesel::{sql_query, QueryableByName};
 use diesel_async::{AsyncConnection, AsyncPgConnection, RunQueryDsl};
 use internal_developer_portal::rocket_routes::connectors::{
     claim_connector_run_for_test, recover_connector_runs_for_test,
     request_connector_run_cancel_for_test,
 };
+
+pub mod common;
 
 #[derive(QueryableByName)]
 struct IdRow {
@@ -23,19 +25,19 @@ struct RunStateRow {
     max_attempts: i32,
     #[diesel(sql_type = Nullable<Text>)]
     worker_id: Option<String>,
-    #[diesel(sql_type = Timestamp)]
-    next_attempt_at: NaiveDateTime,
-    #[diesel(sql_type = Nullable<Timestamp>)]
-    lease_expires_at: Option<NaiveDateTime>,
-    #[diesel(sql_type = Nullable<Timestamp>)]
-    cancelled_at: Option<NaiveDateTime>,
+    #[diesel(sql_type = Timestamptz)]
+    next_attempt_at: DateTime<Utc>,
+    #[diesel(sql_type = Nullable<Timestamptz>)]
+    lease_expires_at: Option<DateTime<Utc>>,
+    #[diesel(sql_type = Nullable<Timestamptz>)]
+    cancelled_at: Option<DateTime<Utc>>,
 }
 
 #[tokio::test]
 async fn claim_recovery_attempt_limit_and_cancellation_are_atomic() {
     dotenvy::dotenv().ok();
-    let database_url = std::env::var("RETENTION_TEST_DATABASE_URL")
-        .expect("RETENTION_TEST_DATABASE_URL must point to a dedicated test database");
+    common::assert_safe_test_database_async().await;
+    let database_url = common::database_url().to_owned();
     let mut db = AsyncPgConnection::establish(&database_url)
         .await
         .expect("the dedicated worker lease test database should be reachable and migrated");
@@ -82,7 +84,7 @@ async fn claim_recovery_attempt_limit_and_cancellation_are_atomic() {
     assert_eq!(requeued.attempt_count, 1);
     assert!(requeued.worker_id.is_none());
     assert!(requeued.lease_expires_at.is_none());
-    assert!(requeued.next_attempt_at >= chrono::Utc::now().naive_utc());
+    assert!(requeued.next_attempt_at >= chrono::Utc::now());
 
     make_retry_due(&mut db, run_id).await;
     assert_eq!(

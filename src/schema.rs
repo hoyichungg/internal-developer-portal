@@ -1,6 +1,17 @@
 // @generated automatically by Diesel CLI.
 
 diesel::table! {
+    login_throttle_buckets (bucket_hash) {
+        #[max_length = 64]
+        bucket_hash -> Varchar,
+        failure_count -> Int4,
+        window_started_at -> Timestamptz,
+        locked_until -> Nullable<Timestamptz>,
+        updated_at -> Timestamptz,
+    }
+}
+
+diesel::table! {
     audit_logs (id) {
         id -> Int4,
         actor_user_id -> Nullable<Int4>,
@@ -11,7 +22,7 @@ diesel::table! {
         #[max_length = 128]
         resource_id -> Nullable<Varchar>,
         metadata -> Nullable<Text>,
-        created_at -> Timestamp,
+        created_at -> Timestamptz,
     }
 }
 
@@ -29,8 +40,8 @@ diesel::table! {
         organizer -> Nullable<Varchar>,
         #[max_length = 256]
         location -> Nullable<Varchar>,
-        starts_at -> Timestamp,
-        ends_at -> Timestamp,
+        starts_at -> Timestamptz,
+        ends_at -> Timestamptz,
         #[max_length = 128]
         time_zone -> Nullable<Varchar>,
         is_all_day -> Bool,
@@ -42,11 +53,11 @@ diesel::table! {
         connector_id -> Nullable<Int4>,
         owner_user_id -> Nullable<Int4>,
         maintainer_id -> Nullable<Int4>,
-        source_updated_at -> Nullable<Timestamp>,
+        source_updated_at -> Nullable<Timestamptz>,
         last_seen_run_id -> Nullable<Int4>,
-        archived_at -> Nullable<Timestamp>,
-        created_at -> Timestamp,
-        updated_at -> Timestamp,
+        archived_at -> Nullable<Timestamptz>,
+        created_at -> Timestamptz,
+        updated_at -> Timestamptz,
     }
 }
 
@@ -62,10 +73,10 @@ diesel::table! {
         schedule_cron -> Nullable<Varchar>,
         config -> Text,
         sample_payload -> Text,
-        created_at -> Timestamp,
-        updated_at -> Timestamp,
-        last_scheduled_at -> Nullable<Timestamp>,
-        next_run_at -> Nullable<Timestamp>,
+        created_at -> Timestamptz,
+        updated_at -> Timestamptz,
+        last_scheduled_at -> Nullable<Timestamptz>,
+        next_run_at -> Nullable<Timestamptz>,
         last_scheduled_run_id -> Nullable<Int4>,
     }
 }
@@ -82,7 +93,7 @@ diesel::table! {
         external_id -> Nullable<Varchar>,
         message -> Text,
         raw_item -> Nullable<Text>,
-        created_at -> Timestamp,
+        created_at -> Timestamptz,
     }
 }
 
@@ -100,7 +111,7 @@ diesel::table! {
         #[max_length = 32]
         status -> Varchar,
         snapshot -> Nullable<Text>,
-        created_at -> Timestamp,
+        created_at -> Timestamptz,
     }
 }
 
@@ -117,21 +128,21 @@ diesel::table! {
         failure_count -> Int4,
         duration_ms -> Int8,
         error_message -> Nullable<Text>,
-        started_at -> Timestamp,
-        finished_at -> Nullable<Timestamp>,
+        started_at -> Timestamptz,
+        finished_at -> Nullable<Timestamptz>,
         #[max_length = 32]
         trigger -> Varchar,
         payload -> Nullable<Text>,
-        claimed_at -> Nullable<Timestamp>,
+        claimed_at -> Nullable<Timestamptz>,
         #[max_length = 128]
         worker_id -> Nullable<Varchar>,
         attempt_count -> Int4,
         max_attempts -> Int4,
-        next_attempt_at -> Timestamp,
-        lease_expires_at -> Nullable<Timestamp>,
-        heartbeat_at -> Nullable<Timestamp>,
-        cancel_requested_at -> Nullable<Timestamp>,
-        cancelled_at -> Nullable<Timestamp>,
+        next_attempt_at -> Timestamptz,
+        lease_expires_at -> Nullable<Timestamptz>,
+        heartbeat_at -> Nullable<Timestamptz>,
+        cancel_requested_at -> Nullable<Timestamptz>,
+        cancelled_at -> Nullable<Timestamptz>,
         parent_run_id -> Nullable<Int4>,
         snapshot_complete -> Nullable<Bool>,
         archived_count -> Int4,
@@ -149,9 +160,9 @@ diesel::table! {
         retention_enabled -> Bool,
         current_run_id -> Nullable<Int4>,
         last_error -> Nullable<Text>,
-        started_at -> Timestamp,
-        last_seen_at -> Timestamp,
-        updated_at -> Timestamp,
+        started_at -> Timestamptz,
+        last_seen_at -> Timestamptz,
+        updated_at -> Timestamptz,
     }
 }
 
@@ -166,14 +177,40 @@ diesel::table! {
         display_name -> Varchar,
         #[max_length = 32]
         status -> Varchar,
-        last_run_at -> Nullable<Timestamp>,
-        last_success_at -> Nullable<Timestamp>,
-        created_at -> Timestamp,
-        updated_at -> Timestamp,
+        last_run_at -> Nullable<Timestamptz>,
+        last_success_at -> Nullable<Timestamptz>,
+        created_at -> Timestamptz,
+        updated_at -> Timestamptz,
         #[max_length = 16]
         scope_type -> Varchar,
         owner_user_id -> Nullable<Int4>,
         maintainer_id -> Nullable<Int4>,
+    }
+}
+
+diesel::table! {
+    external_identities (id) {
+        id -> Int4,
+        user_id -> Int4,
+        #[max_length = 32]
+        provider -> Varchar,
+        #[max_length = 255]
+        issuer -> Varchar,
+        #[max_length = 255]
+        subject -> Nullable<Varchar>,
+        #[max_length = 36]
+        tenant_id -> Varchar,
+        #[max_length = 36]
+        object_id -> Varchar,
+        #[max_length = 320]
+        preferred_username -> Nullable<Varchar>,
+        #[max_length = 256]
+        display_name -> Nullable<Varchar>,
+        #[max_length = 320]
+        email -> Nullable<Varchar>,
+        last_login_at -> Nullable<Timestamptz>,
+        created_at -> Timestamptz,
+        updated_at -> Timestamptz,
     }
 }
 
@@ -184,7 +221,7 @@ diesel::table! {
         user_id -> Int4,
         #[max_length = 32]
         role -> Varchar,
-        created_at -> Timestamp,
+        created_at -> Timestamptz,
     }
 }
 
@@ -193,7 +230,7 @@ diesel::table! {
         id -> Int4,
         display_name -> Varchar,
         email -> Varchar,
-        created_at -> Timestamp,
+        created_at -> Timestamptz,
     }
 }
 
@@ -206,14 +243,14 @@ diesel::table! {
         status -> Varchar,
         #[max_length = 128]
         worker_id -> Nullable<Varchar>,
-        started_at -> Timestamp,
-        finished_at -> Timestamp,
+        started_at -> Timestamptz,
+        finished_at -> Timestamptz,
         duration_ms -> Int8,
         health_checks_deleted -> Int4,
         connector_runs_deleted -> Int4,
         audit_logs_deleted -> Int4,
         error_message -> Nullable<Text>,
-        created_at -> Timestamp,
+        created_at -> Timestamptz,
     }
 }
 
@@ -222,11 +259,11 @@ diesel::table! {
         id -> Int4,
         notification_id -> Int4,
         user_id -> Int4,
-        read_at -> Nullable<Timestamp>,
-        dismissed_at -> Nullable<Timestamp>,
-        snoozed_until -> Nullable<Timestamp>,
-        created_at -> Timestamp,
-        updated_at -> Timestamp,
+        read_at -> Nullable<Timestamptz>,
+        dismissed_at -> Nullable<Timestamptz>,
+        snoozed_until -> Nullable<Timestamptz>,
+        created_at -> Timestamptz,
+        updated_at -> Timestamptz,
     }
 }
 
@@ -243,16 +280,32 @@ diesel::table! {
         is_read -> Bool,
         #[max_length = 2048]
         url -> Nullable<Varchar>,
-        created_at -> Timestamp,
-        updated_at -> Timestamp,
+        created_at -> Timestamptz,
+        updated_at -> Timestamptz,
         #[max_length = 128]
         external_id -> Nullable<Varchar>,
         connector_id -> Nullable<Int4>,
         owner_user_id -> Nullable<Int4>,
         maintainer_id -> Nullable<Int4>,
-        source_updated_at -> Nullable<Timestamp>,
+        source_updated_at -> Nullable<Timestamptz>,
         last_seen_run_id -> Nullable<Int4>,
-        archived_at -> Nullable<Timestamp>,
+        archived_at -> Nullable<Timestamptz>,
+    }
+}
+
+diesel::table! {
+    oidc_login_transactions (state_hash) {
+        #[max_length = 64]
+        state_hash -> Varchar,
+        #[max_length = 64]
+        browser_binding_hash -> Varchar,
+        #[max_length = 128]
+        nonce -> Varchar,
+        pkce_verifier_ciphertext -> Text,
+        #[max_length = 512]
+        return_to -> Varchar,
+        expires_at -> Timestamptz,
+        created_at -> Timestamptz,
     }
 }
 
@@ -267,14 +320,14 @@ diesel::table! {
         #[max_length = 64]
         version -> Varchar,
         description -> Nullable<Text>,
-        created_at -> Timestamp,
+        created_at -> Timestamptz,
         #[max_length = 32]
         status -> Varchar,
         #[max_length = 2048]
         repository_url -> Nullable<Varchar>,
         #[max_length = 2048]
         documentation_url -> Nullable<Varchar>,
-        updated_at -> Timestamp,
+        updated_at -> Timestamptz,
     }
 }
 
@@ -285,7 +338,7 @@ diesel::table! {
         code -> Varchar,
         #[max_length = 128]
         name -> Varchar,
-        created_at -> Timestamp,
+        created_at -> Timestamptz,
     }
 }
 
@@ -302,11 +355,11 @@ diesel::table! {
         health_status -> Varchar,
         #[max_length = 32]
         previous_health_status -> Nullable<Varchar>,
-        checked_at -> Timestamp,
+        checked_at -> Timestamptz,
         response_time_ms -> Nullable<Int4>,
         message -> Nullable<Text>,
         raw_payload -> Nullable<Text>,
-        created_at -> Timestamp,
+        created_at -> Timestamptz,
     }
 }
 
@@ -329,9 +382,9 @@ diesel::table! {
         dashboard_url -> Nullable<Varchar>,
         #[max_length = 2048]
         runbook_url -> Nullable<Varchar>,
-        last_checked_at -> Nullable<Timestamp>,
-        created_at -> Timestamp,
-        updated_at -> Timestamp,
+        last_checked_at -> Nullable<Timestamptz>,
+        created_at -> Timestamptz,
+        updated_at -> Timestamptz,
         #[max_length = 64]
         source -> Varchar,
         #[max_length = 128]
@@ -343,10 +396,17 @@ diesel::table! {
     sessions (id) {
         id -> Int4,
         user_id -> Int4,
-        #[max_length = 128]
-        token -> Varchar,
-        expires_at -> Timestamp,
-        created_at -> Timestamp,
+        #[max_length = 64]
+        token_hash -> Varchar,
+        expires_at -> Timestamptz,
+        created_at -> Timestamptz,
+        #[max_length = 32]
+        auth_method -> Varchar,
+        last_seen_at -> Timestamptz,
+        #[max_length = 64]
+        ip_address -> Nullable<Varchar>,
+        #[max_length = 512]
+        user_agent -> Nullable<Varchar>,
     }
 }
 
@@ -357,7 +417,7 @@ diesel::table! {
         username -> Varchar,
         #[max_length = 128]
         password -> Varchar,
-        created_at -> Timestamp,
+        created_at -> Timestamptz,
     }
 }
 
@@ -384,17 +444,24 @@ diesel::table! {
         priority -> Varchar,
         #[max_length = 128]
         assignee -> Nullable<Varchar>,
-        due_at -> Nullable<Timestamp>,
+        #[max_length = 128]
+        project -> Nullable<Varchar>,
+        #[max_length = 128]
+        work_item_type -> Nullable<Varchar>,
+        #[max_length = 512]
+        assignee_source_id -> Nullable<Varchar>,
+        assignee_user_id -> Nullable<Int4>,
+        due_at -> Nullable<Timestamptz>,
         #[max_length = 2048]
         url -> Nullable<Varchar>,
-        created_at -> Timestamp,
-        updated_at -> Timestamp,
+        created_at -> Timestamptz,
+        updated_at -> Timestamptz,
         connector_id -> Nullable<Int4>,
         owner_user_id -> Nullable<Int4>,
         maintainer_id -> Nullable<Int4>,
-        source_updated_at -> Nullable<Timestamp>,
+        source_updated_at -> Nullable<Timestamptz>,
         last_seen_run_id -> Nullable<Int4>,
-        archived_at -> Nullable<Timestamp>,
+        archived_at -> Nullable<Timestamptz>,
     }
 }
 
@@ -409,6 +476,7 @@ diesel::joinable!(connector_run_items -> connector_runs (connector_run_id));
 diesel::joinable!(connector_workers -> connector_runs (current_run_id));
 diesel::joinable!(connectors -> maintainers (maintainer_id));
 diesel::joinable!(connectors -> users (owner_user_id));
+diesel::joinable!(external_identities -> users (user_id));
 diesel::joinable!(maintainer_members -> maintainers (maintainer_id));
 diesel::joinable!(maintainer_members -> users (user_id));
 diesel::joinable!(notification_receipts -> notifications (notification_id));
@@ -437,12 +505,15 @@ diesel::allow_tables_to_appear_in_same_query!(
     connector_run_items,
     connector_runs,
     connector_workers,
+    external_identities,
+    login_throttle_buckets,
     connectors,
     maintainer_members,
     maintainers,
     maintenance_runs,
     notification_receipts,
     notifications,
+    oidc_login_transactions,
     packages,
     roles,
     service_health_checks,

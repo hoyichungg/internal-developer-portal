@@ -3,6 +3,7 @@ pub mod authorization;
 pub mod calendar_events;
 pub mod connectors;
 pub mod dashboard;
+pub mod entra_auth;
 pub mod health;
 pub mod maintainers;
 pub mod notifications;

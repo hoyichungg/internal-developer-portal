@@ -1,9 +1,10 @@
 use chrono::Utc;
-use rocket::http::Status;
+use rocket::http::{Method, Status};
 use rocket::request::{FromRequest, Outcome, Request};
 use rocket_db_pools::Connection;
 
 use crate::api::ApiError;
+use crate::config::AppConfig;
 use crate::models::{Role, Session, User};
 use crate::repositories::{
     MaintainerMemberRepository, RecordAccessScope, RoleRepository, SessionRepository,
@@ -11,10 +12,35 @@ use crate::repositories::{
 };
 use crate::rocket_routes::DbConn;
 
+pub const SESSION_COOKIE_NAME: &str = "idp_session";
+pub const PRODUCTION_SESSION_COOKIE_NAME: &str = "__Host-idp_session";
+pub const CSRF_HEADER_NAME: &str = "X-IDP-CSRF";
+
+pub fn session_cookie_name(config: &AppConfig) -> &'static str {
+    if config.environment == "production" {
+        PRODUCTION_SESSION_COOKIE_NAME
+    } else {
+        SESSION_COOKIE_NAME
+    }
+}
+
+enum RequestToken {
+    Bearer(String),
+    Cookie(String),
+}
+
+/// Authenticated portal identity loaded from the session store.
+///
+/// Rocket evaluates request guards from left to right and keeps successful
+/// guard values alive until the route handler returns. Route handlers that
+/// also need `Connection<DbConn>` must therefore declare this guard first so
+/// the temporary authentication checkout is returned to the pool before the
+/// route checks out its own connection.
 pub struct AuthenticatedUser {
     pub user: User,
     pub session: Session,
     pub roles: Vec<Role>,
+    pub token: String,
 }
 
 impl AuthenticatedUser {
@@ -130,13 +156,36 @@ impl<'r> FromRequest<'r> for AuthenticatedUser {
     type Error = ApiError;
 
     async fn from_request(request: &'r Request<'_>) -> Outcome<Self, Self::Error> {
-        let token = match bearer_token(request) {
+        let config = match request.rocket().state::<AppConfig>() {
+            Some(config) => config,
+            None => {
+                rocket::error!("AppConfig is not managed by Rocket");
+                return Outcome::Error((Status::InternalServerError, ApiError::Internal));
+            }
+        };
+        let request_token = match request_token(request, session_cookie_name(config)) {
             Some(token) => token,
             None => return Outcome::Error((Status::Unauthorized, ApiError::Unauthorized)),
         };
+        let (token, authenticated_with_cookie) = match request_token {
+            RequestToken::Bearer(token) => (token, false),
+            RequestToken::Cookie(token) => (token, true),
+        };
+        if authenticated_with_cookie
+            && !matches!(
+                request.method(),
+                Method::Get | Method::Head | Method::Options
+            )
+            && request.headers().get_one(CSRF_HEADER_NAME) != Some("1")
+        {
+            return Outcome::Error((Status::Forbidden, ApiError::Forbidden));
+        }
 
         let mut db = match request.guard::<Connection<DbConn>>().await {
             Outcome::Success(db) => db,
+            Outcome::Error((status, _)) if status == Status::ServiceUnavailable => {
+                return Outcome::Error((status, ApiError::ServiceUnavailable))
+            }
             Outcome::Error((status, _)) => return Outcome::Error((status, ApiError::Internal)),
             Outcome::Forward(status) => return Outcome::Forward(status),
         };
@@ -146,37 +195,66 @@ impl<'r> FromRequest<'r> for AuthenticatedUser {
             Err(diesel::result::Error::NotFound) => {
                 return Outcome::Error((Status::Unauthorized, ApiError::Unauthorized))
             }
-            Err(error) => return Outcome::Error((Status::InternalServerError, error.into())),
+            Err(error) => {
+                let error = ApiError::from(error);
+                return Outcome::Error((error.status(), error));
+            }
         };
 
-        if session.expires_at <= Utc::now().naive_utc() {
+        if session.expires_at <= Utc::now() {
             let _ = SessionRepository::delete_by_token(&mut db, &token).await;
             return Outcome::Error((Status::Unauthorized, ApiError::Unauthorized));
         }
 
         let user = match UserRepository::find(&mut db, session.user_id).await {
             Ok(user) => user,
-            Err(error) => return Outcome::Error((Status::InternalServerError, error.into())),
+            Err(diesel::result::Error::NotFound) => {
+                let _ = SessionRepository::delete_by_token(&mut db, &token).await;
+                return Outcome::Error((Status::Unauthorized, ApiError::Unauthorized));
+            }
+            Err(error) => {
+                let error = ApiError::from(error);
+                return Outcome::Error((error.status(), error));
+            }
         };
 
         let roles = match RoleRepository::find_by_user(&mut db, &user).await {
             Ok(roles) => roles,
-            Err(error) => return Outcome::Error((Status::InternalServerError, error.into())),
+            Err(error) => {
+                let error = ApiError::from(error);
+                return Outcome::Error((error.status(), error));
+            }
         };
 
         Outcome::Success(Self {
             user,
             session,
             roles,
+            token,
         })
     }
+}
+
+fn request_token(request: &Request<'_>, cookie_name: &str) -> Option<RequestToken> {
+    if request.headers().contains("Authorization") {
+        return bearer_token(request).map(RequestToken::Bearer);
+    }
+
+    request
+        .cookies()
+        .get(cookie_name)
+        .map(|cookie| cookie.value().to_owned())
+        .filter(|token| !token.trim().is_empty())
+        .map(RequestToken::Cookie)
 }
 
 fn bearer_token(request: &Request<'_>) -> Option<String> {
     request
         .headers()
         .get_one("Authorization")
-        .and_then(|value| value.strip_prefix("Bearer "))
+        .and_then(|value| value.split_once(' '))
+        .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("Bearer"))
+        .map(|(_, token)| token)
         .filter(|token| !token.trim().is_empty())
         .map(str::to_owned)
 }

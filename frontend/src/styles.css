@@ -661,6 +661,50 @@ body {
   line-height: 1.65;
 }
 
+.myWorkPage,
+.myWorkFilters,
+.myWorkResults,
+.myWorkList {
+  min-width: 0;
+  width: 100%;
+}
+
+.myWorkCard {
+  min-width: 0;
+  border-left: 4px solid var(--mantine-color-default-border);
+}
+
+.myWorkCard.isBlocked {
+  border-left-color: var(--mantine-color-orange-6);
+}
+
+.myWorkCard.isOverdue {
+  border-left-color: var(--mantine-color-red-6);
+}
+
+.myWorkCardLayout,
+.myWorkCardDates {
+  min-width: 0;
+}
+
+.myWorkCardMain {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.myWorkCardTitle {
+  overflow-wrap: anywhere;
+}
+
+.myWorkCardActions {
+  flex: 0 0 auto;
+  min-width: 124px;
+}
+
+.myWorkPagination {
+  min-width: 0;
+}
+
 .serviceOverviewPage {
   width: 100%;
 }
@@ -1140,6 +1184,22 @@ body {
 
   .serviceCardFooter .quickLinks {
     justify-content: flex-start;
+  }
+
+  .myWorkCardLayout,
+  .myWorkPagination {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .myWorkCardActions {
+    align-items: stretch;
+    min-width: 0;
+    width: 100%;
+  }
+
+  .myWorkCardActions :where(.mantine-Button-root) {
+    width: 100%;
   }
 
 }

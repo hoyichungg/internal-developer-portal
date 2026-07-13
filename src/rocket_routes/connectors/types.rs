@@ -1,4 +1,4 @@
-use chrono::NaiveDateTime;
+use chrono::{DateTime, Utc};
 use rocket::serde::{Deserialize, Serialize};
 use serde_json::Value;
 use utoipa::ToSchema;
@@ -51,9 +51,9 @@ pub struct ConnectorWorkerStatus {
     pub retention_enabled: bool,
     pub current_run_id: Option<i32>,
     pub last_error: Option<String>,
-    pub started_at: NaiveDateTime,
-    pub last_seen_at: NaiveDateTime,
-    pub updated_at: NaiveDateTime,
+    pub started_at: DateTime<Utc>,
+    pub last_seen_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
     pub seconds_since_last_seen: i64,
     pub is_stale: bool,
 }
@@ -67,10 +67,10 @@ pub struct ConnectorConfigResponse {
     pub schedule_cron: Option<String>,
     pub config: String,
     pub sample_payload: String,
-    pub created_at: NaiveDateTime,
-    pub updated_at: NaiveDateTime,
-    pub last_scheduled_at: Option<NaiveDateTime>,
-    pub next_run_at: Option<NaiveDateTime>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub last_scheduled_at: Option<DateTime<Utc>>,
+    pub next_run_at: Option<DateTime<Utc>>,
     pub last_scheduled_run_id: Option<i32>,
 }
 
@@ -86,7 +86,7 @@ pub struct MicrosoftOAuthAuthorizeResponse {
     pub state: String,
     pub redirect_uri: String,
     pub scope: String,
-    pub expires_at: NaiveDateTime,
+    pub expires_at: DateTime<Utc>,
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -211,8 +211,8 @@ pub struct CalendarEventImportItem {
     pub body: Option<String>,
     pub organizer: Option<String>,
     pub location: Option<String>,
-    pub starts_at: Option<NaiveDateTime>,
-    pub ends_at: Option<NaiveDateTime>,
+    pub starts_at: Option<DateTime<Utc>>,
+    pub ends_at: Option<DateTime<Utc>>,
     pub time_zone: Option<String>,
     pub is_all_day: bool,
     pub is_cancelled: bool,
@@ -242,8 +242,19 @@ pub struct WorkCardImportItem {
     pub priority: String,
     /// Optional assignee display name or email.
     pub assignee: Option<String>,
-    /// Optional due date/time in local NaiveDateTime JSON format.
-    pub due_at: Option<NaiveDateTime>,
+    /// Optional source project name.
+    pub project: Option<String>,
+    /// Optional source work item type, for example `Bug` or `User Story`.
+    pub work_item_type: Option<String>,
+    /// Stable assignee identity descriptor from the source. Display names and email addresses
+    /// are never identity keys.
+    pub assignee_source_id: Option<String>,
+    /// Portal user id resolved through an explicit connector mapping.
+    pub assignee_user_id: Option<i32>,
+    /// Optional due instant in RFC3339 format with an explicit UTC offset.
+    pub due_at: Option<DateTime<Utc>>,
+    /// Optional last-change instant reported by the source.
+    pub source_updated_at: Option<DateTime<Utc>>,
     /// Optional absolute URL back to the source system.
     pub url: Option<String>,
 }
@@ -302,8 +313,8 @@ pub struct ServiceHealthImportItem {
     pub dashboard_url: Option<String>,
     /// Optional absolute runbook URL.
     pub runbook_url: Option<String>,
-    /// Optional source check time. RFC3339 strings and `%Y-%m-%d %H:%M:%S` are accepted.
-    pub last_checked_at: Option<String>,
+    /// Optional source check instant in RFC3339 format with an explicit UTC offset.
+    pub last_checked_at: Option<DateTime<Utc>>,
 }
 
 pub(crate) struct ConnectorExecution {
@@ -343,7 +354,7 @@ impl From<ConnectorConfig> for ConnectorConfigResponse {
 impl ConnectorWorkerStatus {
     pub(crate) fn from_worker(
         worker: ConnectorWorker,
-        now: NaiveDateTime,
+        now: DateTime<Utc>,
         stale_after_seconds: i64,
     ) -> Self {
         let seconds_since_last_seen = (now - worker.last_seen_at).num_seconds().max(0);
@@ -362,5 +373,79 @@ impl ConnectorWorkerStatus {
             seconds_since_last_seen,
             is_stale: seconds_since_last_seen > stale_after_seconds,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CalendarEventImportItem, ServiceHealthImportItem, WorkCardImportItem};
+    use chrono::{TimeZone, Utc};
+    use serde_json::json;
+
+    fn event_with_times(starts_at: &str, ends_at: &str) -> serde_json::Value {
+        json!({
+            "external_id": "event-1",
+            "title": "Timezone review",
+            "body": null,
+            "organizer": null,
+            "location": null,
+            "starts_at": starts_at,
+            "ends_at": ends_at,
+            "time_zone": "Taipei Standard Time",
+            "is_all_day": false,
+            "is_cancelled": false,
+            "web_url": null,
+            "join_url": null
+        })
+    }
+
+    #[test]
+    fn connector_rfc3339_offsets_are_normalized_to_utc() {
+        let item: CalendarEventImportItem = serde_json::from_value(event_with_times(
+            "2026-07-12T20:30:00+08:00",
+            "2026-07-12T13:00:00Z",
+        ))
+        .unwrap();
+
+        assert_eq!(
+            item.starts_at.unwrap(),
+            Utc.with_ymd_and_hms(2026, 7, 12, 12, 30, 0).unwrap()
+        );
+        let serialized = serde_json::to_value(item).unwrap();
+        assert_eq!(serialized["ends_at"], "2026-07-12T13:00:00Z");
+    }
+
+    #[test]
+    fn public_connector_inputs_reject_timezone_less_datetimes() {
+        let calendar = serde_json::from_value::<CalendarEventImportItem>(event_with_times(
+            "2026-07-12T12:30:00",
+            "2026-07-12 13:00:00",
+        ));
+        let work_card = serde_json::from_value::<WorkCardImportItem>(json!({
+            "external_id": "work-1",
+            "title": "Timezone migration",
+            "status": "todo",
+            "priority": "high",
+            "assignee": null,
+            "due_at": "2026-07-12T14:00:00",
+            "url": null
+        }));
+        let service = serde_json::from_value::<ServiceHealthImportItem>(json!({
+            "external_id": "service-1",
+            "maintainer_id": 1,
+            "slug": "service-1",
+            "name": "Service One",
+            "lifecycle_status": "active",
+            "health_status": "healthy",
+            "description": null,
+            "repository_url": null,
+            "dashboard_url": null,
+            "runbook_url": null,
+            "last_checked_at": "2026-07-12 15:00:00"
+        }));
+
+        assert!(calendar.is_err());
+        assert!(work_card.is_err());
+        assert!(service.is_err());
     }
 }

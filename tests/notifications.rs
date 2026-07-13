@@ -3,6 +3,7 @@ use reqwest::{blocking::Client, StatusCode};
 use serde_json::{json, Value};
 
 pub mod common;
+use common::CookieAuthRequest;
 
 #[test]
 fn test_notification_receipts_are_isolated_per_user() {
@@ -14,7 +15,7 @@ fn test_notification_receipts_are_isolated_per_user() {
 
     let response = client
         .post(format!("{}/notifications", common::APP_HOST))
-        .bearer_auth(&admin.token)
+        .cookie_auth(&admin.cookie)
         .json(&json!({
             "source": source,
             "external_id": common::unique_name("receipt_notification"),
@@ -30,7 +31,7 @@ fn test_notification_receipts_are_isolated_per_user() {
     let notification: Value = response.json::<Value>().unwrap()["data"].clone();
     let notification_id = notification["id"].as_i64().unwrap();
 
-    for token in [&first_user.token, &second_user.token] {
+    for token in [&first_user.cookie, &second_user.cookie] {
         let view = get_notification(&client, token, notification_id);
         assert_eq!(view["is_read"], false);
         assert_eq!(view["source_is_read"], false);
@@ -39,50 +40,48 @@ fn test_notification_receipts_are_isolated_per_user() {
         assert_eq!(view["snoozed_until"], Value::Null);
     }
 
-    let response = post_action(&client, &first_user.token, notification_id, "read");
+    let response = post_action(&client, &first_user.cookie, notification_id, "read");
     assert_eq!(response["is_read"], true);
     assert_eq!(response["source_is_read"], false);
     assert!(response["read_at"].as_str().is_some());
-    assert_actionable_state(&client, &first_user.token, &source, notification_id, false);
-    assert_actionable_state(&client, &second_user.token, &source, notification_id, true);
-    let second_user_view = get_notification(&client, &second_user.token, notification_id);
+    assert_actionable_state(&client, &first_user.cookie, &source, notification_id, false);
+    assert_actionable_state(&client, &second_user.cookie, &source, notification_id, true);
+    let second_user_view = get_notification(&client, &second_user.cookie, notification_id);
     assert_eq!(second_user_view["is_read"], false);
     assert_eq!(second_user_view["read_at"], Value::Null);
 
-    let response = post_action(&client, &first_user.token, notification_id, "unread");
+    let response = post_action(&client, &first_user.cookie, notification_id, "unread");
     assert_eq!(response["is_read"], false);
     assert_eq!(response["read_at"], Value::Null);
-    assert_actionable_state(&client, &first_user.token, &source, notification_id, true);
+    assert_actionable_state(&client, &first_user.cookie, &source, notification_id, true);
 
-    let snoozed_until = (Utc::now().naive_utc() + Duration::hours(1))
-        .format("%Y-%m-%dT%H:%M:%S")
-        .to_string();
+    let snoozed_until = Utc::now() + Duration::hours(1);
     let response = client
         .post(format!(
             "{}/notifications/{notification_id}/snooze",
             common::APP_HOST
         ))
-        .bearer_auth(&first_user.token)
+        .cookie_auth(&first_user.cookie)
         .json(&json!({ "snoozed_until": snoozed_until }))
         .send()
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let snoozed: Value = response.json::<Value>().unwrap()["data"].clone();
     assert!(snoozed["snoozed_until"].as_str().is_some());
-    assert_actionable_state(&client, &first_user.token, &source, notification_id, false);
-    assert_actionable_state(&client, &second_user.token, &source, notification_id, true);
+    assert_actionable_state(&client, &first_user.cookie, &source, notification_id, false);
+    assert_actionable_state(&client, &second_user.cookie, &source, notification_id, true);
 
-    let restored = post_action(&client, &first_user.token, notification_id, "restore");
+    let restored = post_action(&client, &first_user.cookie, notification_id, "restore");
     assert_eq!(restored["dismissed_at"], Value::Null);
     assert_eq!(restored["snoozed_until"], Value::Null);
-    assert_actionable_state(&client, &first_user.token, &source, notification_id, true);
+    assert_actionable_state(&client, &first_user.cookie, &source, notification_id, true);
 
-    let dismissed = post_action(&client, &first_user.token, notification_id, "dismiss");
+    let dismissed = post_action(&client, &first_user.cookie, notification_id, "dismiss");
     assert!(dismissed["dismissed_at"].as_str().is_some());
-    assert_actionable_state(&client, &first_user.token, &source, notification_id, false);
-    assert_actionable_state(&client, &second_user.token, &source, notification_id, true);
+    assert_actionable_state(&client, &first_user.cookie, &source, notification_id, false);
+    assert_actionable_state(&client, &second_user.cookie, &source, notification_id, true);
     assert_eq!(
-        get_notification(&client, &second_user.token, notification_id)["dismissed_at"],
+        get_notification(&client, &second_user.cookie, notification_id)["dismissed_at"],
         Value::Null
     );
 
@@ -91,7 +90,7 @@ fn test_notification_receipts_are_isolated_per_user() {
             "{}/audit-logs?action=dismiss&resource_type=notification&resource_id={notification_id}",
             common::APP_HOST
         ))
-        .bearer_auth(&admin.token)
+        .cookie_auth(&admin.cookie)
         .send()
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
@@ -113,7 +112,7 @@ fn post_action(client: &Client, token: &str, notification_id: i64, action: &str)
             "{}/notifications/{notification_id}/{action}",
             common::APP_HOST
         ))
-        .bearer_auth(token)
+        .cookie_auth(token)
         .send()
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
@@ -127,7 +126,7 @@ fn get_notification(client: &Client, token: &str, notification_id: i64) -> Value
             "{}/notifications/{notification_id}",
             common::APP_HOST
         ))
-        .bearer_auth(token)
+        .cookie_auth(token)
         .send()
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
@@ -144,7 +143,7 @@ fn assert_actionable_state(
 ) {
     let response = client
         .get(format!("{}/notifications", common::APP_HOST))
-        .bearer_auth(token)
+        .cookie_auth(token)
         .send()
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
@@ -155,7 +154,7 @@ fn assert_actionable_state(
 
     let response = client
         .get(format!("{}/dashboard?source={source}", common::APP_HOST))
-        .bearer_auth(token)
+        .cookie_auth(token)
         .send()
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
@@ -171,7 +170,7 @@ fn assert_actionable_state(
 
     let response = client
         .get(format!("{}/me/overview", common::APP_HOST))
-        .bearer_auth(token)
+        .cookie_auth(token)
         .send()
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);

@@ -17,11 +17,11 @@ jobs:
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: app_db
+          POSTGRES_DB: postgres
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U postgres -d app_db"
+          --health-cmd "pg_isready -U postgres -d postgres"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 5
@@ -29,23 +29,28 @@ jobs:
     env:
       APP_ENV: test
       AUTH_TOKEN_TTL_SECONDS: 86400
-      DATABASE_URL: postgres://postgres:postgres@localhost:5432/app_db
+      PORTAL_TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/portal_integration_test
+      PORTAL_TEST_BASE_URL: http://127.0.0.1:8000
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/portal_integration_test
       RETENTION_TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/portal_retention_test
       CONNECTOR_SECRET_KEY: ci-connector-secret-key
       CONNECTOR_WORKER_ENABLED: true
       CONNECTOR_SCHEDULER_ENABLED: true
       CONNECTOR_WORKER_POLL_MS: 250
+      CONNECTOR_HEALTH_RETENTION_DAYS: 0
+      CONNECTOR_RUN_RETENTION_DAYS: 0
+      AUDIT_LOG_RETENTION_DAYS: 0
       ROCKET_ADDRESS: 127.0.0.1
       ROCKET_PORT: 8000
-      ROCKET_DATABASES: '{postgres={url="postgres://postgres:postgres@localhost:5432/app_db"}}'
+      ROCKET_DATABASES: '{postgres={url="postgres://postgres:postgres@localhost:5432/portal_integration_test"}}'
 
     steps:
       - uses: actions/checkout@v4
 
       - name: Install Rust
         run: |
-          rustup toolchain install 1.81.0 --profile minimal --component clippy,rustfmt
-          rustup default 1.81.0
+          rustup toolchain install 1.85.0 --profile minimal --component clippy,rustfmt
+          rustup default 1.85.0
 
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y libpq-dev
@@ -89,20 +94,29 @@ jobs:
         env:
           PGPASSWORD: postgres
         run: |
+          createdb --host localhost --username postgres portal_integration_test
           createdb --host localhost --username postgres portal_retention_test
-          diesel migration run
+          DATABASE_URL="$PORTAL_TEST_DATABASE_URL" diesel migration run
           DATABASE_URL="$RETENTION_TEST_DATABASE_URL" diesel migration run
+          for database in portal_integration_test portal_retention_test; do
+            actual="$(psql --host localhost --username postgres --dbname "$database" --tuples-only --no-align \
+              --command 'SELECT current_database();')"
+            test "$actual" = "$database"
+            latest="$(psql --host localhost --username postgres --dbname "$database" --tuples-only --no-align \
+              --command 'SELECT version FROM __diesel_schema_migrations ORDER BY version DESC LIMIT 1;')"
+            test "$latest" = 20260712150000
+          done
 
       - name: Start server
         run: |
           ./target/debug/server > server.log 2>&1 &
           echo $! > server.pid
-          for i in {1..120}; do
+          for _ in {1..120}; do
             if ! kill -0 "$(cat server.pid)" 2>/dev/null; then
               cat server.log
               exit 1
             fi
-            if curl -fsS http://127.0.0.1:8000/health > /dev/null; then
+            if curl -fsS "$PORTAL_TEST_BASE_URL/health" > /dev/null; then
               exit 0
             fi
             sleep 1
@@ -127,3 +141,105 @@ jobs:
             cat worker.log
             exit 1
           fi
+
+      - name: Validate production Compose contract
+        env:
+          POSTGRES_PASSWORD: ci-production-compose-password
+          DATABASE_URL: postgres://portal:ci-production-compose-password@postgres/portal
+          CONNECTOR_SECRET_KEY: ci-production-connector-key-32-bytes-minimum
+        run: docker compose -f docker-compose.prod.yml config --quiet
+
+      - name: Build production container artifact
+        run: docker build --file Dockerfile.prod --tag internal-developer-portal:prod .
+
+      - name: Smoke production container artifact
+        env:
+          POSTGRES_USER: portal
+          POSTGRES_PASSWORD: ci-production-compose-password
+          POSTGRES_DB: portal
+          DATABASE_URL: postgres://portal:ci-production-compose-password@postgres:5432/portal
+          CONNECTOR_SECRET_KEY: ci-production-connector-key-32-bytes-minimum
+          SEED_ADMIN_USERNAME: ci-recovery-admin
+          SEED_ADMIN_PASSWORD: ci-recovery-password-32-bytes-minimum
+          SEED_ADMIN_ROLES: admin,member
+          PORT: 18000
+        run: |
+          set -euo pipefail
+          project=portal-ci-prod
+          compose=(docker compose -p "$project" -f docker-compose.prod.yml)
+          cleanup() {
+            "${compose[@]}" down --volumes --remove-orphans || true
+          }
+          trap cleanup EXIT
+
+          test "$(docker image inspect -f '{{.Config.User}}' internal-developer-portal:prod)" = portal
+          "${compose[@]}" up -d postgres
+          "${compose[@]}" run --rm migrate
+          "${compose[@]}" run --rm --no-deps seed-admin
+          "${compose[@]}" up -d --no-deps app worker
+
+          for i in {1..120}; do
+            if curl -fsS http://127.0.0.1:18000/readyz > ready.json; then
+              break
+            fi
+            if [ "$i" -eq 120 ]; then
+              "${compose[@]}" logs app worker postgres
+              exit 1
+            fi
+            sleep 1
+          done
+
+          curl -fsS http://127.0.0.1:18000/ > index.html
+          grep -q '<div id="root"></div>' index.html
+          "${compose[@]}" exec -T worker grep -qx worker /proc/1/comm
+          curl -fsS -D login.headers -c cookies.txt \
+            -H 'Content-Type: application/json' \
+            -d '{"username":"ci-recovery-admin","password":"ci-recovery-password-32-bytes-minimum"}' \
+            http://127.0.0.1:18000/login > login.json
+          python - <<'PY'
+          from datetime import datetime
+          import json
+          import re
+
+          rfc3339 = re.compile(
+              r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$"
+          )
+          data = json.load(open("login.json", encoding="utf-8"))["data"]
+          assert data["auth_method"] == "password"
+          assert rfc3339.fullmatch(data["expires_at"]), data["expires_at"]
+          assert datetime.fromisoformat(data["expires_at"].replace("Z", "+00:00")).utcoffset() is not None
+          assert "token" not in data and "token_type" not in data
+          PY
+          session_header="$(grep -i '^set-cookie: __Host-idp_session=' login.headers)"
+          grep -qi 'HttpOnly' <<<"$session_header"
+          grep -qi 'Secure' <<<"$session_header"
+          grep -qi 'SameSite=Lax' <<<"$session_header"
+          grep -qi 'Path=/' <<<"$session_header"
+          if grep -qi 'Domain=' <<<"$session_header"; then
+            echo 'Production session cookie must not set Domain.' >&2
+            exit 1
+          fi
+          session_cookie="$(sed -E 's/^[Ss]et-[Cc]ookie: ([^;]+).*/\1/' <<<"$session_header")"
+          curl -fsS -H "Cookie: $session_cookie" http://127.0.0.1:18000/me > me.json
+          python - <<'PY'
+          from datetime import datetime
+          import json
+          import re
+
+          rfc3339 = re.compile(
+              r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$"
+          )
+          data = json.load(open("me.json", encoding="utf-8"))["data"]
+          for field in ("expires_at",):
+              value = data[field]
+              assert rfc3339.fullmatch(value), f"{field}: {value}"
+              assert datetime.fromisoformat(value.replace("Z", "+00:00")).utcoffset() is not None
+          PY
+          test "$(curl -sS -o /dev/null -w '%{http_code}' -H "Cookie: $session_cookie" \
+            -H 'X-IDP-CSRF: 1' -X POST http://127.0.0.1:18000/logout)" = 204
+          latest_migration="$("${compose[@]}" exec -T postgres psql -U portal -d portal -Atc \
+            "SELECT version FROM __diesel_schema_migrations ORDER BY version DESC LIMIT 1;")"
+          test "$latest_migration" = 20260712150000
+          naive_timestamp_columns="$("${compose[@]}" exec -T postgres psql -U portal -d portal -Atc \
+            "SELECT count(*) FROM information_schema.columns WHERE table_schema = 'public' AND table_name <> '__diesel_schema_migrations' AND data_type = 'timestamp without time zone';")"
+          test "$naive_timestamp_columns" = 0

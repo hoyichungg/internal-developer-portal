@@ -3,6 +3,7 @@ use reqwest::{blocking::Client, StatusCode};
 use serde_json::{json, Value};
 
 pub mod common;
+use common::CookieAuthRequest;
 
 #[test]
 fn test_dashboard_aggregates_morning_work_context() {
@@ -16,7 +17,7 @@ fn test_dashboard_aggregates_morning_work_context() {
 
     let response = client
         .get(format!("{}/dashboard", common::APP_HOST))
-        .bearer_auth(&auth.token)
+        .cookie_auth(&auth.cookie)
         .send()
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
@@ -71,7 +72,7 @@ fn test_dashboard_can_scope_catalog_and_service_health_by_maintainer() {
             common::APP_HOST,
             maintainer1["id"].as_i64().unwrap()
         ))
-        .bearer_auth(&auth.token)
+        .cookie_auth(&auth.cookie)
         .send()
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
@@ -114,7 +115,7 @@ fn test_dashboard_priority_items_put_today_first() {
     let auth = common::create_admin_auth(&client);
     let maintainer = common::create_test_maintainer(&client);
     let source = common::unique_name("priority");
-    let checked_at = (Utc::now().naive_utc() - Duration::minutes(5))
+    let checked_at = (Utc::now() - Duration::minutes(5))
         .format("%Y-%m-%dT%H:%M:%S")
         .to_string();
 
@@ -124,7 +125,7 @@ fn test_dashboard_priority_items_put_today_first() {
             common::APP_HOST,
             source.as_str()
         ))
-        .bearer_auth(&auth.token)
+        .cookie_auth(&auth.cookie)
         .json(&json!({
             "items": [{
                 "external_id": "priority-api",
@@ -147,7 +148,7 @@ fn test_dashboard_priority_items_put_today_first() {
 
     let response = client
         .post(format!("{}/work-cards", common::APP_HOST))
-        .bearer_auth(&auth.token)
+        .cookie_auth(&auth.cookie)
         .json(&json!({
             "source": source.as_str(),
             "external_id": common::unique_name("blocked"),
@@ -165,7 +166,7 @@ fn test_dashboard_priority_items_put_today_first() {
 
     let response = client
         .post(format!("{}/notifications", common::APP_HOST))
-        .bearer_auth(&auth.token)
+        .cookie_auth(&auth.cookie)
         .json(&json!({
             "source": source.as_str(),
             "external_id": common::unique_name("critical"),
@@ -186,7 +187,7 @@ fn test_dashboard_priority_items_put_today_first() {
             common::APP_HOST,
             source.as_str()
         ))
-        .bearer_auth(&auth.token)
+        .cookie_auth(&auth.cookie)
         .json(&json!({
             "items": [{
                 "external_id": "bad-priority-work",
@@ -210,7 +211,7 @@ fn test_dashboard_priority_items_put_today_first() {
             common::APP_HOST,
             source.as_str()
         ))
-        .bearer_auth(&auth.token)
+        .cookie_auth(&auth.cookie)
         .send()
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
@@ -247,7 +248,7 @@ fn test_dashboard_priority_items_put_today_first() {
             common::APP_HOST,
             source.as_str()
         ))
-        .bearer_auth(&auth.token)
+        .cookie_auth(&auth.cookie)
         .send()
         .unwrap();
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
@@ -266,7 +267,7 @@ fn test_me_overview_returns_user_owned_operational_context() {
     let owner = common::create_test_auth(&client, "member");
     let maintainer = common::create_test_maintainer(&client);
     let source = common::unique_name("meov");
-    let checked_at = (Utc::now().naive_utc() - Duration::minutes(10))
+    let checked_at = (Utc::now() - Duration::minutes(10))
         .format("%Y-%m-%dT%H:%M:%S")
         .to_string();
 
@@ -276,7 +277,7 @@ fn test_me_overview_returns_user_owned_operational_context() {
             common::APP_HOST,
             maintainer["id"]
         ))
-        .bearer_auth(&admin.token)
+        .cookie_auth(&admin.cookie)
         .json(&json!({
             "user_id": owner.user_id,
             "role": "owner"
@@ -291,7 +292,7 @@ fn test_me_overview_returns_user_owned_operational_context() {
             common::APP_HOST,
             source.as_str()
         ))
-        .bearer_auth(&admin.token)
+        .cookie_auth(&admin.cookie)
         .json(&json!({
             "items": [{
                 "external_id": "me-overview-service",
@@ -314,7 +315,7 @@ fn test_me_overview_returns_user_owned_operational_context() {
 
     let response = client
         .post(format!("{}/packages", common::APP_HOST))
-        .bearer_auth(&admin.token)
+        .cookie_auth(&admin.cookie)
         .json(&json!({
             "maintainer_id": maintainer["id"],
             "slug": common::unique_name("pkg"),
@@ -332,7 +333,7 @@ fn test_me_overview_returns_user_owned_operational_context() {
 
     let response = client
         .post(format!("{}/work-cards", common::APP_HOST))
-        .bearer_auth(&admin.token)
+        .cookie_auth(&admin.cookie)
         .json(&json!({
             "source": source.as_str(),
             "external_id": common::unique_name("work"),
@@ -350,7 +351,7 @@ fn test_me_overview_returns_user_owned_operational_context() {
 
     let response = client
         .post(format!("{}/notifications", common::APP_HOST))
-        .bearer_auth(&admin.token)
+        .cookie_auth(&admin.cookie)
         .json(&json!({
             "source": source.as_str(),
             "external_id": common::unique_name("message"),
@@ -371,7 +372,7 @@ fn test_me_overview_returns_user_owned_operational_context() {
             common::APP_HOST,
             source.as_str()
         ))
-        .bearer_auth(&admin.token)
+        .cookie_auth(&admin.cookie)
         .json(&json!({
             "items": [{
                 "external_id": "bad-owned-work",
@@ -391,7 +392,7 @@ fn test_me_overview_returns_user_owned_operational_context() {
 
     let response = client
         .get(format!("{}/me/overview", common::APP_HOST))
-        .bearer_auth(&owner.token)
+        .cookie_auth(&owner.cookie)
         .send()
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
@@ -472,7 +473,7 @@ fn test_me_overview_returns_user_owned_operational_context() {
             common::APP_HOST,
             source.as_str()
         ))
-        .bearer_auth(&admin.token)
+        .cookie_auth(&admin.cookie)
         .send()
         .unwrap();
     assert_eq!(response.status(), StatusCode::NO_CONTENT);

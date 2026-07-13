@@ -87,7 +87,7 @@ pub(super) async fn fetch_graph_collection(
         let response = serde_json::from_str::<Value>(&body).map_err(|error| {
             format!("{adapter} page {page_number} response was not valid JSON: {error}")
         })?;
-        let page_items = graph_collection_items(&response);
+        let page_items = graph_collection_items(&response, adapter, page_number)?;
         let remaining = max_items.saturating_sub(items.len());
         let page_was_truncated = page_items.len() > remaining;
         items.extend(page_items.into_iter().take(remaining));
@@ -130,18 +130,27 @@ pub(super) async fn fetch_graph_collection(
     })
 }
 
-fn graph_collection_items(response: &Value) -> Vec<Value> {
-    response
-        .get("value")
-        .or_else(|| response.get("items"))
-        .or_else(|| response.get("events"))
-        .or_else(|| response.get("messages"))
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .chain(response.as_array().into_iter().flatten())
-        .cloned()
-        .collect()
+fn graph_collection_items(
+    response: &Value,
+    adapter: &str,
+    page_number: usize,
+) -> Result<Vec<Value>, String> {
+    if let Some(items) = response.as_array() {
+        return Ok(items.clone());
+    }
+
+    for field in ["value", "items", "events", "messages"] {
+        if let Some(value) = response.get(field) {
+            let items = value.as_array().ok_or_else(|| {
+                format!("{adapter} page {page_number} response field {field} must be an array")
+            })?;
+            return Ok(items.clone());
+        }
+    }
+
+    Err(format!(
+        "{adapter} page {page_number} response must include an explicit collection array in value, items, events, or messages"
+    ))
 }
 
 fn graph_next_link(
@@ -292,6 +301,52 @@ mod tests {
 
         assert_eq!(collection.items.len(), 1);
         assert!(!collection.snapshot_complete);
+        assert_eq!(server.requests().len(), 1);
+    }
+
+    #[rocket::async_test]
+    async fn rejects_success_response_without_an_explicit_collection() {
+        let server = MockHttpServer::start(vec![MockResponse::json(r#"{"status":"ok"}"#)]);
+        let client = reqwest::Client::new();
+
+        let error = fetch_graph_collection(
+            &client,
+            &server.url("/page/1"),
+            "test-token",
+            None,
+            "graph_test",
+            10,
+            100,
+        )
+        .await
+        .expect_err("an unknown 200 response shape must not become a complete empty snapshot");
+
+        assert!(
+            error.contains("must include an explicit collection array"),
+            "unexpected error: {error}"
+        );
+        assert_eq!(server.requests().len(), 1);
+    }
+
+    #[rocket::async_test]
+    async fn accepts_an_explicit_empty_collection_as_complete() {
+        let server = MockHttpServer::start(vec![MockResponse::json(r#"{"value":[]}"#)]);
+        let client = reqwest::Client::new();
+
+        let collection = fetch_graph_collection(
+            &client,
+            &server.url("/page/1"),
+            "test-token",
+            None,
+            "graph_test",
+            10,
+            100,
+        )
+        .await
+        .expect("an explicit empty collection is a valid complete snapshot");
+
+        assert!(collection.items.is_empty());
+        assert!(collection.snapshot_complete);
         assert_eq!(server.requests().len(), 1);
     }
 }

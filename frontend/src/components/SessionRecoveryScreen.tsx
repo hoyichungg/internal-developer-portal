@@ -27,7 +27,8 @@ export function SessionRecoveryScreen({
           <Alert color="yellow" icon={<IconCloudOff size={18} />} title="Could not reach the portal API">
             <Stack gap="xs">
               <Text size="sm">
-                Your saved session was kept. Retry when the API or network is available again.
+                Your browser session was not changed. Retry when the API or network is available
+                again.
               </Text>
               <Text size="xs" c="dimmed">
                 {error.message}

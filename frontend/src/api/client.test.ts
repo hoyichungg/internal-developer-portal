@@ -8,11 +8,11 @@ describe("createApiClient", () => {
     vi.useRealTimers();
   });
 
-  it("uses the configured API base URL and sends JSON headers and authorization", async () => {
+  it("uses the configured API base URL and sends JSON with browser credentials", async () => {
     const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
       response({ data: { id: 7 } })
     );
-    const client = createApiClient("session-token", {
+    const client = createApiClient({
       baseUrl: "https://portal-api.example.test/",
       timeoutMs: 100
     });
@@ -26,12 +26,15 @@ describe("createApiClient", () => {
         method: "POST",
         headers: {
           Accept: "application/json",
-          Authorization: "Bearer session-token",
-          "Content-Type": "application/json"
+          "Content-Type": "application/json",
+          "X-IDP-CSRF": "1"
         },
-        body: JSON.stringify({ source: "graph" })
+        body: JSON.stringify({ source: "graph" }),
+        credentials: "include"
       })
     );
+    const request = fetchMock.mock.calls[0]?.[1];
+    expect(new Headers(request?.headers).has("Authorization")).toBe(false);
   });
 
   it("preserves HTTP status and structured validation details in ApiError", async () => {
@@ -88,7 +91,7 @@ describe("createApiClient", () => {
       })
     );
 
-    const request = createApiClient(null, { timeoutMs: 25 }).get("/slow");
+    const request = createApiClient({ timeoutMs: 25 }).get("/slow");
     const assertion = expect(request).rejects.toMatchObject({
       name: "ApiError",
       kind: "timeout",
@@ -111,18 +114,39 @@ describe("createApiClient", () => {
     });
   });
 
-  it("notifies authenticated callers only for an explicit 401 response", async () => {
+  it("notifies callers only for an explicit 401 response", async () => {
     const onUnauthorized = vi.fn();
     vi.spyOn(globalThis, "fetch")
       .mockResolvedValueOnce(response({ error: { message: "expired" } }, 401))
       .mockResolvedValueOnce(response({ error: { message: "forbidden" } }, 403));
-    const client = createApiClient("session-token", { onUnauthorized });
+    const client = createApiClient({ onUnauthorized });
 
     await expect(client.get("/expired")).rejects.toMatchObject({ status: 401 });
     expect(onUnauthorized).toHaveBeenCalledTimes(1);
 
     await expect(client.get("/forbidden")).rejects.toMatchObject({ status: 403 });
     expect(onUnauthorized).toHaveBeenCalledTimes(1);
+  });
+
+  it("ignores a delayed 401 from an older session generation", async () => {
+    let generation = 1;
+    let resolveRequest: ((response: Response) => void) | undefined;
+    const delayedResponse = new Promise<Response>((resolve) => {
+      resolveRequest = resolve;
+    });
+    const onUnauthorized = vi.fn();
+    vi.spyOn(globalThis, "fetch").mockReturnValue(delayedResponse);
+    const client = createApiClient({
+      onUnauthorized,
+      getSessionGeneration: () => generation
+    });
+
+    const request = client.get("/old-session").catch((error) => error);
+    generation = 2;
+    resolveRequest?.(response({ error: { message: "Old session expired" } }, 401));
+    await expect(request).resolves.toMatchObject({ status: 401 });
+
+    expect(onUnauthorized).not.toHaveBeenCalled();
   });
 });
 

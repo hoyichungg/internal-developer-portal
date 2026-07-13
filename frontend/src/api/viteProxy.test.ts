@@ -10,6 +10,7 @@ describe("Vite API proxy", () => {
   it("covers every backend top-level API prefix used by the portal", () => {
     expect(API_PROXY_PREFIXES).toEqual([
       "/audit-logs",
+      "/auth",
       "/connectors",
       "/dashboard",
       "/health",
@@ -23,6 +24,7 @@ describe("Vite API proxy", () => {
       "/packages",
       "/readyz",
       "/services",
+      "/sessions",
       "/users",
       "/work-cards"
     ]);

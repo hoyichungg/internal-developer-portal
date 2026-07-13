@@ -14,7 +14,7 @@ use crate::repositories::{
 };
 use crate::rocket_routes::connectors::connector_worker_stale_after_seconds;
 use crate::rocket_routes::DbConn;
-use chrono::{Duration, NaiveDateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use utoipa::ToSchema;
 
 pub const HEALTH_HISTORY_WINDOW_HOURS: i64 = 24;
@@ -81,29 +81,29 @@ pub struct DashboardPriorityItem {
     pub record_id: Option<i32>,
     pub service_id: Option<i32>,
     pub url: Option<String>,
-    pub occurred_at: Option<NaiveDateTime>,
+    pub occurred_at: Option<DateTime<Utc>>,
 }
 
 pub struct DashboardPriorityContext {
     pub worker_status: Option<String>,
     pub active_workers: usize,
     pub stale_workers: usize,
-    pub latest_worker_seen_at: Option<NaiveDateTime>,
+    pub latest_worker_seen_at: Option<DateTime<Utc>>,
     pub worker_stale_after_seconds: i64,
     pub health_data_stale: bool,
-    pub latest_health_check_at: Option<NaiveDateTime>,
+    pub latest_health_check_at: Option<DateTime<Utc>>,
     pub health_stale_after_hours: i64,
 }
 
 #[rocket::get("/dashboard?<maintainer_id>&<source>")]
 pub async fn dashboard(
-    mut db: Connection<DbConn>,
     auth: AuthenticatedUser,
+    mut db: Connection<DbConn>,
     maintainer_id: Option<i32>,
     source: Option<String>,
 ) -> ApiResult<DashboardResponse> {
     let access = record_access_scope(&mut db, &auth).await?;
-    let now = Utc::now().naive_utc();
+    let now = Utc::now();
     if maintainer_id.is_some_and(|id| !auth.is_admin() && !access.maintainer_ids.contains(&id)) {
         return Err(crate::api::ApiError::Forbidden);
     }
@@ -201,7 +201,7 @@ pub async fn dashboard(
     let health_checks = ServiceHealthCheckRepository::find_recent_scoped(
         &mut db,
         250,
-        Utc::now().naive_utc() - Duration::hours(HEALTH_HISTORY_WINDOW_HOURS),
+        Utc::now() - Duration::hours(HEALTH_HISTORY_WINDOW_HOURS),
         scope.maintainer_id,
         scope.source.as_deref(),
     )
@@ -442,9 +442,9 @@ pub fn build_dashboard_priority_items(
 
 pub fn summarize_workers(
     workers: &[ConnectorWorker],
-    now: NaiveDateTime,
+    now: DateTime<Utc>,
     stale_after_seconds: i64,
-) -> (String, usize, usize, Option<NaiveDateTime>) {
+) -> (String, usize, usize, Option<DateTime<Utc>>) {
     let latest_worker_seen_at = workers.iter().map(|worker| worker.last_seen_at).max();
     let active_workers = workers
         .iter()

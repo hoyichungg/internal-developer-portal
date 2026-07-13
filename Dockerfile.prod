@@ -10,7 +10,7 @@ RUN pnpm install --frozen-lockfile
 COPY frontend ./
 RUN pnpm build
 
-FROM rust:1.81-bookworm AS rust-build
+FROM rust:1.85.0-bookworm AS rust-build
 
 WORKDIR /app
 

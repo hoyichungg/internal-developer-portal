@@ -33,11 +33,11 @@ describe("ConnectorsView connector visibility", () => {
           id: 7,
           display_name: "Platform Team",
           email: "platform@example.test",
-          created_at: "2026-07-10T08:00:00"
+          created_at: "2026-07-10T08:00:00Z"
         }
       ],
       "GET /users": [
-        { id: 11, username: "alice", roles: ["member"], created_at: "2026-07-10T08:00:00" }
+        { id: 11, username: "alice", roles: ["member"], created_at: "2026-07-10T08:00:00Z" }
       ],
       "POST /connectors": (body) => {
         postBodies.push(body);
@@ -89,7 +89,7 @@ describe("ConnectorsView connector visibility", () => {
           id: 7,
           display_name: "Platform Team",
           email: "platform@example.test",
-          created_at: "2026-07-10T08:00:00"
+          created_at: "2026-07-10T08:00:00Z"
         }
       ],
       "GET /users": [],
@@ -280,7 +280,7 @@ describe("ConnectorsView config editor", () => {
           state: "abc",
           redirect_uri: (body as { redirect_uri: string }).redirect_uri,
           scope: "https://graph.microsoft.com/Calendars.Read offline_access",
-          expires_at: "2026-05-19T00:10:00"
+          expires_at: "2026-05-19T00:10:00Z"
         };
       }
     });
@@ -337,9 +337,9 @@ describe("ConnectorsView run detail drilldown", () => {
     const cancelledRun: ConnectorRun = {
       ...queuedRun,
       status: "cancelled",
-      cancel_requested_at: "2026-05-19T00:00:10",
-      cancelled_at: "2026-05-19T00:00:10",
-      finished_at: "2026-05-19T00:00:10"
+      cancel_requested_at: "2026-05-19T00:00:10Z",
+      cancelled_at: "2026-05-19T00:00:10Z",
+      finished_at: "2026-05-19T00:00:10Z"
     };
     const { client, calls } = createMockApiClient({
       "GET /connectors": [graphCalendarConnector()],
@@ -406,13 +406,13 @@ function graphCalendarConnector(): Connector {
     kind: "microsoft_graph_calendar",
     display_name: "Microsoft Graph Calendar",
     status: "active",
-    last_run_at: "2026-05-19T00:00:00",
-    last_success_at: "2026-05-19T00:00:00",
+    last_run_at: "2026-05-19T00:00:00Z",
+    last_success_at: "2026-05-19T00:00:00Z",
     scope_type: "global",
     owner_user_id: null,
     maintainer_id: null,
-    created_at: "2026-05-19T00:00:00",
-    updated_at: "2026-05-19T00:00:00"
+    created_at: "2026-05-19T00:00:00Z",
+    updated_at: "2026-05-19T00:00:00Z"
   };
 }
 
@@ -442,8 +442,8 @@ function graphCalendarConfigResponse(
       2
     ),
     sample_payload: JSON.stringify({ items: [] }, null, 2),
-    created_at: "2026-05-19T00:00:00",
-    updated_at: "2026-05-19T00:00:00",
+    created_at: "2026-05-19T00:00:00Z",
+    updated_at: "2026-05-19T00:00:00Z",
     last_scheduled_at: null,
     next_run_at: null,
     last_scheduled_run_id: null,
@@ -461,16 +461,16 @@ function graphCalendarRun(): ConnectorRun {
     failure_count: 1,
     duration_ms: 340,
     error_message: "1 item failed",
-    started_at: "2026-05-19T00:00:00",
-    finished_at: "2026-05-19T00:00:01",
+    started_at: "2026-05-19T00:00:00Z",
+    finished_at: "2026-05-19T00:00:01Z",
     trigger: "scheduled",
-    claimed_at: "2026-05-19T00:00:00",
+    claimed_at: "2026-05-19T00:00:00Z",
     worker_id: "worker-1",
     attempt_count: 1,
     max_attempts: 3,
-    next_attempt_at: "2026-05-19T00:00:00",
+    next_attempt_at: "2026-05-19T00:00:00Z",
     lease_expires_at: null,
-    heartbeat_at: "2026-05-19T00:00:15",
+    heartbeat_at: "2026-05-19T00:00:15Z",
     cancel_requested_at: null,
     cancelled_at: null,
     parent_run_id: null,
@@ -492,7 +492,7 @@ function graphCalendarRunDetail(): ConnectorRunDetail {
         external_id: "evt-standup",
         status: "imported",
         snapshot: JSON.stringify({ title: "Calendar: Platform standup" }),
-        created_at: "2026-05-19T00:00:01"
+        created_at: "2026-05-19T00:00:01Z"
       }
     ],
     item_errors: [
@@ -504,7 +504,7 @@ function graphCalendarRunDetail(): ConnectorRunDetail {
         external_id: "evt-bad",
         message: "Bad event payload",
         raw_item: JSON.stringify({ id: null }),
-        created_at: "2026-05-19T00:00:01"
+        created_at: "2026-05-19T00:00:01Z"
       }
     ],
     health_checks: []

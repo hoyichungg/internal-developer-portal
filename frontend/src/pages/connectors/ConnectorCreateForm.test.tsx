@@ -9,14 +9,14 @@ const maintainer = {
   id: 7,
   display_name: "Platform Team",
   email: "platform@example.test",
-  created_at: "2026-07-10T08:00:00"
+  created_at: "2026-07-10T08:00:00Z"
 };
 
 const portalUser = {
   id: 11,
   username: "alice",
   roles: ["user"],
-  created_at: "2026-07-10T08:00:00"
+  created_at: "2026-07-10T08:00:00Z"
 };
 
 describe("ConnectorCreateForm visibility", () => {

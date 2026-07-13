@@ -14,6 +14,10 @@ param(
     [switch]$SkipOverview,
 
     [Parameter()]
+    [ValidateSet("Any", "Enabled", "Disabled")]
+    [string]$ExpectedEntraState = "Any",
+
+    [Parameter()]
     [ValidateRange(1, 300)]
     [int]$TimeoutSeconds = 15
 )
@@ -51,6 +55,121 @@ function Assert-NonEmptyString {
 
     if ($null -eq $Value -or [string]::IsNullOrWhiteSpace([string]$Value)) {
         throw "$Location must be a non-empty string."
+    }
+}
+
+$script:Rfc3339PropertyNames = @(
+    "archived_at",
+    "cancel_requested_at",
+    "cancelled_at",
+    "checked_at",
+    "claimed_at",
+    "created_at",
+    "dismissed_at",
+    "due_at",
+    "ends_at",
+    "expires_at",
+    "finished_at",
+    "heartbeat_at",
+    "last_checked_at",
+    "last_run_at",
+    "last_scheduled_at",
+    "last_seen_at",
+    "last_success_at",
+    "latest_health_check_at",
+    "latest_worker_seen_at",
+    "lease_expires_at",
+    "locked_until",
+    "next_attempt_at",
+    "next_run_at",
+    "occurred_at",
+    "read_at",
+    "snoozed_until",
+    "source_updated_at",
+    "started_at",
+    "starts_at",
+    "updated_at",
+    "window_started_at"
+)
+
+function Assert-Rfc3339Timestamp {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Value,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Location
+    )
+
+    if ($Value -isnot [string] -or
+        [string]$Value -notmatch '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$') {
+        throw "$Location must be RFC3339 with Z or an explicit numeric offset; got '$Value'."
+    }
+
+    $parsed = [DateTimeOffset]::MinValue
+    $parsedOk = [DateTimeOffset]::TryParse(
+        [string]$Value,
+        [Globalization.CultureInfo]::InvariantCulture,
+        [Globalization.DateTimeStyles]::None,
+        [ref]$parsed
+    )
+    if (-not $parsedOk) {
+        throw "$Location is not a valid RFC3339 instant; got '$Value'."
+    }
+}
+
+function Assert-Rfc3339Properties {
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowNull()]
+        [object]$Value,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Location
+    )
+
+    if ($null -eq $Value -or $Value -is [string] -or $Value -is [ValueType]) {
+        return
+    }
+
+    if ($Value -is [System.Collections.IEnumerable] -and
+        $Value -isnot [System.Collections.IDictionary] -and
+        $Value -isnot [PSCustomObject]) {
+        $index = 0
+        foreach ($item in $Value) {
+            Assert-Rfc3339Properties -Value $item -Location "$Location[$index]"
+            $index++
+        }
+        return
+    }
+
+    foreach ($property in $Value.PSObject.Properties) {
+        $propertyLocation = "$Location.$($property.Name)"
+        if ($script:Rfc3339PropertyNames -contains $property.Name -and $null -ne $property.Value) {
+            Assert-Rfc3339Timestamp -Value $property.Value -Location $propertyLocation
+        }
+        elseif ($null -ne $property.Value -and $property.Value -isnot [string]) {
+            Assert-Rfc3339Properties -Value $property.Value -Location $propertyLocation
+        }
+    }
+}
+
+function Assert-BooleanProperty {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Object,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Name,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Location
+    )
+
+    Assert-HasProperty -Object $Object -Name $Name -Location $Location
+    $value = $Object.PSObject.Properties[$Name].Value
+    if ($value -isnot [System.Boolean]) {
+        throw "$Location.$Name must be a JSON boolean."
     }
 }
 
@@ -99,6 +218,7 @@ function Invoke-PortalRequest {
         Uri             = "$script:PortalBaseUrl$Path"
         Method          = $Method
         Headers         = $Headers
+        WebSession      = $script:PortalSession
         TimeoutSec      = $TimeoutSeconds
         ErrorAction     = "Stop"
         UseBasicParsing = $true
@@ -149,6 +269,7 @@ function Invoke-PortalRequest {
     return [PSCustomObject]@{
         StatusCode = $actualStatus
         Json       = $json
+        Headers    = $response.Headers
     }
 }
 
@@ -206,6 +327,30 @@ try {
     }
 
     $script:PortalBaseUrl = $BaseUrl.TrimEnd("/")
+    $script:PortalSession = New-Object Microsoft.PowerShell.Commands.WebRequestSession
+
+    $livez = Invoke-PortalRequest -Method GET -Path "/livez" -ExpectedStatus 200
+    Assert-HealthyResponse -Data $livez.Json.data -Path "/livez"
+    Write-Host "[PASS] GET /livez: API process is alive."
+
+    $readyz = Invoke-PortalRequest -Method GET -Path "/readyz" -ExpectedStatus 200
+    Assert-HealthyResponse -Data $readyz.Json.data -Path "/readyz" -IncludeDatabase
+    Write-Host "[PASS] GET /readyz: API and PostgreSQL are ready."
+
+    $authConfig = Invoke-PortalRequest -Method GET -Path "/auth/config" -ExpectedStatus 200
+    $authConfigData = $authConfig.Json.data
+    Assert-BooleanProperty -Object $authConfigData -Name "password_login_enabled" -Location "/auth/config data"
+    Assert-BooleanProperty -Object $authConfigData -Name "entra_login_enabled" -Location "/auth/config data"
+    if (-not [bool]$authConfigData.password_login_enabled) {
+        throw "/auth/config reports password_login_enabled=false; this smoke script intentionally tests the local recovery path."
+    }
+    if ($ExpectedEntraState -eq "Enabled" -and -not [bool]$authConfigData.entra_login_enabled) {
+        throw "/auth/config reports entra_login_enabled=false; expected enabled."
+    }
+    if ($ExpectedEntraState -eq "Disabled" -and [bool]$authConfigData.entra_login_enabled) {
+        throw "/auth/config reports entra_login_enabled=true; expected disabled."
+    }
+    Write-Host "[PASS] GET /auth/config: login-method flags match the local smoke requirements."
 
     if ([string]::IsNullOrWhiteSpace($Username)) {
         $Username = Read-Host "Portal username"
@@ -226,14 +371,6 @@ try {
     if ($null -eq $Password -or $Password.Length -eq 0) {
         throw "Password is required (secure prompt, SecureString parameter, or PORTAL_SMOKE_PASSWORD)."
     }
-
-    $livez = Invoke-PortalRequest -Method GET -Path "/livez" -ExpectedStatus 200
-    Assert-HealthyResponse -Data $livez.Json.data -Path "/livez"
-    Write-Host "[PASS] GET /livez: API process is alive."
-
-    $readyz = Invoke-PortalRequest -Method GET -Path "/readyz" -ExpectedStatus 200
-    Assert-HealthyResponse -Data $readyz.Json.data -Path "/readyz" -IncludeDatabase
-    Write-Host "[PASS] GET /readyz: API and PostgreSQL are ready."
 
     $passwordPointer = [IntPtr]::Zero
     $plainPassword = $null
@@ -258,36 +395,71 @@ try {
     }
 
     $loginData = $login.Json.data
-    Assert-HasProperty -Object $loginData -Name "token" -Location "/login data"
-    Assert-HasProperty -Object $loginData -Name "token_type" -Location "/login data"
     Assert-HasProperty -Object $loginData -Name "expires_at" -Location "/login data"
-    Assert-NonEmptyString -Value $loginData.token -Location "/login data.token"
-    if ([string]$loginData.token_type -ne "Bearer") {
-        throw "/login data.token_type was '$($loginData.token_type)'; expected 'Bearer'."
+    Assert-HasProperty -Object $loginData -Name "auth_method" -Location "/login data"
+    if ($null -ne $loginData.PSObject.Properties["token"] -or
+        $null -ne $loginData.PSObject.Properties["token_type"]) {
+        throw "/login returned raw session credentials; the browser login contract must be cookie-only."
     }
     Assert-NonEmptyString -Value $loginData.expires_at -Location "/login data.expires_at"
+    Assert-Rfc3339Properties -Value $loginData -Location "/login data"
+    if ([string]$loginData.auth_method -ne "password") {
+        throw "/login data.auth_method was '$($loginData.auth_method)'; expected 'password'."
+    }
 
-    # Keep the bearer token only in this process. Never print this variable or put it in a URL.
-    $token = [string]$loginData.token
-    $authorizationHeaders = @{ Authorization = "Bearer $token" }
+    $requiresProductionCookie = $parsedBaseUrl.Scheme -eq "https"
+    $expectedCookieName = if ($requiresProductionCookie) { "__Host-idp_session" } else { "idp_session" }
+    $sessionCookies = $script:PortalSession.Cookies.GetCookies([System.Uri]$script:PortalBaseUrl)
+    $sessionCookie = $sessionCookies | Where-Object {
+        $_.Name -eq $expectedCookieName
+    } | Select-Object -First 1
+    if ($null -eq $sessionCookie -or [string]::IsNullOrWhiteSpace([string]$sessionCookie.Value)) {
+        throw "POST /login did not establish the expected '$expectedCookieName' cookie in the HTTP cookie jar."
+    }
+    if (-not $sessionCookie.HttpOnly) {
+        throw "POST /login session cookie is missing HttpOnly."
+    }
+    $setCookieText = (@($login.Headers["Set-Cookie"]) -join "`n")
+    $cookiePattern = "(?m)(?:^|,\s*)$([regex]::Escape($expectedCookieName))=[^,`r`n]*"
+    $cookieMatch = [regex]::Match($setCookieText, $cookiePattern)
+    if (-not $cookieMatch.Success) {
+        throw "POST /login response is missing the expected '$expectedCookieName' Set-Cookie header."
+    }
+    $sessionSetCookie = $cookieMatch.Value.TrimStart(", ")
+    foreach ($attribute in @("HttpOnly", "Path=/", "SameSite=Lax")) {
+        if ($sessionSetCookie -notmatch "(?i)(?:^|;\s*)$([regex]::Escape($attribute))(?:;|$)") {
+            throw "POST /login session cookie is missing $attribute."
+        }
+    }
+    if ($sessionSetCookie -match "(?i)(?:^|;\s*)Domain=") {
+        throw "POST /login session cookie must be host-only and must not contain Domain."
+    }
+    if ($requiresProductionCookie -and $sessionSetCookie -notmatch "(?i)(?:^|;\s*)Secure(?:;|$)") {
+        throw "Production POST /login session cookie is missing Secure."
+    }
+    $writeHeaders = @{ "X-IDP-CSRF" = "1" }
 
     try {
-        Write-Host "[PASS] POST /login: valid bearer session returned."
+        Write-Host "[PASS] POST /login: HttpOnly cookie session established without exposing a raw token."
 
-        $me = Invoke-PortalRequest -Method GET -Path "/me" -ExpectedStatus 200 -Headers $authorizationHeaders
+        $me = Invoke-PortalRequest -Method GET -Path "/me" -ExpectedStatus 200
         $meData = $me.Json.data
-        foreach ($property in @("id", "username", "expires_at", "roles", "capabilities", "maintainer_access")) {
+        foreach ($property in @("id", "username", "expires_at", "auth_method", "roles", "capabilities", "maintainer_access")) {
             Assert-HasProperty -Object $meData -Name $property -Location "/me data"
         }
         Assert-NonEmptyString -Value $meData.username -Location "/me data.username"
         Assert-NonEmptyString -Value $meData.expires_at -Location "/me data.expires_at"
+        Assert-Rfc3339Properties -Value $meData -Location "/me data"
+        if ([string]$meData.auth_method -ne "password") {
+            throw "/me data.auth_method was '$($meData.auth_method)'; expected 'password' for the local-login smoke path."
+        }
         foreach ($capability in @("manage_connectors", "view_audit", "manage_maintainers", "view_user_directory")) {
             Assert-HasProperty -Object $meData.capabilities -Name $capability -Location "/me data.capabilities"
         }
-        Write-Host "[PASS] GET /me: identity, roles, and capabilities are present."
+        Write-Host "[PASS] GET /me: password identity, roles, and capabilities are present."
 
         if (-not $SkipOverview) {
-            $overview = Invoke-PortalRequest -Method GET -Path "/me/overview" -ExpectedStatus 200 -Headers $authorizationHeaders
+            $overview = Invoke-PortalRequest -Method GET -Path "/me/overview" -ExpectedStatus 200
             $overviewData = $overview.Json.data
             foreach ($property in @(
                     "user",
@@ -323,18 +495,39 @@ try {
                 )) {
                 Assert-HasProperty -Object $overviewData.summary -Name $property -Location "/me/overview data.summary"
             }
-            Write-Host "[PASS] GET /me/overview: operational overview contract is complete."
+            Assert-Rfc3339Properties -Value $overviewData -Location "/me/overview data"
+            Write-Host "[PASS] GET /me/overview: operational overview and RFC3339 datetime contracts are complete."
         }
         else {
             Write-Host "[SKIP] GET /me/overview was skipped by request."
         }
+
+        $myWork = Invoke-PortalRequest -Method GET -Path "/me/work-cards?sort=attention&page=1&page_size=25" -ExpectedStatus 200
+        $myWorkData = $myWork.Json.data
+        foreach ($property in @("items", "total", "page", "page_size", "facets")) {
+            Assert-HasProperty -Object $myWorkData -Name $property -Location "/me/work-cards data"
+        }
+        foreach ($property in @("statuses", "projects", "work_item_types", "sources")) {
+            Assert-HasProperty -Object $myWorkData.facets -Name $property -Location "/me/work-cards data.facets"
+        }
+        if ([int64]$myWorkData.page -ne 1 -or [int64]$myWorkData.page_size -ne 25) {
+            throw "/me/work-cards did not honor the requested page contract."
+        }
+        Assert-Rfc3339Properties -Value $myWorkData -Location "/me/work-cards data"
+        Write-Host "[PASS] GET /me/work-cards: assigned-work pagination, facets, and RFC3339 contracts are complete."
     }
     finally {
-        if (-not [string]::IsNullOrEmpty($token)) {
-            $logout = Invoke-PortalRequest -Method POST -Path "/logout" -ExpectedStatus 204 -Headers $authorizationHeaders -NoJson
+        if ($null -ne $sessionCookie) {
+            $logout = Invoke-PortalRequest -Method POST -Path "/logout" -ExpectedStatus 204 -Headers $writeHeaders -NoJson
+            $remainingSessionCookie = $script:PortalSession.Cookies.GetCookies([System.Uri]$script:PortalBaseUrl) |
+                Where-Object { $_.Name -eq "__Host-idp_session" -or $_.Name -eq "idp_session" } |
+                Select-Object -First 1
+            if ($null -ne $remainingSessionCookie) {
+                throw "POST /logout returned success but the portal session remains in the HTTP cookie jar."
+            }
             Write-Host "[PASS] POST /logout: smoke-test session was removed."
-            $token = $null
-            $authorizationHeaders.Clear()
+            $writeHeaders.Clear()
+            $sessionCookie = $null
         }
     }
 

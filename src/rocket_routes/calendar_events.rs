@@ -12,11 +12,11 @@ const CALENDAR_WINDOW_AFTER_HOURS: i64 = 42;
 
 #[rocket::get("/calendar-events")]
 pub async fn get_calendar_events(
-    mut db: Connection<DbConn>,
     auth: AuthenticatedUser,
+    mut db: Connection<DbConn>,
 ) -> ApiResult<Vec<CalendarEvent>> {
     let access = record_access_scope(&mut db, &auth).await?;
-    let now = Utc::now().naive_utc();
+    let now = Utc::now();
     let events = CalendarEventRepository::find_upcoming_for_access(
         &mut db,
         100,
@@ -32,8 +32,8 @@ pub async fn get_calendar_events(
 
 #[rocket::get("/calendar-events/<id>")]
 pub async fn view_calendar_event(
-    mut db: Connection<DbConn>,
     auth: AuthenticatedUser,
+    mut db: Connection<DbConn>,
     id: i32,
 ) -> ApiResult<CalendarEvent> {
     let event = CalendarEventRepository::find(&mut db, id).await?;

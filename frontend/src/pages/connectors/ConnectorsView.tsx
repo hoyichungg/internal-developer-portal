@@ -34,6 +34,7 @@ import { ConnectorRegistry } from "./ConnectorRegistry";
 import { ConnectorRunsPanel } from "./ConnectorRunsPanel";
 import { ConnectorScopeForm } from "./ConnectorScopeForm";
 import {
+  connectorConfigDiagnostics,
   connectorConfigFromResponse,
   connectorConfigFromTemplate,
   defaultConnectorConfig
@@ -357,6 +358,7 @@ export function ConnectorsView({
     }
     setSaving(true);
     try {
+      assertConnectorConfigValid(config);
       JSON.parse(config.config);
       JSON.parse(config.sample_payload);
       await client.put<ConnectorConfigResponse>(`/connectors/${encodeURIComponent(selected.source)}/config`, {
@@ -402,6 +404,7 @@ export function ConnectorsView({
   }
 
   async function saveSelectedConfig(selectedConnector: Connector) {
+    assertConnectorConfigValid(config);
     JSON.parse(config.config);
     JSON.parse(config.sample_payload);
     await client.put<ConnectorConfigResponse>(
@@ -627,6 +630,15 @@ export function ConnectorsView({
       </Stack>
     </ViewFrame>
   );
+}
+
+function assertConnectorConfigValid(config: ConnectorConfigForm) {
+  const firstError = connectorConfigDiagnostics(config).find(
+    (diagnostic) => diagnostic.level === "error"
+  );
+  if (firstError) {
+    throw new Error(`Connector config is not valid: ${firstError.message}`);
+  }
 }
 
 function microsoftOAuthRedirectUri(): string {

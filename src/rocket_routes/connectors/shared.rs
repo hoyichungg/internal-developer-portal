@@ -59,6 +59,10 @@ pub(crate) fn api_error_message(error: &ApiError) -> String {
             .collect::<Vec<_>>()
             .join(", "),
         ApiError::Unauthorized => "authentication is required".to_owned(),
+        ApiError::RateLimited { .. } => "too many requests".to_owned(),
+        ApiError::AuthenticationCapacityLimited { .. } => {
+            "authentication is temporarily at capacity".to_owned()
+        }
         ApiError::Forbidden => "permission denied".to_owned(),
         ApiError::NotFound => "resource was not found".to_owned(),
         ApiError::Database(error) => error.to_string(),

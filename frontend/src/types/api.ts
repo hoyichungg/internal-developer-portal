@@ -1,3 +1,4 @@
+/** Offset-aware RFC3339 instant returned by the API (`Z` or an explicit numeric offset). */
 export type DateTimeString = string;
 
 export type ApiId = number;
@@ -26,8 +27,18 @@ export type MeResponse = {
   username: string;
   roles: string[];
   expires_at?: DateTimeString;
+  auth_method: string;
   capabilities: MeCapabilities;
   maintainer_access: MeMaintainerAccess[];
+};
+
+export type RevokeAllSessionsResponse = {
+  revoked_sessions: number;
+};
+
+export type PublicAuthConfig = {
+  password_login_enabled: boolean;
+  entra_login_enabled: boolean;
 };
 
 export type MeCapabilities = {
@@ -57,9 +68,8 @@ export type LoginRequest = {
 };
 
 export type LoginResponse = {
-  token: string;
-  token_type: string;
   expires_at: DateTimeString;
+  auth_method: "password";
 };
 
 export type AuditLog = {
@@ -141,10 +151,30 @@ export type WorkCard = {
   status: string;
   priority: string;
   assignee: string | null;
+  assignee_source_id?: string | null;
+  assignee_user_id?: ApiId | null;
+  project?: string | null;
+  work_item_type?: string | null;
   due_at: DateTimeString | null;
+  source_updated_at?: DateTimeString | null;
   url: string | null;
   created_at: DateTimeString;
   updated_at: DateTimeString;
+};
+
+export type MyWorkFacets = {
+  statuses: string[];
+  projects: string[];
+  work_item_types: string[];
+  sources: string[];
+};
+
+export type MyWorkResponse = {
+  items: WorkCard[];
+  total: number;
+  page: number;
+  page_size: number;
+  facets: MyWorkFacets;
 };
 
 export type CalendarEvent = {

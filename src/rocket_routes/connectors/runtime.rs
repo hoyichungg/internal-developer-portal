@@ -1,4 +1,4 @@
-use chrono::{DateTime, NaiveDateTime, Utc};
+use chrono::{DateTime, NaiveDateTime, SecondsFormat, Utc};
 use diesel_async::{AsyncConnection, AsyncPgConnection};
 use rocket::serde::Serialize;
 use serde_json::Value;
@@ -161,10 +161,11 @@ async fn load_payload_for_claimed_run(
                     .map_err(ApiError::from)?;
             }
 
-            match adapter_result.payload {
-                Some(payload) => Ok(payload),
-                None => Ok(parse_json_payload(&config.sample_payload)),
-            }
+            let mut payload = adapter_result
+                .payload
+                .unwrap_or_else(|| parse_json_payload(&config.sample_payload));
+            normalize_legacy_connector_payload_timestamps(&run.target, &mut payload);
+            Ok(payload)
         }
         Err(error) => Err(validation_error_dynamic("config", error)),
     }
@@ -198,7 +199,7 @@ async fn create_queued_run_with_parent(
     payload: Option<String>,
     parent_run_id: Option<i32>,
 ) -> Result<ConnectorRun, ApiError> {
-    let started_at = Utc::now().naive_utc();
+    let started_at = Utc::now();
 
     let new_run = NewConnectorRun {
         source: source.to_owned(),
@@ -266,7 +267,7 @@ pub(crate) async fn create_running_run(
 ) -> Result<ConnectorRun, ApiError> {
     ConnectorRepository::find_or_create_default(db, source, default_connector_kind(source, target))
         .await?;
-    let started_at = Utc::now().naive_utc();
+    let started_at = Utc::now();
     let new_run = NewConnectorRun {
         source: source.to_owned(),
         target: target.to_owned(),
@@ -329,7 +330,7 @@ async fn finish_connector_run_for_owner(
     execution: ConnectorExecution,
     worker_id: Option<&str>,
 ) -> Result<ConnectorRunExecutionResponse, ApiError> {
-    let finished_at = Utc::now().naive_utc();
+    let finished_at = Utc::now();
     let started_at = run.claimed_at.unwrap_or(run.started_at);
     let duration_ms = (finished_at - started_at).num_milliseconds().max(0);
     let imported = execution.data.len();
@@ -622,12 +623,16 @@ pub(crate) async fn execute_work_card_items(
             status: item.status,
             priority: item.priority,
             assignee: item.assignee,
+            project: item.project,
+            work_item_type: item.work_item_type,
+            assignee_source_id: item.assignee_source_id,
+            assignee_user_id: item.assignee_user_id,
             due_at: item.due_at,
             url: item.url,
             connector_id: Some(connector.id),
             owner_user_id: connector.owner_user_id,
             maintainer_id: connector.maintainer_id,
-            source_updated_at: None,
+            source_updated_at: item.source_updated_at,
             last_seen_run_id: Some(run_id),
             archived_at: None,
         });
@@ -756,13 +761,6 @@ pub(crate) async fn execute_service_health_items(
     for item in items {
         let external_id = item.external_id.clone();
         let raw_item = raw_item_json(&item);
-        let last_checked_at = match parse_connector_datetime(item.last_checked_at.as_deref()) {
-            Ok(value) => value,
-            Err(error) => {
-                errors.push(connector_error(Some(external_id), error, raw_item));
-                continue;
-            }
-        };
         let service = validate_request(NewService {
             source: source.to_owned(),
             external_id: Some(item.external_id),
@@ -775,7 +773,7 @@ pub(crate) async fn execute_service_health_items(
             repository_url: item.repository_url,
             dashboard_url: item.dashboard_url,
             runbook_url: item.runbook_url,
-            last_checked_at,
+            last_checked_at: item.last_checked_at,
         });
 
         match service {
@@ -863,6 +861,69 @@ fn parse_json_payload(payload: &str) -> Value {
     })
 }
 
+fn normalize_legacy_connector_payload_timestamps(target: &str, payload: &mut Value) {
+    let fields: &[&str] = match target {
+        "calendar_events" => &["starts_at", "ends_at"],
+        "work_cards" => &["due_at"],
+        "service_health" => &["last_checked_at"],
+        _ => return,
+    };
+
+    let Some(items) = payload.get_mut("items").and_then(Value::as_array_mut) else {
+        return;
+    };
+
+    for item in items {
+        let Some(item) = item.as_object_mut() else {
+            continue;
+        };
+
+        for field in fields {
+            let Some(value) = item.get_mut(*field) else {
+                continue;
+            };
+            let Some(raw) = value.as_str() else {
+                continue;
+            };
+            if let Some(normalized) = normalize_legacy_utc_datetime(raw) {
+                *value = Value::String(normalized);
+            }
+        }
+    }
+}
+
+fn normalize_legacy_utc_datetime(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+
+    if let Ok(datetime) = DateTime::parse_from_rfc3339(value) {
+        return Some(
+            datetime
+                .with_timezone(&Utc)
+                .to_rfc3339_opts(SecondsFormat::AutoSi, true),
+        );
+    }
+
+    for format in [
+        "%Y-%m-%dT%H:%M:%S%.f",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%d %H:%M:%S%.f",
+        "%Y-%m-%d %H:%M:%S",
+    ] {
+        if let Ok(datetime) = NaiveDateTime::parse_from_str(value, format) {
+            return Some(
+                datetime
+                    .and_utc()
+                    .to_rfc3339_opts(SecondsFormat::AutoSi, true),
+            );
+        }
+    }
+
+    None
+}
+
 fn payload_error(error: serde_json::Error) -> ConnectorExecution {
     ConnectorExecution {
         data: Vec::new(),
@@ -916,34 +977,10 @@ fn default_connector_kind(source: &str, target: &str) -> &'static str {
     }
 }
 
-fn parse_connector_datetime(value: Option<&str>) -> Result<Option<NaiveDateTime>, String> {
-    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
-        return Ok(None);
-    };
-
-    if let Ok(datetime) = DateTime::parse_from_rfc3339(value) {
-        return Ok(Some(datetime.naive_utc()));
-    }
-
-    for format in [
-        "%Y-%m-%dT%H:%M:%S%.f",
-        "%Y-%m-%dT%H:%M:%S",
-        "%Y-%m-%d %H:%M:%S%.f",
-        "%Y-%m-%d %H:%M:%S",
-    ] {
-        if let Ok(datetime) = NaiveDateTime::parse_from_str(value, format) {
-            return Ok(Some(datetime));
-        }
-    }
-
-    Err(format!(
-        "last_checked_at is not a supported datetime: {value}"
-    ))
-}
-
 #[cfg(test)]
 mod tests {
-    use super::should_reconcile;
+    use super::{normalize_legacy_connector_payload_timestamps, should_reconcile};
+    use serde_json::json;
 
     #[test]
     fn reconciliation_requires_an_explicit_complete_error_free_snapshot() {
@@ -951,5 +988,29 @@ mod tests {
         assert!(!should_reconcile(Some(true), 1));
         assert!(!should_reconcile(Some(false), 0));
         assert!(!should_reconcile(None, 0));
+    }
+
+    #[test]
+    fn stored_connector_payloads_normalize_legacy_utc_and_explicit_offsets() {
+        let mut calendar = json!({
+            "items": [{
+                "starts_at": "2026-07-12T12:30:00",
+                "ends_at": "2026-07-12T21:00:00+08:00"
+            }]
+        });
+        normalize_legacy_connector_payload_timestamps("calendar_events", &mut calendar);
+        assert_eq!(calendar["items"][0]["starts_at"], "2026-07-12T12:30:00Z");
+        assert_eq!(calendar["items"][0]["ends_at"], "2026-07-12T13:00:00Z");
+
+        let mut work = json!({"items": [{"due_at": "2026-07-12 14:00:00"}]});
+        normalize_legacy_connector_payload_timestamps("work_cards", &mut work);
+        assert_eq!(work["items"][0]["due_at"], "2026-07-12T14:00:00Z");
+
+        let mut service = json!({"items": [{"last_checked_at": "2026-07-12T15:00:00"}]});
+        normalize_legacy_connector_payload_timestamps("service_health", &mut service);
+        assert_eq!(
+            service["items"][0]["last_checked_at"],
+            "2026-07-12T15:00:00Z"
+        );
     }
 }

@@ -1,5 +1,5 @@
 use crate::schema::*;
-use chrono::NaiveDateTime;
+use chrono::{DateTime, Utc};
 use diesel::prelude::*;
 use rocket::serde::Serialize;
 use serde::Deserialize;
@@ -43,6 +43,13 @@ pub(crate) fn schedule_interval_seconds(schedule: &str) -> Option<i64> {
     }
 }
 
+pub(crate) const MIN_CONNECTOR_SCHEDULE_INTERVAL_SECONDS: i64 = 60;
+
+pub(crate) fn effective_schedule_interval_seconds(schedule: &str) -> Option<i64> {
+    schedule_interval_seconds(schedule)
+        .map(|seconds| seconds.max(MIN_CONNECTOR_SCHEDULE_INTERVAL_SECONDS))
+}
+
 fn parse_duration_seconds(value: &str) -> Option<i64> {
     let (number, multiplier) = if let Some(number) = value.strip_suffix('s') {
         (number, 1)
@@ -58,7 +65,7 @@ fn parse_duration_seconds(value: &str) -> Option<i64> {
         .parse::<i64>()
         .ok()
         .filter(|seconds| *seconds > 0)
-        .map(|seconds| seconds * multiplier)
+        .and_then(|seconds| seconds.checked_mul(multiplier))
 }
 
 #[derive(Queryable, Serialize, Deserialize, ToSchema)]
@@ -69,12 +76,12 @@ pub struct Connector {
     pub kind: String,
     pub display_name: String,
     pub status: String,
-    pub last_run_at: Option<NaiveDateTime>,
-    pub last_success_at: Option<NaiveDateTime>,
+    pub last_run_at: Option<DateTime<Utc>>,
+    pub last_success_at: Option<DateTime<Utc>>,
     #[serde(skip_deserializing)]
-    pub created_at: NaiveDateTime,
+    pub created_at: DateTime<Utc>,
     #[serde(skip_deserializing)]
-    pub updated_at: NaiveDateTime,
+    pub updated_at: DateTime<Utc>,
     pub scope_type: String,
     pub owner_user_id: Option<i32>,
     pub maintainer_id: Option<i32>,
@@ -217,13 +224,13 @@ pub struct ConnectorConfig {
     pub config: String,
     pub sample_payload: String,
     #[serde(skip_deserializing)]
-    pub created_at: NaiveDateTime,
+    pub created_at: DateTime<Utc>,
     #[serde(skip_deserializing)]
-    pub updated_at: NaiveDateTime,
+    pub updated_at: DateTime<Utc>,
     #[serde(skip_deserializing)]
-    pub last_scheduled_at: Option<NaiveDateTime>,
+    pub last_scheduled_at: Option<DateTime<Utc>>,
     #[serde(skip_deserializing)]
-    pub next_run_at: Option<NaiveDateTime>,
+    pub next_run_at: Option<DateTime<Utc>>,
     pub last_scheduled_run_id: Option<i32>,
 }
 
@@ -236,8 +243,8 @@ pub struct NewConnectorConfig {
     pub schedule_cron: Option<String>,
     pub config: String,
     pub sample_payload: String,
-    pub last_scheduled_at: Option<NaiveDateTime>,
-    pub next_run_at: Option<NaiveDateTime>,
+    pub last_scheduled_at: Option<DateTime<Utc>>,
+    pub next_run_at: Option<DateTime<Utc>>,
     pub last_scheduled_run_id: Option<i32>,
 }
 
@@ -272,11 +279,18 @@ impl Validate for ConnectorConfigUpdate {
         );
         max_optional_len(&mut errors, "schedule_cron", &self.schedule_cron, 128);
         if let Some(schedule_cron) = &self.schedule_cron {
-            if schedule_interval_seconds(schedule_cron).is_none() {
-                errors.push(FieldViolation::new(
+            match schedule_interval_seconds(schedule_cron) {
+                Some(seconds) if seconds < MIN_CONNECTOR_SCHEDULE_INTERVAL_SECONDS => {
+                    errors.push(FieldViolation::new(
+                        "schedule_cron",
+                        "must run no more often than once every 60 seconds",
+                    ));
+                }
+                None => errors.push(FieldViolation::new(
                     "schedule_cron",
                     "must be @every <n>s, @every <n>m, @every <n>h, @hourly, or @daily",
-                ));
+                )),
+                Some(_) => {}
             }
         }
         required(&mut errors, "config", &self.config);
@@ -327,22 +341,22 @@ pub struct ConnectorRun {
     pub duration_ms: i64,
     pub error_message: Option<String>,
     #[serde(skip_deserializing)]
-    pub started_at: NaiveDateTime,
+    pub started_at: DateTime<Utc>,
     #[serde(skip_deserializing)]
-    pub finished_at: Option<NaiveDateTime>,
+    pub finished_at: Option<DateTime<Utc>>,
     pub trigger: String,
     #[serde(skip_serializing, skip_deserializing)]
     pub payload: Option<String>,
     #[serde(skip_deserializing)]
-    pub claimed_at: Option<NaiveDateTime>,
+    pub claimed_at: Option<DateTime<Utc>>,
     pub worker_id: Option<String>,
     pub attempt_count: i32,
     pub max_attempts: i32,
-    pub next_attempt_at: NaiveDateTime,
-    pub lease_expires_at: Option<NaiveDateTime>,
-    pub heartbeat_at: Option<NaiveDateTime>,
-    pub cancel_requested_at: Option<NaiveDateTime>,
-    pub cancelled_at: Option<NaiveDateTime>,
+    pub next_attempt_at: DateTime<Utc>,
+    pub lease_expires_at: Option<DateTime<Utc>>,
+    pub heartbeat_at: Option<DateTime<Utc>>,
+    pub cancel_requested_at: Option<DateTime<Utc>>,
+    pub cancelled_at: Option<DateTime<Utc>>,
     pub parent_run_id: Option<i32>,
     pub snapshot_complete: Option<bool>,
     pub archived_count: i32,
@@ -358,19 +372,19 @@ pub struct NewConnectorRun {
     pub failure_count: i32,
     pub duration_ms: i64,
     pub error_message: Option<String>,
-    pub started_at: NaiveDateTime,
-    pub finished_at: Option<NaiveDateTime>,
+    pub started_at: DateTime<Utc>,
+    pub finished_at: Option<DateTime<Utc>>,
     pub trigger: String,
     pub payload: Option<String>,
-    pub claimed_at: Option<NaiveDateTime>,
+    pub claimed_at: Option<DateTime<Utc>>,
     pub worker_id: Option<String>,
     pub attempt_count: i32,
     pub max_attempts: i32,
-    pub next_attempt_at: NaiveDateTime,
-    pub lease_expires_at: Option<NaiveDateTime>,
-    pub heartbeat_at: Option<NaiveDateTime>,
-    pub cancel_requested_at: Option<NaiveDateTime>,
-    pub cancelled_at: Option<NaiveDateTime>,
+    pub next_attempt_at: DateTime<Utc>,
+    pub lease_expires_at: Option<DateTime<Utc>>,
+    pub heartbeat_at: Option<DateTime<Utc>>,
+    pub cancel_requested_at: Option<DateTime<Utc>>,
+    pub cancelled_at: Option<DateTime<Utc>>,
     pub parent_run_id: Option<i32>,
     pub snapshot_complete: Option<bool>,
     pub archived_count: i32,
@@ -382,7 +396,7 @@ pub struct ConnectorRunStateUpdate {
     pub failure_count: i32,
     pub duration_ms: i64,
     pub error_message: Option<String>,
-    pub finished_at: Option<NaiveDateTime>,
+    pub finished_at: Option<DateTime<Utc>>,
     pub snapshot_complete: Option<bool>,
     pub archived_count: i32,
 }
@@ -399,7 +413,7 @@ pub struct ConnectorRunItem {
     pub status: String,
     pub snapshot: Option<String>,
     #[serde(skip_deserializing)]
-    pub created_at: NaiveDateTime,
+    pub created_at: DateTime<Utc>,
 }
 
 #[derive(Insertable)]
@@ -425,7 +439,7 @@ pub struct ConnectorRunItemError {
     pub message: String,
     pub raw_item: Option<String>,
     #[serde(skip_deserializing)]
-    pub created_at: NaiveDateTime,
+    pub created_at: DateTime<Utc>,
 }
 
 #[derive(Insertable)]
@@ -450,11 +464,11 @@ pub struct ConnectorWorker {
     pub current_run_id: Option<i32>,
     pub last_error: Option<String>,
     #[serde(skip_deserializing)]
-    pub started_at: NaiveDateTime,
+    pub started_at: DateTime<Utc>,
     #[serde(skip_deserializing)]
-    pub last_seen_at: NaiveDateTime,
+    pub last_seen_at: DateTime<Utc>,
     #[serde(skip_deserializing)]
-    pub updated_at: NaiveDateTime,
+    pub updated_at: DateTime<Utc>,
 }
 
 pub struct ConnectorWorkerHeartbeat {
@@ -464,7 +478,7 @@ pub struct ConnectorWorkerHeartbeat {
     pub retention_enabled: bool,
     pub current_run_id: Option<i32>,
     pub last_error: Option<String>,
-    pub started_at: NaiveDateTime,
+    pub started_at: DateTime<Utc>,
 }
 
 #[derive(Queryable, Serialize, Deserialize, Clone, ToSchema)]
@@ -475,16 +489,16 @@ pub struct MaintenanceRun {
     pub status: String,
     pub worker_id: Option<String>,
     #[serde(skip_deserializing)]
-    pub started_at: NaiveDateTime,
+    pub started_at: DateTime<Utc>,
     #[serde(skip_deserializing)]
-    pub finished_at: NaiveDateTime,
+    pub finished_at: DateTime<Utc>,
     pub duration_ms: i64,
     pub health_checks_deleted: i32,
     pub connector_runs_deleted: i32,
     pub audit_logs_deleted: i32,
     pub error_message: Option<String>,
     #[serde(skip_deserializing)]
-    pub created_at: NaiveDateTime,
+    pub created_at: DateTime<Utc>,
 }
 
 #[derive(Insertable)]
@@ -493,8 +507,8 @@ pub struct NewMaintenanceRun {
     pub task: String,
     pub status: String,
     pub worker_id: Option<String>,
-    pub started_at: NaiveDateTime,
-    pub finished_at: NaiveDateTime,
+    pub started_at: DateTime<Utc>,
+    pub finished_at: DateTime<Utc>,
     pub duration_ms: i64,
     pub health_checks_deleted: i32,
     pub connector_runs_deleted: i32,
@@ -512,7 +526,7 @@ pub struct AuditLog {
     pub resource_id: Option<String>,
     pub metadata: Option<String>,
     #[serde(skip_deserializing)]
-    pub created_at: NaiveDateTime,
+    pub created_at: DateTime<Utc>,
 }
 
 #[derive(Insertable)]
@@ -532,7 +546,7 @@ pub struct Maintainer {
     pub display_name: String,
     pub email: String,
     #[serde(skip_deserializing)]
-    pub created_at: NaiveDateTime,
+    pub created_at: DateTime<Utc>,
 }
 
 #[derive(AsChangeset, Insertable, Deserialize, ToSchema)]
@@ -564,7 +578,7 @@ pub struct MaintainerMember {
     pub user_id: i32,
     pub role: String,
     #[serde(skip_deserializing)]
-    pub created_at: NaiveDateTime,
+    pub created_at: DateTime<Utc>,
 }
 
 #[derive(AsChangeset, Insertable, Deserialize, ToSchema)]
@@ -604,12 +618,12 @@ pub struct Package {
     pub version: String,
     pub description: Option<String>,
     #[serde(skip_deserializing)]
-    pub created_at: NaiveDateTime,
+    pub created_at: DateTime<Utc>,
     pub status: String,
     pub repository_url: Option<String>,
     pub documentation_url: Option<String>,
     #[serde(skip_deserializing)]
-    pub updated_at: NaiveDateTime,
+    pub updated_at: DateTime<Utc>,
 }
 
 #[derive(AsChangeset, Insertable, Deserialize, ToSchema)]
@@ -672,11 +686,11 @@ pub struct Service {
     pub repository_url: Option<String>,
     pub dashboard_url: Option<String>,
     pub runbook_url: Option<String>,
-    pub last_checked_at: Option<NaiveDateTime>,
+    pub last_checked_at: Option<DateTime<Utc>>,
     #[serde(skip_deserializing)]
-    pub created_at: NaiveDateTime,
+    pub created_at: DateTime<Utc>,
     #[serde(skip_deserializing)]
-    pub updated_at: NaiveDateTime,
+    pub updated_at: DateTime<Utc>,
     pub source: String,
     pub external_id: Option<String>,
 }
@@ -691,13 +705,13 @@ pub struct ServiceHealthCheck {
     pub external_id: Option<String>,
     pub health_status: String,
     pub previous_health_status: Option<String>,
-    pub checked_at: NaiveDateTime,
+    pub checked_at: DateTime<Utc>,
     pub response_time_ms: Option<i32>,
     pub message: Option<String>,
     #[serde(skip_serializing, skip_deserializing)]
     pub raw_payload: Option<String>,
     #[serde(skip_deserializing)]
-    pub created_at: NaiveDateTime,
+    pub created_at: DateTime<Utc>,
 }
 
 #[derive(Insertable)]
@@ -709,7 +723,7 @@ pub struct NewServiceHealthCheck {
     pub external_id: Option<String>,
     pub health_status: String,
     pub previous_health_status: Option<String>,
-    pub checked_at: NaiveDateTime,
+    pub checked_at: DateTime<Utc>,
     pub response_time_ms: Option<i32>,
     pub message: Option<String>,
     pub raw_payload: Option<String>,
@@ -731,7 +745,7 @@ pub struct NewService {
     pub repository_url: Option<String>,
     pub dashboard_url: Option<String>,
     pub runbook_url: Option<String>,
-    pub last_checked_at: Option<NaiveDateTime>,
+    pub last_checked_at: Option<DateTime<Utc>>,
 }
 
 impl Validate for NewService {
@@ -783,8 +797,8 @@ pub struct CalendarEvent {
     pub body: Option<String>,
     pub organizer: Option<String>,
     pub location: Option<String>,
-    pub starts_at: NaiveDateTime,
-    pub ends_at: NaiveDateTime,
+    pub starts_at: DateTime<Utc>,
+    pub ends_at: DateTime<Utc>,
     pub time_zone: Option<String>,
     pub is_all_day: bool,
     pub is_cancelled: bool,
@@ -793,13 +807,13 @@ pub struct CalendarEvent {
     pub connector_id: Option<i32>,
     pub owner_user_id: Option<i32>,
     pub maintainer_id: Option<i32>,
-    pub source_updated_at: Option<NaiveDateTime>,
+    pub source_updated_at: Option<DateTime<Utc>>,
     pub last_seen_run_id: Option<i32>,
-    pub archived_at: Option<NaiveDateTime>,
+    pub archived_at: Option<DateTime<Utc>>,
     #[serde(skip_deserializing)]
-    pub created_at: NaiveDateTime,
+    pub created_at: DateTime<Utc>,
     #[serde(skip_deserializing)]
-    pub updated_at: NaiveDateTime,
+    pub updated_at: DateTime<Utc>,
 }
 
 #[derive(AsChangeset, Insertable, Deserialize, ToSchema)]
@@ -812,8 +826,8 @@ pub struct NewCalendarEvent {
     pub body: Option<String>,
     pub organizer: Option<String>,
     pub location: Option<String>,
-    pub starts_at: NaiveDateTime,
-    pub ends_at: NaiveDateTime,
+    pub starts_at: DateTime<Utc>,
+    pub ends_at: DateTime<Utc>,
     pub time_zone: Option<String>,
     pub is_all_day: bool,
     pub is_cancelled: bool,
@@ -826,11 +840,11 @@ pub struct NewCalendarEvent {
     #[serde(skip_deserializing)]
     pub maintainer_id: Option<i32>,
     #[serde(skip_deserializing)]
-    pub source_updated_at: Option<NaiveDateTime>,
+    pub source_updated_at: Option<DateTime<Utc>>,
     #[serde(skip_deserializing)]
     pub last_seen_run_id: Option<i32>,
     #[serde(skip_deserializing)]
-    pub archived_at: Option<NaiveDateTime>,
+    pub archived_at: Option<DateTime<Utc>>,
 }
 
 impl Validate for NewCalendarEvent {
@@ -871,18 +885,22 @@ pub struct WorkCard {
     pub status: String,
     pub priority: String,
     pub assignee: Option<String>,
-    pub due_at: Option<NaiveDateTime>,
+    pub project: Option<String>,
+    pub work_item_type: Option<String>,
+    pub assignee_source_id: Option<String>,
+    pub assignee_user_id: Option<i32>,
+    pub due_at: Option<DateTime<Utc>>,
     pub url: Option<String>,
     #[serde(skip_deserializing)]
-    pub created_at: NaiveDateTime,
+    pub created_at: DateTime<Utc>,
     #[serde(skip_deserializing)]
-    pub updated_at: NaiveDateTime,
+    pub updated_at: DateTime<Utc>,
     pub connector_id: Option<i32>,
     pub owner_user_id: Option<i32>,
     pub maintainer_id: Option<i32>,
-    pub source_updated_at: Option<NaiveDateTime>,
+    pub source_updated_at: Option<DateTime<Utc>>,
     pub last_seen_run_id: Option<i32>,
-    pub archived_at: Option<NaiveDateTime>,
+    pub archived_at: Option<DateTime<Utc>>,
 }
 
 #[derive(AsChangeset, Insertable, Deserialize, ToSchema)]
@@ -895,7 +913,13 @@ pub struct NewWorkCard {
     pub status: String,
     pub priority: String,
     pub assignee: Option<String>,
-    pub due_at: Option<NaiveDateTime>,
+    pub project: Option<String>,
+    pub work_item_type: Option<String>,
+    #[serde(skip_deserializing)]
+    pub assignee_source_id: Option<String>,
+    #[serde(skip_deserializing)]
+    pub assignee_user_id: Option<i32>,
+    pub due_at: Option<DateTime<Utc>>,
     pub url: Option<String>,
     #[serde(skip_deserializing)]
     pub connector_id: Option<i32>,
@@ -904,11 +928,11 @@ pub struct NewWorkCard {
     #[serde(skip_deserializing)]
     pub maintainer_id: Option<i32>,
     #[serde(skip_deserializing)]
-    pub source_updated_at: Option<NaiveDateTime>,
+    pub source_updated_at: Option<DateTime<Utc>>,
     #[serde(skip_deserializing)]
     pub last_seen_run_id: Option<i32>,
     #[serde(skip_deserializing)]
-    pub archived_at: Option<NaiveDateTime>,
+    pub archived_at: Option<DateTime<Utc>>,
 }
 
 impl Validate for NewWorkCard {
@@ -937,6 +961,31 @@ impl Validate for NewWorkCard {
         );
         max_optional_len(&mut errors, "external_id", &self.external_id, 128);
         max_optional_len(&mut errors, "assignee", &self.assignee, 128);
+        max_optional_len(&mut errors, "project", &self.project, 128);
+        max_optional_len(&mut errors, "work_item_type", &self.work_item_type, 128);
+        max_optional_len(
+            &mut errors,
+            "assignee_source_id",
+            &self.assignee_source_id,
+            512,
+        );
+        if self.assignee_user_id.is_some_and(|user_id| user_id <= 0) {
+            errors.push(FieldViolation::new(
+                "assignee_user_id",
+                "must be a positive portal user id",
+            ));
+        }
+        if self.assignee_user_id.is_some()
+            && self
+                .assignee_source_id
+                .as_deref()
+                .is_none_or(|source_id| source_id.trim().is_empty())
+        {
+            errors.push(FieldViolation::new(
+                "assignee_source_id",
+                "must identify the explicitly mapped source identity when assignee_user_id is set",
+            ));
+        }
         max_optional_len(&mut errors, "url", &self.url, 2048);
         optional_url(&mut errors, "url", &self.url);
 
@@ -955,16 +1004,16 @@ pub struct Notification {
     pub is_read: bool,
     pub url: Option<String>,
     #[serde(skip_deserializing)]
-    pub created_at: NaiveDateTime,
+    pub created_at: DateTime<Utc>,
     #[serde(skip_deserializing)]
-    pub updated_at: NaiveDateTime,
+    pub updated_at: DateTime<Utc>,
     pub external_id: Option<String>,
     pub connector_id: Option<i32>,
     pub owner_user_id: Option<i32>,
     pub maintainer_id: Option<i32>,
-    pub source_updated_at: Option<NaiveDateTime>,
+    pub source_updated_at: Option<DateTime<Utc>>,
     pub last_seen_run_id: Option<i32>,
-    pub archived_at: Option<NaiveDateTime>,
+    pub archived_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -979,18 +1028,18 @@ pub struct NotificationView {
     /// Read state last imported from the source system.
     pub source_is_read: bool,
     pub url: Option<String>,
-    pub created_at: NaiveDateTime,
-    pub updated_at: NaiveDateTime,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
     pub external_id: Option<String>,
     pub connector_id: Option<i32>,
     pub owner_user_id: Option<i32>,
     pub maintainer_id: Option<i32>,
-    pub source_updated_at: Option<NaiveDateTime>,
+    pub source_updated_at: Option<DateTime<Utc>>,
     pub last_seen_run_id: Option<i32>,
-    pub archived_at: Option<NaiveDateTime>,
-    pub read_at: Option<NaiveDateTime>,
-    pub dismissed_at: Option<NaiveDateTime>,
-    pub snoozed_until: Option<NaiveDateTime>,
+    pub archived_at: Option<DateTime<Utc>>,
+    pub read_at: Option<DateTime<Utc>>,
+    pub dismissed_at: Option<DateTime<Utc>>,
+    pub snoozed_until: Option<DateTime<Utc>>,
 }
 
 impl NotificationView {
@@ -1043,11 +1092,11 @@ pub struct NewNotification {
     #[serde(skip_deserializing)]
     pub maintainer_id: Option<i32>,
     #[serde(skip_deserializing)]
-    pub source_updated_at: Option<NaiveDateTime>,
+    pub source_updated_at: Option<DateTime<Utc>>,
     #[serde(skip_deserializing)]
     pub last_seen_run_id: Option<i32>,
     #[serde(skip_deserializing)]
-    pub archived_at: Option<NaiveDateTime>,
+    pub archived_at: Option<DateTime<Utc>>,
 }
 
 impl Validate for NewNotification {
@@ -1080,13 +1129,13 @@ pub struct NotificationReceipt {
     pub id: i32,
     pub notification_id: i32,
     pub user_id: i32,
-    pub read_at: Option<NaiveDateTime>,
-    pub dismissed_at: Option<NaiveDateTime>,
-    pub snoozed_until: Option<NaiveDateTime>,
+    pub read_at: Option<DateTime<Utc>>,
+    pub dismissed_at: Option<DateTime<Utc>>,
+    pub snoozed_until: Option<DateTime<Utc>>,
     #[serde(skip_deserializing)]
-    pub created_at: NaiveDateTime,
+    pub created_at: DateTime<Utc>,
     #[serde(skip_deserializing)]
-    pub updated_at: NaiveDateTime,
+    pub updated_at: DateTime<Utc>,
 }
 
 #[derive(Queryable, Debug, Identifiable)]
@@ -1094,7 +1143,7 @@ pub struct User {
     pub id: i32,
     pub username: String,
     pub password: String,
-    pub created_at: NaiveDateTime,
+    pub created_at: DateTime<Utc>,
 }
 
 #[derive(Insertable)]
@@ -1104,12 +1153,46 @@ pub struct NewUser {
     pub password: String,
 }
 
+#[derive(Queryable, Associations, Identifiable, Debug)]
+#[diesel(belongs_to(User))]
+#[diesel(table_name=external_identities)]
+pub struct ExternalIdentity {
+    pub id: i32,
+    pub user_id: i32,
+    pub provider: String,
+    pub issuer: String,
+    pub subject: Option<String>,
+    pub tenant_id: String,
+    pub object_id: String,
+    pub preferred_username: Option<String>,
+    pub display_name: Option<String>,
+    pub email: Option<String>,
+    pub last_login_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Insertable, Debug)]
+#[diesel(table_name=external_identities)]
+pub struct NewExternalIdentity {
+    pub user_id: i32,
+    pub provider: String,
+    pub issuer: String,
+    pub subject: Option<String>,
+    pub tenant_id: String,
+    pub object_id: String,
+    pub preferred_username: Option<String>,
+    pub display_name: Option<String>,
+    pub email: Option<String>,
+    pub last_login_at: Option<DateTime<Utc>>,
+}
+
 #[derive(Queryable, Identifiable, Debug)]
 pub struct Role {
     pub id: i32,
     pub code: String,
     pub name: String,
-    pub created_at: NaiveDateTime,
+    pub created_at: DateTime<Utc>,
 }
 
 #[derive(Insertable)]
@@ -1123,7 +1206,6 @@ pub struct NewRole {
 #[diesel(belongs_to(User))]
 #[diesel(belongs_to(Role))]
 #[diesel(table_name=users_roles)]
-
 pub struct UserRole {
     pub id: i32,
     pub user_id: i32,
@@ -1143,15 +1225,123 @@ pub struct NewUserRole {
 pub struct Session {
     pub id: i32,
     pub user_id: i32,
-    pub token: String,
-    pub expires_at: NaiveDateTime,
-    pub created_at: NaiveDateTime,
+    pub token_hash: String,
+    pub expires_at: DateTime<Utc>,
+    pub created_at: DateTime<Utc>,
+    pub auth_method: String,
+    pub last_seen_at: DateTime<Utc>,
+    pub ip_address: Option<String>,
+    pub user_agent: Option<String>,
 }
 
 #[derive(Insertable)]
 #[diesel(table_name=sessions)]
 pub struct NewSession {
     pub user_id: i32,
-    pub token: String,
-    pub expires_at: NaiveDateTime,
+    pub token_hash: String,
+    pub expires_at: DateTime<Utc>,
+    pub auth_method: String,
+    pub last_seen_at: DateTime<Utc>,
+    pub ip_address: Option<String>,
+    pub user_agent: Option<String>,
+}
+
+#[derive(Queryable, Identifiable)]
+#[diesel(table_name=login_throttle_buckets)]
+#[diesel(primary_key(bucket_hash))]
+pub struct LoginThrottleBucket {
+    pub bucket_hash: String,
+    pub failure_count: i32,
+    pub window_started_at: DateTime<Utc>,
+    pub locked_until: Option<DateTime<Utc>>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Insertable)]
+#[diesel(table_name=login_throttle_buckets)]
+pub struct NewLoginThrottleBucket {
+    pub bucket_hash: String,
+    pub failure_count: i32,
+    pub window_started_at: DateTime<Utc>,
+    pub locked_until: Option<DateTime<Utc>>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Queryable, Identifiable, Debug)]
+#[diesel(table_name=oidc_login_transactions)]
+#[diesel(primary_key(state_hash))]
+pub struct OidcLoginTransaction {
+    pub state_hash: String,
+    pub browser_binding_hash: String,
+    pub nonce: String,
+    pub pkce_verifier_ciphertext: String,
+    pub return_to: String,
+    pub expires_at: DateTime<Utc>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Insertable, Debug)]
+#[diesel(table_name=oidc_login_transactions)]
+pub struct NewOidcLoginTransaction {
+    pub state_hash: String,
+    pub browser_binding_hash: String,
+    pub nonce: String,
+    pub pkce_verifier_ciphertext: String,
+    pub return_to: String,
+    pub expires_at: DateTime<Utc>,
+}
+
+#[cfg(test)]
+mod schedule_tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    fn connector_config(schedule: &str) -> ConnectorConfigUpdate {
+        ConnectorConfigUpdate {
+            target: "work_cards".to_owned(),
+            enabled: true,
+            schedule_cron: Some(schedule.to_owned()),
+            config: "{}".to_owned(),
+            sample_payload: r#"{"items":[]}"#.to_owned(),
+        }
+    }
+
+    #[test]
+    fn connector_schedule_validation_rejects_sub_minute_intervals() {
+        let violations = connector_config("@every 59s").validate();
+        assert!(violations.iter().any(|violation| {
+            violation.field == "schedule_cron" && violation.message.contains("60 seconds")
+        }));
+
+        assert!(!connector_config("@every 60s")
+            .validate()
+            .iter()
+            .any(|violation| violation.field == "schedule_cron"));
+    }
+
+    #[test]
+    fn legacy_schedule_intervals_are_clamped_and_overflow_is_rejected() {
+        assert_eq!(effective_schedule_interval_seconds("@every 1s"), Some(60));
+        assert_eq!(effective_schedule_interval_seconds("@every 5m"), Some(300));
+        assert_eq!(
+            schedule_interval_seconds("@every 9223372036854775807h"),
+            None
+        );
+    }
+
+    #[test]
+    fn persisted_model_timestamps_serialize_as_utc_rfc3339() {
+        let audit_log = AuditLog {
+            id: 7,
+            actor_user_id: None,
+            action: "timezone.test".to_owned(),
+            resource_type: "test".to_owned(),
+            resource_id: None,
+            metadata: None,
+            created_at: Utc.with_ymd_and_hms(2026, 7, 12, 12, 30, 0).unwrap(),
+        };
+
+        let value = serde_json::to_value(audit_log).unwrap();
+        assert_eq!(value["created_at"], "2026-07-12T12:30:00Z");
+    }
 }

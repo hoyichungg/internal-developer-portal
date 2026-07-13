@@ -5,7 +5,7 @@ use crate::repositories::{NotificationReceiptRepository, NotificationRepository}
 use crate::rocket_routes::audit_logs::record_audit_log;
 use crate::rocket_routes::DbConn;
 use crate::validation::{validate_request, FieldViolation, Validate};
-use chrono::{NaiveDateTime, Utc};
+use chrono::{DateTime, Utc};
 use rocket::response::status::NoContent;
 use rocket::serde::json::Json;
 use rocket::serde::Deserialize;
@@ -15,12 +15,12 @@ use utoipa::ToSchema;
 
 #[derive(Deserialize, ToSchema)]
 pub struct NotificationSnoozeRequest {
-    pub snoozed_until: NaiveDateTime,
+    pub snoozed_until: DateTime<Utc>,
 }
 
 impl Validate for NotificationSnoozeRequest {
     fn validate(&self) -> Vec<FieldViolation> {
-        if self.snoozed_until <= Utc::now().naive_utc() {
+        if self.snoozed_until <= Utc::now() {
             vec![FieldViolation::new(
                 "snoozed_until",
                 "must be in the future",
@@ -33,8 +33,8 @@ impl Validate for NotificationSnoozeRequest {
 
 #[rocket::get("/notifications")]
 pub async fn get_notifications(
-    mut db: Connection<DbConn>,
     auth: AuthenticatedUser,
+    mut db: Connection<DbConn>,
 ) -> ApiResult<Vec<NotificationView>> {
     let access = record_access_scope(&mut db, &auth).await?;
     let notifications =
@@ -45,8 +45,8 @@ pub async fn get_notifications(
 
 #[rocket::get("/notifications/<id>")]
 pub async fn view_notification(
-    mut db: Connection<DbConn>,
     auth: AuthenticatedUser,
+    mut db: Connection<DbConn>,
     id: i32,
 ) -> ApiResult<NotificationView> {
     let notification = find_accessible_notification(&mut db, &auth, id).await?;
@@ -57,8 +57,8 @@ pub async fn view_notification(
 
 #[rocket::post("/notifications/<id>/read")]
 pub async fn mark_notification_read(
-    mut db: Connection<DbConn>,
     auth: AuthenticatedUser,
+    mut db: Connection<DbConn>,
     id: i32,
 ) -> ApiResult<NotificationView> {
     let notification = find_accessible_notification(&mut db, &auth, id).await?;
@@ -70,8 +70,8 @@ pub async fn mark_notification_read(
 
 #[rocket::post("/notifications/<id>/unread")]
 pub async fn mark_notification_unread(
-    mut db: Connection<DbConn>,
     auth: AuthenticatedUser,
+    mut db: Connection<DbConn>,
     id: i32,
 ) -> ApiResult<NotificationView> {
     let notification = find_accessible_notification(&mut db, &auth, id).await?;
@@ -83,8 +83,8 @@ pub async fn mark_notification_unread(
 
 #[rocket::post("/notifications/<id>/dismiss")]
 pub async fn dismiss_notification(
-    mut db: Connection<DbConn>,
     auth: AuthenticatedUser,
+    mut db: Connection<DbConn>,
     id: i32,
 ) -> ApiResult<NotificationView> {
     let notification = find_accessible_notification(&mut db, &auth, id).await?;
@@ -96,8 +96,8 @@ pub async fn dismiss_notification(
 
 #[rocket::post("/notifications/<id>/snooze", format = "json", data = "<request>")]
 pub async fn snooze_notification(
-    mut db: Connection<DbConn>,
     auth: AuthenticatedUser,
+    mut db: Connection<DbConn>,
     id: i32,
     request: Json<NotificationSnoozeRequest>,
 ) -> ApiResult<NotificationView> {
@@ -113,8 +113,8 @@ pub async fn snooze_notification(
 
 #[rocket::post("/notifications/<id>/restore")]
 pub async fn restore_notification(
-    mut db: Connection<DbConn>,
     auth: AuthenticatedUser,
+    mut db: Connection<DbConn>,
     id: i32,
 ) -> ApiResult<NotificationView> {
     let notification = find_accessible_notification(&mut db, &auth, id).await?;
@@ -126,8 +126,8 @@ pub async fn restore_notification(
 
 #[rocket::post("/notifications", format = "json", data = "<new_notification>")]
 pub async fn create_notification(
-    mut db: Connection<DbConn>,
     auth: AuthenticatedUser,
+    mut db: Connection<DbConn>,
     new_notification: Json<NewNotification>,
 ) -> CreatedApiResult<Notification> {
     require_admin(&auth)?;
@@ -152,8 +152,8 @@ pub async fn create_notification(
 
 #[rocket::put("/notifications/<id>", format = "json", data = "<notification>")]
 pub async fn update_notification(
-    mut db: Connection<DbConn>,
     auth: AuthenticatedUser,
+    mut db: Connection<DbConn>,
     id: i32,
     notification: Json<NewNotification>,
 ) -> ApiResult<Notification> {
@@ -186,8 +186,8 @@ pub async fn update_notification(
 
 #[rocket::delete("/notifications/<id>")]
 pub async fn delete_notification(
-    mut db: Connection<DbConn>,
     auth: AuthenticatedUser,
+    mut db: Connection<DbConn>,
     id: i32,
 ) -> Result<NoContent, ApiError> {
     require_admin(&auth)?;

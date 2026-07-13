@@ -8,12 +8,18 @@ import { PortalShell } from "./PortalShell";
 describe("PortalShell capability navigation", () => {
   it("hides administrative navigation from a regular member", () => {
     renderWithProviders(
-      <PortalShell user={memberUser()} view="dashboard" onLogout={vi.fn()}>
+      <PortalShell
+        user={memberUser()}
+        view="dashboard"
+        onLogout={vi.fn()}
+        onRevokeAllSessions={vi.fn()}
+      >
         <div>Dashboard content</div>
       </PortalShell>
     );
 
     expect(screen.getByRole("link", { name: "Dashboard" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "My Work" })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Catalog" })).toBeInTheDocument();
     expect(screen.queryByRole("link", { name: "Connectors" })).not.toBeInTheDocument();
     expect(screen.queryByRole("link", { name: "Audit" })).not.toBeInTheDocument();
@@ -26,7 +32,12 @@ describe("PortalShell capability navigation", () => {
     user.capabilities.view_audit = true;
 
     renderWithProviders(
-      <PortalShell user={user} view="dashboard" onLogout={vi.fn()}>
+      <PortalShell
+        user={user}
+        view="dashboard"
+        onLogout={vi.fn()}
+        onRevokeAllSessions={vi.fn()}
+      >
         <div>Dashboard content</div>
       </PortalShell>
     );
@@ -41,6 +52,7 @@ function memberUser(): MeResponse {
     id: 2,
     username: "member",
     roles: ["member"],
+    auth_method: "password",
     capabilities: {
       manage_connectors: false,
       view_audit: false,

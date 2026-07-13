@@ -5,7 +5,7 @@ pub mod common;
 #[test]
 fn test_frontend_shell_is_served() {
     let client = Client::new();
-    let response = client.get(common::APP_HOST).send().unwrap();
+    let response = client.get(common::app_host()).send().unwrap();
     assert_eq!(response.status(), StatusCode::OK);
 
     let body = response.text().unwrap();

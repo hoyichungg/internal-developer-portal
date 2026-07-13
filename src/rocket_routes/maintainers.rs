@@ -20,8 +20,8 @@ pub struct MaintainerMemberRequest {
 
 #[rocket::get("/maintainers")]
 pub async fn get_maintainers(
-    mut db: Connection<DbConn>,
     _auth: AuthenticatedUser,
+    mut db: Connection<DbConn>,
 ) -> ApiResult<Vec<Maintainer>> {
     let maintainers = MaintainerRepository::find_multiple(&mut db, 100).await?;
     ok(maintainers)
@@ -29,8 +29,8 @@ pub async fn get_maintainers(
 
 #[rocket::get("/maintainers/<id>")]
 pub async fn view_maintainer(
-    mut db: Connection<DbConn>,
     _auth: AuthenticatedUser,
+    mut db: Connection<DbConn>,
     id: i32,
 ) -> ApiResult<Maintainer> {
     let maintainer = MaintainerRepository::find(&mut db, id).await?;
@@ -39,8 +39,8 @@ pub async fn view_maintainer(
 
 #[rocket::post("/maintainers", format = "json", data = "<new_maintainer>")]
 pub async fn create_maintainer(
-    mut db: Connection<DbConn>,
     auth: AuthenticatedUser,
+    mut db: Connection<DbConn>,
     new_maintainer: Json<NewMaintainer>,
 ) -> CreatedApiResult<Maintainer> {
     require_admin(&auth)?;
@@ -61,8 +61,8 @@ pub async fn create_maintainer(
 
 #[rocket::put("/maintainers/<id>", format = "json", data = "<maintainer>")]
 pub async fn update_maintainer(
-    mut db: Connection<DbConn>,
     auth: AuthenticatedUser,
+    mut db: Connection<DbConn>,
     id: i32,
     maintainer: Json<NewMaintainer>,
 ) -> ApiResult<Maintainer> {
@@ -84,8 +84,8 @@ pub async fn update_maintainer(
 
 #[rocket::delete("/maintainers/<id>")]
 pub async fn delete_maintainer(
-    mut db: Connection<DbConn>,
     auth: AuthenticatedUser,
+    mut db: Connection<DbConn>,
     id: i32,
 ) -> Result<NoContent, ApiError> {
     require_admin(&auth)?;
@@ -97,8 +97,8 @@ pub async fn delete_maintainer(
 
 #[rocket::get("/maintainers/<id>/members")]
 pub async fn get_maintainer_members(
-    mut db: Connection<DbConn>,
     auth: AuthenticatedUser,
+    mut db: Connection<DbConn>,
     id: i32,
 ) -> ApiResult<Vec<MaintainerMember>> {
     require_maintainer_owner_access(&mut db, &auth, id).await?;
@@ -109,8 +109,8 @@ pub async fn get_maintainer_members(
 
 #[rocket::post("/maintainers/<id>/members", format = "json", data = "<member>")]
 pub async fn upsert_maintainer_member(
-    mut db: Connection<DbConn>,
     auth: AuthenticatedUser,
+    mut db: Connection<DbConn>,
     id: i32,
     member: Json<MaintainerMemberRequest>,
 ) -> CreatedApiResult<MaintainerMember> {
@@ -142,8 +142,8 @@ pub async fn upsert_maintainer_member(
 
 #[rocket::delete("/maintainers/<id>/members/<user_id>")]
 pub async fn delete_maintainer_member(
-    mut db: Connection<DbConn>,
     auth: AuthenticatedUser,
+    mut db: Connection<DbConn>,
     id: i32,
     user_id: i32,
 ) -> Result<NoContent, ApiError> {

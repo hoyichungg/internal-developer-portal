@@ -77,6 +77,8 @@ Data Layer principles:
 - Store secrets encrypted.
 - Return only redacted secret values from APIs.
 - Never persist `***redacted***` as a real credential during config round trips.
+- Store application instants as PostgreSQL `TIMESTAMPTZ`. Treat a source time-zone
+  name as display/source metadata, not as a substitute for an absolute instant.
 
 ## Logic Layer
 
@@ -113,6 +115,9 @@ Logic Layer principles:
 - Operators should be able to tell when workers are alive, when retention last
   ran, and whether homepage health data is stale.
 - Adapters should be testable with sample payloads or mock servers.
+- API and connector datetime inputs/outputs must be offset-aware RFC3339 with
+  `Z` or an explicit numeric offset. Reject ambiguous naive wall-clock values at
+  the frontend and API boundaries.
 
 ## Presentation Layer
 
@@ -206,6 +211,11 @@ The project already has:
 - Generic ERP private message HTTP adapter for notification imports.
 - Service health check history for homepage trend and incident summaries.
 - Frontend dashboard, catalog, connectors, audit, and service overview views.
+- A first-class My Work view with assigned-to-me authorization, due/blocked
+  attention sorting, project/type/source filters, stable pagination URLs, and
+  detail-page return state.
+- Explicit Azure DevOps assignee descriptor mappings to portal user IDs; the
+  portal never guesses assignment from mutable display names or email strings.
 
 Future improvements can include:
 

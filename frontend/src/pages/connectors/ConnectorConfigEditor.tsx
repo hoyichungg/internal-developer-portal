@@ -105,7 +105,7 @@ export function ConnectorConfigEditor({
               type="button"
               variant="light"
               leftSection={<IconPlugConnected size={16} />}
-              disabled={editorLocked}
+              disabled={editorLocked || hasConfigErrors}
               loading={oauthLoading}
               onClick={onConnectMicrosoft}
             >
@@ -116,7 +116,7 @@ export function ConnectorConfigEditor({
             type="button"
             variant="default"
             leftSection={<IconPlayerPlay size={16} />}
-            disabled={editorLocked}
+            disabled={editorLocked || hasConfigErrors}
             loading={runLoading}
             onClick={() => onRun("execute")}
           >
@@ -125,7 +125,7 @@ export function ConnectorConfigEditor({
           <Button
             type="button"
             leftSection={<IconBolt size={16} />}
-            disabled={editorLocked}
+            disabled={editorLocked || hasConfigErrors}
             loading={runLoading}
             onClick={() => onRun("queue")}
           >
@@ -194,6 +194,7 @@ export function ConnectorConfigEditor({
             <Grid.Col span={{ base: 12, md: 3 }}>
               <TextInput
                 label="Schedule"
+                description="Minimum interval: 1 minute"
                 value={config.schedule_cron}
                 disabled={editorLocked}
                 placeholder="@every 15m"
@@ -246,7 +247,7 @@ export function ConnectorConfigEditor({
             classNames={{ input: "codeInput" }}
           />
           <Group justify="flex-end">
-            <Button type="submit" disabled={editorLocked} loading={saving}>
+            <Button type="submit" disabled={editorLocked || hasConfigErrors} loading={saving}>
               Save config
             </Button>
           </Group>

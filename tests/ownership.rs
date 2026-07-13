@@ -2,6 +2,7 @@ use reqwest::{blocking::Client, StatusCode};
 use serde_json::{json, Value};
 
 pub mod common;
+use common::CookieAuthRequest;
 
 #[test]
 fn test_maintainer_membership_controls_catalog_writes() {
@@ -12,7 +13,7 @@ fn test_maintainer_membership_controls_catalog_writes() {
 
     let maintainer = client
         .post(format!("{}/maintainers", common::APP_HOST))
-        .bearer_auth(&admin.token)
+        .cookie_auth(&admin.cookie)
         .json(&json!({
             "display_name": "Platform Ownership",
             "email": "platform-ownership@example.com"
@@ -28,7 +29,7 @@ fn test_maintainer_membership_controls_catalog_writes() {
             common::APP_HOST,
             maintainer["id"]
         ))
-        .bearer_auth(&admin.token)
+        .cookie_auth(&admin.cookie)
         .json(&json!({
             "user_id": owner.user_id,
             "role": "owner"
@@ -43,7 +44,7 @@ fn test_maintainer_membership_controls_catalog_writes() {
             common::APP_HOST,
             maintainer["id"]
         ))
-        .bearer_auth(&owner.token)
+        .cookie_auth(&owner.cookie)
         .send()
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
@@ -60,7 +61,7 @@ fn test_maintainer_membership_controls_catalog_writes() {
             common::APP_HOST,
             maintainer["id"]
         ))
-        .bearer_auth(&owner.token)
+        .cookie_auth(&owner.cookie)
         .json(&json!({
             "user_id": writer.user_id,
             "role": "viewer"
@@ -71,7 +72,7 @@ fn test_maintainer_membership_controls_catalog_writes() {
 
     let response = client
         .post(format!("{}/packages", common::APP_HOST))
-        .bearer_auth(&writer.token)
+        .cookie_auth(&writer.cookie)
         .json(&json!({
             "maintainer_id": maintainer["id"],
             "slug": "ownership-api",
@@ -92,7 +93,7 @@ fn test_maintainer_membership_controls_catalog_writes() {
             common::APP_HOST,
             maintainer["id"]
         ))
-        .bearer_auth(&owner.token)
+        .cookie_auth(&owner.cookie)
         .json(&json!({
             "user_id": writer.user_id,
             "role": "maintainer"
@@ -103,7 +104,7 @@ fn test_maintainer_membership_controls_catalog_writes() {
 
     let response = client
         .post(format!("{}/packages", common::APP_HOST))
-        .bearer_auth(&writer.token)
+        .cookie_auth(&writer.cookie)
         .json(&json!({
             "maintainer_id": maintainer["id"],
             "slug": "ownership-api",
@@ -121,7 +122,7 @@ fn test_maintainer_membership_controls_catalog_writes() {
 
     let response = client
         .post(format!("{}/services", common::APP_HOST))
-        .bearer_auth(&writer.token)
+        .cookie_auth(&writer.cookie)
         .json(&json!({
             "maintainer_id": maintainer["id"],
             "slug": "ownership-service",
@@ -141,14 +142,14 @@ fn test_maintainer_membership_controls_catalog_writes() {
 
     let response = client
         .delete(format!("{}/services/{}", common::APP_HOST, service["id"]))
-        .bearer_auth(&writer.token)
+        .cookie_auth(&writer.cookie)
         .send()
         .unwrap();
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
 
     let response = client
         .delete(format!("{}/packages/{}", common::APP_HOST, package["id"]))
-        .bearer_auth(&writer.token)
+        .cookie_auth(&writer.cookie)
         .send()
         .unwrap();
     assert_eq!(response.status(), StatusCode::NO_CONTENT);

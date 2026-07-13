@@ -110,6 +110,16 @@ export function WorkCardDetailView({
                       {card.assignee || "-"}
                     </Text>
                   </ContextRow>
+                  <ContextRow label="Project">
+                    <Text fw={700} size="sm" ta="right" className="contextTextValue">
+                      {card.project || "-"}
+                    </Text>
+                  </ContextRow>
+                  <ContextRow label="Work item type">
+                    <Text fw={700} size="sm" ta="right" className="contextTextValue">
+                      {card.work_item_type || "-"}
+                    </Text>
+                  </ContextRow>
                   <ContextRow label="Due">
                     <Text fw={700} size="sm" ta="right">
                       {formatDate(card.due_at)}
@@ -142,6 +152,9 @@ export function WorkCardDetailView({
                   </ContextRow>
                   <ContextRow label="Updated">
                     <DateCell value={card.updated_at} />
+                  </ContextRow>
+                  <ContextRow label="Source updated">
+                    <DateCell value={card.source_updated_at} />
                   </ContextRow>
                 </Stack>
               </DataPanel>

@@ -1,4 +1,4 @@
-use chrono::{DateTime, NaiveDateTime, Utc};
+use chrono::{DateTime, NaiveDateTime, SecondsFormat, Utc};
 use serde_json::Value;
 use std::fmt::Write as _;
 
@@ -193,7 +193,11 @@ pub(super) fn normalize_naive_datetime(value: &str) -> Option<String> {
     }
 
     if let Ok(datetime) = DateTime::parse_from_rfc3339(value) {
-        return Some(datetime.naive_utc().format("%Y-%m-%dT%H:%M:%S").to_string());
+        return Some(
+            datetime
+                .with_timezone(&Utc)
+                .to_rfc3339_opts(SecondsFormat::AutoSi, true),
+        );
     }
 
     for format in [
@@ -203,7 +207,10 @@ pub(super) fn normalize_naive_datetime(value: &str) -> Option<String> {
         "%Y-%m-%d %H:%M:%S",
     ] {
         if let Ok(datetime) = NaiveDateTime::parse_from_str(value, format) {
-            return Some(datetime.format("%Y-%m-%dT%H:%M:%S").to_string());
+            return Some(
+                DateTime::<Utc>::from_naive_utc_and_offset(datetime, Utc)
+                    .to_rfc3339_opts(SecondsFormat::AutoSi, true),
+            );
         }
     }
 
@@ -334,6 +341,11 @@ pub(super) mod test_support {
     }
 
     fn read_request(stream: &mut TcpStream) -> std::io::Result<String> {
+        // Windows may inherit the listener's nonblocking mode on accepted
+        // sockets. Switch the request socket back to blocking before reading;
+        // otherwise a normal scheduling gap can look like an empty/aborted
+        // request and make parallel adapter tests flaky.
+        stream.set_nonblocking(false)?;
         stream.set_read_timeout(Some(Duration::from_secs(2)))?;
         let mut bytes = Vec::new();
         let mut buffer = [0_u8; 4_096];

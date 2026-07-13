@@ -1,5 +1,5 @@
 use chrono::{Duration, Utc};
-use reqwest::{blocking::Client, StatusCode};
+use reqwest::{blocking::Client, StatusCode, Url};
 use serde_json::{json, Value};
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -7,6 +7,7 @@ use std::process::Command;
 use std::thread;
 
 pub mod common;
+use common::CookieAuthRequest;
 
 #[test]
 fn test_connectors_import_dashboard_sources_idempotently() {
@@ -23,7 +24,7 @@ fn test_connectors_import_dashboard_sources_idempotently() {
             common::APP_HOST,
             monitoring_source
         ))
-        .bearer_auth(&auth.token)
+        .cookie_auth(&auth.cookie)
         .json(&json!({
             "items": [{
                 "external_id": "svc-identity",
@@ -67,7 +68,7 @@ fn test_connectors_import_dashboard_sources_idempotently() {
             common::APP_HOST,
             monitoring_source
         ))
-        .bearer_auth(&auth.token)
+        .cookie_auth(&auth.cookie)
         .json(&json!({
             "items": [{
                 "external_id": "svc-identity",
@@ -97,7 +98,7 @@ fn test_connectors_import_dashboard_sources_idempotently() {
             common::APP_HOST,
             monitoring_source
         ))
-        .bearer_auth(&auth.token)
+        .cookie_auth(&auth.cookie)
         .send()
         .unwrap();
     assert_eq!(runs.status(), StatusCode::OK);
@@ -117,7 +118,7 @@ fn test_connectors_import_dashboard_sources_idempotently() {
             common::APP_HOST,
             work_source
         ))
-        .bearer_auth(&auth.token)
+        .cookie_auth(&auth.cookie)
         .json(&json!({
             "items": [{
                 "external_id": "ADO-42",
@@ -143,7 +144,7 @@ fn test_connectors_import_dashboard_sources_idempotently() {
             common::APP_HOST,
             notification_source
         ))
-        .bearer_auth(&auth.token)
+        .cookie_auth(&auth.cookie)
         .json(&json!({
             "items": [{
                 "external_id": "mail-9001",
@@ -167,7 +168,7 @@ fn test_connectors_import_dashboard_sources_idempotently() {
 
     let dashboard = client
         .get(format!("{}/dashboard", common::APP_HOST))
-        .bearer_auth(&auth.token)
+        .cookie_auth(&auth.cookie)
         .send()
         .unwrap()
         .json::<Value>()
@@ -189,7 +190,7 @@ fn test_connectors_import_dashboard_sources_idempotently() {
             common::APP_HOST,
             work_source
         ))
-        .bearer_auth(&auth.token)
+        .cookie_auth(&auth.cookie)
         .send()
         .unwrap()
         .json::<Value>()
@@ -227,7 +228,7 @@ fn test_connector_registry_can_be_managed_and_tracks_run_state() {
 
     let response = client
         .post(format!("{}/connectors", common::APP_HOST))
-        .bearer_auth(&auth.token)
+        .cookie_auth(&auth.cookie)
         .json(&json!({
             "source": source.clone(),
             "kind": "monitoring",
@@ -251,7 +252,7 @@ fn test_connector_registry_can_be_managed_and_tracks_run_state() {
             common::APP_HOST,
             source
         ))
-        .bearer_auth(&auth.token)
+        .cookie_auth(&auth.cookie)
         .json(&json!({
             "items": [{
                 "external_id": "svc-registry",
@@ -274,7 +275,7 @@ fn test_connector_registry_can_be_managed_and_tracks_run_state() {
 
     let response = client
         .get(format!("{}/connectors/{}", common::APP_HOST, source))
-        .bearer_auth(&auth.token)
+        .cookie_auth(&auth.cookie)
         .send()
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
@@ -287,7 +288,7 @@ fn test_connector_registry_can_be_managed_and_tracks_run_state() {
 
     let response = client
         .get(format!("{}/connectors", common::APP_HOST))
-        .bearer_auth(&auth.token)
+        .cookie_auth(&auth.cookie)
         .send()
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
@@ -300,7 +301,7 @@ fn test_connector_registry_can_be_managed_and_tracks_run_state() {
 
     let response = client
         .put(format!("{}/connectors/{}", common::APP_HOST, source))
-        .bearer_auth(&auth.token)
+        .cookie_auth(&auth.cookie)
         .json(&json!({
             "kind": "monitoring",
             "display_name": "Monitoring Connector Paused",
@@ -315,7 +316,7 @@ fn test_connector_registry_can_be_managed_and_tracks_run_state() {
 
     let response = client
         .delete(format!("{}/connectors/{}", common::APP_HOST, source))
-        .bearer_auth(&auth.token)
+        .cookie_auth(&auth.cookie)
         .send()
         .unwrap();
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
@@ -333,7 +334,7 @@ fn test_connector_config_manual_run_records_item_errors() {
 
     let response = client
         .post(format!("{}/connectors", common::APP_HOST))
-        .bearer_auth(&auth.token)
+        .cookie_auth(&auth.cookie)
         .json(&json!({
             "source": source.clone(),
             "kind": "azure_devops",
@@ -367,7 +368,7 @@ fn test_connector_config_manual_run_records_item_errors() {
 
     let response = client
         .put(format!("{}/connectors/{}/config", common::APP_HOST, source))
-        .bearer_auth(&auth.token)
+        .cookie_auth(&auth.cookie)
         .json(&json!({
             "target": "work_cards",
             "enabled": true,
@@ -386,7 +387,7 @@ fn test_connector_config_manual_run_records_item_errors() {
 
     let response = client
         .get(format!("{}/connectors/{}/config", common::APP_HOST, source))
-        .bearer_auth(&auth.token)
+        .cookie_auth(&auth.cookie)
         .send()
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
@@ -397,7 +398,7 @@ fn test_connector_config_manual_run_records_item_errors() {
 
     let response = client
         .post(format!("{}/connectors/{}/runs", common::APP_HOST, source))
-        .bearer_auth(&auth.token)
+        .cookie_auth(&auth.cookie)
         .json(&json!({}))
         .send()
         .unwrap();
@@ -447,7 +448,7 @@ fn test_connector_config_manual_run_records_item_errors() {
     let run_id = execution["run"]["id"].as_i64().unwrap();
     let response = client
         .get(format!("{}/connectors/runs/{}", common::APP_HOST, run_id))
-        .bearer_auth(&auth.token)
+        .cookie_auth(&auth.cookie)
         .send()
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
@@ -462,7 +463,7 @@ fn test_connector_config_manual_run_records_item_errors() {
             common::APP_HOST,
             run_id
         ))
-        .bearer_auth(&auth.token)
+        .cookie_auth(&auth.cookie)
         .json(&json!({}))
         .send()
         .unwrap();
@@ -471,14 +472,14 @@ fn test_connector_config_manual_run_records_item_errors() {
     assert_eq!(retry["run"]["status"], "queued");
     assert_eq!(retry["run"]["trigger"], "retry");
     let retry_id = retry["run"]["id"].as_i64().unwrap();
-    let retry_detail = wait_for_run_status(&client, &auth.token, retry_id, "partial_success");
+    let retry_detail = wait_for_run_status(&client, &auth.cookie, retry_id, "partial_success");
     assert_eq!(retry_detail["run"]["trigger"], "retry");
     assert_eq!(retry_detail["run"]["success_count"], 1);
     assert_eq!(retry_detail["run"]["failure_count"], 1);
 
     let connector = client
         .get(format!("{}/connectors/{}", common::APP_HOST, source))
-        .bearer_auth(&auth.token)
+        .cookie_auth(&auth.cookie)
         .send()
         .unwrap()
         .json::<Value>()
@@ -490,7 +491,7 @@ fn test_connector_config_manual_run_records_item_errors() {
     common::delete_test_work_card(&client, work_card);
     let response = client
         .delete(format!("{}/connectors/{}", common::APP_HOST, source))
-        .bearer_auth(&auth.token)
+        .cookie_auth(&auth.cookie)
         .send()
         .unwrap();
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
@@ -505,7 +506,7 @@ fn test_connector_manual_run_queues_and_worker_executes_it() {
 
     let response = client
         .post(format!("{}/connectors", common::APP_HOST))
-        .bearer_auth(&auth.token)
+        .cookie_auth(&auth.cookie)
         .json(&json!({
             "source": source.clone(),
             "kind": "outlook",
@@ -518,7 +519,7 @@ fn test_connector_manual_run_queues_and_worker_executes_it() {
 
     let response = client
         .put(format!("{}/connectors/{}/config", common::APP_HOST, source))
-        .bearer_auth(&auth.token)
+        .cookie_auth(&auth.cookie)
         .json(&json!({
             "target": "notifications",
             "enabled": true,
@@ -532,7 +533,7 @@ fn test_connector_manual_run_queues_and_worker_executes_it() {
 
     let response = client
         .post(format!("{}/connectors/{}/runs", common::APP_HOST, source))
-        .bearer_auth(&auth.token)
+        .cookie_auth(&auth.cookie)
         .json(&json!({ "mode": "queue" }))
         .send()
         .unwrap();
@@ -546,7 +547,7 @@ fn test_connector_manual_run_queues_and_worker_executes_it() {
     assert_eq!(queued["failed"], 0);
 
     let run_id = queued["run"]["id"].as_i64().unwrap();
-    let detail = wait_for_run_status(&client, &auth.token, run_id, "success");
+    let detail = wait_for_run_status(&client, &auth.cookie, run_id, "success");
     assert_eq!(detail["run"]["trigger"], "manual");
     assert_ne!(detail["run"]["claimed_at"], Value::Null);
     assert!(detail["run"]["worker_id"]
@@ -557,7 +558,7 @@ fn test_connector_manual_run_queues_and_worker_executes_it() {
 
     let response = client
         .delete(format!("{}/connectors/{}", common::APP_HOST, source))
-        .bearer_auth(&auth.token)
+        .cookie_auth(&auth.cookie)
         .send()
         .unwrap();
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
@@ -568,7 +569,7 @@ fn test_connector_manual_run_queues_and_worker_executes_it() {
 fn test_connector_operations_reports_worker_and_retention_history() {
     let client = Client::new();
     let auth = common::create_admin_auth(&client);
-    let operations = wait_for_connector_operations(&client, &auth.token);
+    let operations = wait_for_connector_operations(&client, &auth.cookie);
 
     assert!(operations["stale_after_seconds"].as_i64().unwrap() > 0);
     assert!(
@@ -610,7 +611,7 @@ fn test_scheduler_enqueues_due_config_and_worker_executes_it() {
 
     let response = client
         .post(format!("{}/connectors", common::APP_HOST))
-        .bearer_auth(&auth.token)
+        .cookie_auth(&auth.cookie)
         .json(&json!({
             "source": source.clone(),
             "kind": "azure_devops",
@@ -623,11 +624,11 @@ fn test_scheduler_enqueues_due_config_and_worker_executes_it() {
 
     let response = client
         .put(format!("{}/connectors/{}/config", common::APP_HOST, source))
-        .bearer_auth(&auth.token)
+        .cookie_auth(&auth.cookie)
         .json(&json!({
             "target": "work_cards",
             "enabled": true,
-            "schedule_cron": "@every 1s",
+            "schedule_cron": "@every 1m",
             "config": "{\"project\":\"platform\"}",
             "sample_payload": json!({
                 "items": [{
@@ -649,7 +650,7 @@ fn test_scheduler_enqueues_due_config_and_worker_executes_it() {
     assert_eq!(config["target"], "work_cards");
     assert_ne!(config["next_run_at"], Value::Null);
 
-    let run = wait_for_scheduled_run(&client, &auth.token, &source, "work_cards");
+    let run = wait_for_scheduled_run(&client, &auth.cookie, &source, "work_cards");
     assert_eq!(run["trigger"], "scheduled");
     assert_eq!(run["status"], "success");
     assert_eq!(run["success_count"], 1);
@@ -661,7 +662,7 @@ fn test_scheduler_enqueues_due_config_and_worker_executes_it() {
 
     let dashboard = client
         .get(format!("{}/dashboard?source={}", common::APP_HOST, source))
-        .bearer_auth(&auth.token)
+        .cookie_auth(&auth.cookie)
         .send()
         .unwrap()
         .json::<Value>()
@@ -677,7 +678,7 @@ fn test_scheduler_enqueues_due_config_and_worker_executes_it() {
 
     let config = client
         .get(format!("{}/connectors/{}/config", common::APP_HOST, source))
-        .bearer_auth(&auth.token)
+        .cookie_auth(&auth.cookie)
         .send()
         .unwrap()
         .json::<Value>()
@@ -688,7 +689,7 @@ fn test_scheduler_enqueues_due_config_and_worker_executes_it() {
 
     let response = client
         .delete(format!("{}/connectors/{}", common::APP_HOST, source))
-        .bearer_auth(&auth.token)
+        .cookie_auth(&auth.cookie)
         .send()
         .unwrap();
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
@@ -703,7 +704,7 @@ fn test_sample_notification_adapters_import_product_core_feeds() {
 
     let calendar = execute_sample_notification_adapter(
         &client,
-        &auth.token,
+        &auth.cookie,
         SampleNotificationAdapterCase {
             source_prefix: "calendar_adapter",
             kind: "calendar",
@@ -731,7 +732,7 @@ fn test_sample_notification_adapters_import_product_core_feeds() {
 
     let mail = execute_sample_notification_adapter(
         &client,
-        &auth.token,
+        &auth.cookie,
         SampleNotificationAdapterCase {
             source_prefix: "outlook_mail_adapter",
             kind: "outlook",
@@ -759,7 +760,7 @@ fn test_sample_notification_adapters_import_product_core_feeds() {
 
     let erp = execute_sample_notification_adapter(
         &client,
-        &auth.token,
+        &auth.cookie,
         SampleNotificationAdapterCase {
             source_prefix: "erp_messages_adapter",
             kind: "erp",
@@ -787,7 +788,7 @@ fn test_sample_notification_adapters_import_product_core_feeds() {
                 common::APP_HOST,
                 connector.source
             ))
-            .bearer_auth(&auth.token)
+            .cookie_auth(&auth.cookie)
             .send()
             .unwrap();
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
@@ -823,7 +824,7 @@ fn test_erp_private_messages_adapter_fetches_and_normalizes_messages() {
 
     let response = client
         .post(format!("{}/connectors", common::APP_HOST))
-        .bearer_auth(&auth.token)
+        .cookie_auth(&auth.cookie)
         .json(&json!({
             "source": source.clone(),
             "kind": "erp",
@@ -849,7 +850,7 @@ fn test_erp_private_messages_adapter_fetches_and_normalizes_messages() {
 
     let response = client
         .put(format!("{}/connectors/{}/config", common::APP_HOST, source))
-        .bearer_auth(&auth.token)
+        .cookie_auth(&auth.cookie)
         .json(&json!({
             "target": "notifications",
             "enabled": true,
@@ -885,7 +886,7 @@ fn test_erp_private_messages_adapter_fetches_and_normalizes_messages() {
 
     let response = client
         .post(format!("{}/connectors/{}/runs", common::APP_HOST, source))
-        .bearer_auth(&auth.token)
+        .cookie_auth(&auth.cookie)
         .json(&json!({}))
         .send()
         .unwrap();
@@ -923,7 +924,7 @@ fn test_erp_private_messages_adapter_fetches_and_normalizes_messages() {
 
     let dashboard = client
         .get(format!("{}/dashboard?source={}", common::APP_HOST, source))
-        .bearer_auth(&auth.token)
+        .cookie_auth(&auth.cookie)
         .send()
         .unwrap()
         .json::<Value>()
@@ -966,7 +967,7 @@ fn test_erp_private_messages_adapter_fetches_and_normalizes_messages() {
 
     let response = client
         .delete(format!("{}/connectors/{}", common::APP_HOST, source))
-        .bearer_auth(&auth.token)
+        .cookie_auth(&auth.cookie)
         .send()
         .unwrap();
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
@@ -1034,7 +1035,7 @@ fn test_microsoft_graph_calendar_adapter_fetches_and_normalizes_events() {
 
     let response = client
         .post(format!("{}/connectors", common::APP_HOST))
-        .bearer_auth(&auth.token)
+        .cookie_auth(&auth.cookie)
         .json(&json!({
             "source": source.clone(),
             "kind": "microsoft_graph_calendar",
@@ -1059,7 +1060,7 @@ fn test_microsoft_graph_calendar_adapter_fetches_and_normalizes_events() {
 
     let response = client
         .put(format!("{}/connectors/{}/config", common::APP_HOST, source))
-        .bearer_auth(&auth.token)
+        .cookie_auth(&auth.cookie)
         .json(&json!({
             "target": "notifications",
             "enabled": true,
@@ -1088,7 +1089,7 @@ fn test_microsoft_graph_calendar_adapter_fetches_and_normalizes_events() {
 
     let response = client
         .post(format!("{}/connectors/{}/runs", common::APP_HOST, source))
-        .bearer_auth(&auth.token)
+        .cookie_auth(&auth.cookie)
         .json(&json!({}))
         .send()
         .unwrap();
@@ -1126,7 +1127,7 @@ fn test_microsoft_graph_calendar_adapter_fetches_and_normalizes_events() {
     assert!(standup["body"]
         .as_str()
         .unwrap()
-        .contains("Starts: 2026-05-19T09:30:00 Taipei Standard Time"));
+        .contains("Starts: 2026-05-19T09:30:00Z Taipei Standard Time"));
     assert_eq!(incident["title"], "Calendar: Incident review");
     assert_eq!(incident["severity"], "warning");
     assert_eq!(
@@ -1136,7 +1137,7 @@ fn test_microsoft_graph_calendar_adapter_fetches_and_normalizes_events() {
 
     let dashboard = client
         .get(format!("{}/dashboard?source={}", common::APP_HOST, source))
-        .bearer_auth(&auth.token)
+        .cookie_auth(&auth.cookie)
         .send()
         .unwrap()
         .json::<Value>()
@@ -1173,13 +1174,17 @@ fn test_microsoft_graph_calendar_adapter_fetches_and_normalizes_events() {
         "adapter should send Microsoft Graph bearer token: {requests:?}"
     );
     assert!(
-        lower_request.contains("prefer: outlook.timezone=\"taipei standard time\""),
-        "adapter should send Microsoft Graph timezone preference: {requests:?}"
+        !lower_request.contains("\r\nprefer:"),
+        "adapter must keep Graph calendar responses in UTC: {requests:?}"
+    );
+    assert!(
+        request.contains("originalStartTimeZone") && request.contains("originalEndTimeZone"),
+        "adapter should request the original source timezone metadata: {requests:?}"
     );
 
     let response = client
         .delete(format!("{}/connectors/{}", common::APP_HOST, source))
-        .bearer_auth(&auth.token)
+        .cookie_auth(&auth.cookie)
         .send()
         .unwrap();
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
@@ -1197,7 +1202,7 @@ fn test_microsoft_graph_mail_adapter_refreshes_token_and_normalizes_messages() {
 
     let response = client
         .post(format!("{}/connectors", common::APP_HOST))
-        .bearer_auth(&auth.token)
+        .cookie_auth(&auth.cookie)
         .json(&json!({
             "source": source.clone(),
             "kind": "outlook",
@@ -1225,7 +1230,7 @@ fn test_microsoft_graph_mail_adapter_refreshes_token_and_normalizes_messages() {
 
     let response = client
         .put(format!("{}/connectors/{}/config", common::APP_HOST, source))
-        .bearer_auth(&auth.token)
+        .cookie_auth(&auth.cookie)
         .json(&json!({
             "target": "notifications",
             "enabled": true,
@@ -1254,7 +1259,7 @@ fn test_microsoft_graph_mail_adapter_refreshes_token_and_normalizes_messages() {
 
     let response = client
         .post(format!("{}/connectors/{}/runs", common::APP_HOST, source))
-        .bearer_auth(&auth.token)
+        .cookie_auth(&auth.cookie)
         .json(&json!({}))
         .send()
         .unwrap();
@@ -1298,7 +1303,7 @@ fn test_microsoft_graph_mail_adapter_refreshes_token_and_normalizes_messages() {
 
     let dashboard = client
         .get(format!("{}/dashboard?source={}", common::APP_HOST, source))
-        .bearer_auth(&auth.token)
+        .cookie_auth(&auth.cookie)
         .send()
         .unwrap()
         .json::<Value>()
@@ -1309,7 +1314,7 @@ fn test_microsoft_graph_mail_adapter_refreshes_token_and_normalizes_messages() {
 
     let config_response = client
         .get(format!("{}/connectors/{}/config", common::APP_HOST, source))
-        .bearer_auth(&auth.token)
+        .cookie_auth(&auth.cookie)
         .send()
         .unwrap()
         .json::<Value>()
@@ -1323,7 +1328,7 @@ fn test_microsoft_graph_mail_adapter_refreshes_token_and_normalizes_messages() {
 
     let response = client
         .put(format!("{}/connectors/{}/config", common::APP_HOST, source))
-        .bearer_auth(&auth.token)
+        .cookie_auth(&auth.cookie)
         .json(&json!({
             "target": "notifications",
             "enabled": true,
@@ -1337,7 +1342,7 @@ fn test_microsoft_graph_mail_adapter_refreshes_token_and_normalizes_messages() {
 
     let response = client
         .post(format!("{}/connectors/{}/runs", common::APP_HOST, source))
-        .bearer_auth(&auth.token)
+        .cookie_auth(&auth.cookie)
         .json(&json!({}))
         .send()
         .unwrap();
@@ -1389,7 +1394,7 @@ fn test_microsoft_graph_mail_adapter_refreshes_token_and_normalizes_messages() {
 
     let response = client
         .delete(format!("{}/connectors/{}", common::APP_HOST, source))
-        .bearer_auth(&auth.token)
+        .cookie_auth(&auth.cookie)
         .send()
         .unwrap();
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
@@ -1404,11 +1409,11 @@ fn test_microsoft_oauth_connect_flow_generates_authorize_url_and_stores_refresh_
     let auth = common::create_admin_auth(&client);
     let source = common::unique_name("graph_mail_oauth");
     let mock = start_microsoft_oauth_token_mock();
-    let redirect_uri = "http://127.0.0.1:8000/oauth/microsoft/callback";
+    let redirect_uri = format!("{}/oauth/microsoft/callback", common::app_host());
 
     let response = client
         .post(format!("{}/connectors", common::APP_HOST))
-        .bearer_auth(&auth.token)
+        .cookie_auth(&auth.cookie)
         .json(&json!({
             "source": source.clone(),
             "kind": "outlook",
@@ -1434,7 +1439,7 @@ fn test_microsoft_oauth_connect_flow_generates_authorize_url_and_stores_refresh_
 
     let response = client
         .put(format!("{}/connectors/{}/config", common::APP_HOST, source))
-        .bearer_auth(&auth.token)
+        .cookie_auth(&auth.cookie)
         .json(&json!({
             "target": "notifications",
             "enabled": true,
@@ -1452,7 +1457,7 @@ fn test_microsoft_oauth_connect_flow_generates_authorize_url_and_stores_refresh_
             common::APP_HOST,
             source
         ))
-        .bearer_auth(&auth.token)
+        .cookie_auth(&auth.cookie)
         .json(&json!({ "redirect_uri": redirect_uri }))
         .send()
         .unwrap();
@@ -1460,19 +1465,24 @@ fn test_microsoft_oauth_connect_flow_generates_authorize_url_and_stores_refresh_
     let authorize = response.json::<Value>().unwrap()["data"].clone();
     let authorization_url = authorize["authorization_url"].as_str().unwrap();
     let state = authorize["state"].as_str().unwrap();
+    let authorization_parameters = Url::parse(authorization_url)
+        .unwrap()
+        .query_pairs()
+        .map(|(name, value)| (name.into_owned(), value.into_owned()))
+        .collect::<Vec<_>>();
     assert!(
         authorization_url.starts_with(&format!("{}/authorize?", mock.base_url)),
         "OAuth should use configured Microsoft authorization URL: {authorization_url}"
     );
     assert!(
-        authorization_url.contains("client_id=oauth-client-id")
-            && authorization_url.contains("response_type=code")
-            && authorization_url.contains(
-                "redirect_uri=http%3A%2F%2F127.0.0.1%3A8000%2Foauth%2Fmicrosoft%2Fcallback"
-            )
-            && authorization_url
-                .contains("scope=https%3A%2F%2Fgraph.microsoft.com%2FMail.Read%20offline_access")
-            && authorization_url.contains("prompt=select_account"),
+        authorization_parameters.contains(&("client_id".into(), "oauth-client-id".into()))
+            && authorization_parameters.contains(&("response_type".into(), "code".into()))
+            && authorization_parameters.contains(&("redirect_uri".into(), redirect_uri.clone()))
+            && authorization_parameters.contains(&(
+                "scope".into(),
+                "https://graph.microsoft.com/Mail.Read offline_access".into()
+            ))
+            && authorization_parameters.contains(&("prompt".into(), "select_account".into())),
         "OAuth authorize URL should contain Graph auth parameters: {authorization_url}"
     );
     assert!(!state.trim().is_empty());
@@ -1482,7 +1492,7 @@ fn test_microsoft_oauth_connect_flow_generates_authorize_url_and_stores_refresh_
             "{}/connectors/oauth/microsoft/callback",
             common::APP_HOST
         ))
-        .bearer_auth(&auth.token)
+        .cookie_auth(&auth.cookie)
         .json(&json!({
             "code": "oauth-code-123",
             "state": state,
@@ -1512,20 +1522,27 @@ fn test_microsoft_oauth_connect_flow_generates_authorize_url_and_stores_refresh_
         token_request.starts_with("POST /token"),
         "OAuth callback should exchange code at token endpoint: {requests:?}"
     );
+    let token_body = token_request
+        .split_once("\r\n\r\n")
+        .expect("OAuth token request should contain an HTTP body")
+        .1;
+    let token_parameters = Url::parse(&format!("http://mock.invalid/?{token_body}"))
+        .unwrap()
+        .query_pairs()
+        .map(|(name, value)| (name.into_owned(), value.into_owned()))
+        .collect::<Vec<_>>();
     assert!(
-        token_request.contains("grant_type=authorization_code")
-            && token_request.contains("code=oauth-code-123")
-            && token_request.contains("client_id=oauth-client-id")
-            && token_request.contains("client_secret=oauth-client-secret")
-            && token_request.contains(
-                "redirect_uri=http%3A%2F%2F127.0.0.1%3A8000%2Foauth%2Fmicrosoft%2Fcallback"
-            ),
+        token_parameters.contains(&("grant_type".into(), "authorization_code".into()))
+            && token_parameters.contains(&("code".into(), "oauth-code-123".into()))
+            && token_parameters.contains(&("client_id".into(), "oauth-client-id".into()))
+            && token_parameters.contains(&("client_secret".into(), "oauth-client-secret".into()))
+            && token_parameters.contains(&("redirect_uri".into(), redirect_uri)),
         "OAuth token request should contain authorization code credentials: {requests:?}"
     );
 
     let response = client
         .delete(format!("{}/connectors/{}", common::APP_HOST, source))
-        .bearer_auth(&auth.token)
+        .cookie_auth(&auth.cookie)
         .send()
         .unwrap();
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
@@ -1541,7 +1558,7 @@ fn test_azure_devops_adapter_fetches_and_normalizes_work_items() {
 
     let response = client
         .post(format!("{}/connectors", common::APP_HOST))
-        .bearer_auth(&auth.token)
+        .cookie_auth(&auth.cookie)
         .json(&json!({
             "source": source.clone(),
             "kind": "azure_devops",
@@ -1564,7 +1581,7 @@ fn test_azure_devops_adapter_fetches_and_normalizes_work_items() {
 
     let response = client
         .put(format!("{}/connectors/{}/config", common::APP_HOST, source))
-        .bearer_auth(&auth.token)
+        .cookie_auth(&auth.cookie)
         .json(&json!({
             "target": "work_cards",
             "enabled": true,
@@ -1592,7 +1609,7 @@ fn test_azure_devops_adapter_fetches_and_normalizes_work_items() {
     );
     let config_response = client
         .get(format!("{}/connectors/{}/config", common::APP_HOST, source))
-        .bearer_auth(&auth.token)
+        .cookie_auth(&auth.cookie)
         .send()
         .unwrap()
         .json::<Value>()
@@ -1611,7 +1628,7 @@ fn test_azure_devops_adapter_fetches_and_normalizes_work_items() {
 
     let response = client
         .put(format!("{}/connectors/{}/config", common::APP_HOST, source))
-        .bearer_auth(&auth.token)
+        .cookie_auth(&auth.cookie)
         .json(&json!({
             "target": "work_cards",
             "enabled": true,
@@ -1625,7 +1642,7 @@ fn test_azure_devops_adapter_fetches_and_normalizes_work_items() {
 
     let response = client
         .post(format!("{}/connectors/{}/runs", common::APP_HOST, source))
-        .bearer_auth(&auth.token)
+        .cookie_auth(&auth.cookie)
         .json(&json!({ "mode": "queue" }))
         .send()
         .unwrap();
@@ -1633,13 +1650,13 @@ fn test_azure_devops_adapter_fetches_and_normalizes_work_items() {
 
     let queued = response.json::<Value>().unwrap()["data"].clone();
     let run_id = queued["run"]["id"].as_i64().unwrap();
-    let detail = wait_for_run_status(&client, &auth.token, run_id, "success");
+    let detail = wait_for_run_status(&client, &auth.cookie, run_id, "success");
     assert_eq!(detail["run"]["success_count"], 2);
     assert_eq!(detail["run"]["failure_count"], 0);
 
     let dashboard = client
         .get(format!("{}/dashboard?source={}", common::APP_HOST, source))
-        .bearer_auth(&auth.token)
+        .cookie_auth(&auth.cookie)
         .send()
         .unwrap()
         .json::<Value>()
@@ -1691,7 +1708,7 @@ fn test_azure_devops_adapter_fetches_and_normalizes_work_items() {
 
     let response = client
         .delete(format!("{}/connectors/{}", common::APP_HOST, source))
-        .bearer_auth(&auth.token)
+        .cookie_auth(&auth.cookie)
         .send()
         .unwrap();
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
@@ -1706,7 +1723,7 @@ fn test_monitoring_adapter_fetches_and_normalizes_service_health() {
     let auth = common::create_admin_auth(&client);
     let maintainer = common::create_test_maintainer(&client);
     let source = common::unique_name("monitoring_adapter");
-    let checked_at = (Utc::now().naive_utc() - Duration::minutes(10))
+    let checked_at = (Utc::now() - Duration::minutes(10))
         .format("%Y-%m-%dT%H:%M:%S")
         .to_string();
     let mock = start_monitoring_mock(json!({
@@ -1732,7 +1749,7 @@ fn test_monitoring_adapter_fetches_and_normalizes_service_health() {
 
     let response = client
         .post(format!("{}/connectors", common::APP_HOST))
-        .bearer_auth(&auth.token)
+        .cookie_auth(&auth.cookie)
         .json(&json!({
             "source": source.clone(),
             "kind": "monitoring",
@@ -1754,7 +1771,7 @@ fn test_monitoring_adapter_fetches_and_normalizes_service_health() {
 
     let response = client
         .put(format!("{}/connectors/{}/config", common::APP_HOST, source))
-        .bearer_auth(&auth.token)
+        .cookie_auth(&auth.cookie)
         .json(&json!({
             "target": "service_health",
             "enabled": true,
@@ -1783,7 +1800,7 @@ fn test_monitoring_adapter_fetches_and_normalizes_service_health() {
 
     let response = client
         .post(format!("{}/connectors/{}/runs", common::APP_HOST, source))
-        .bearer_auth(&auth.token)
+        .cookie_auth(&auth.cookie)
         .json(&json!({}))
         .send()
         .unwrap();
@@ -1822,7 +1839,7 @@ fn test_monitoring_adapter_fetches_and_normalizes_service_health() {
         identity["dashboard_url"],
         "https://grafana.example.test/d/identity"
     );
-    assert_eq!(identity["last_checked_at"], checked_at);
+    assert_eq!(identity["last_checked_at"], format!("{checked_at}Z"));
     assert_eq!(billing["health_status"], "down");
     assert_eq!(
         billing["repository_url"],
@@ -1836,7 +1853,7 @@ fn test_monitoring_adapter_fetches_and_normalizes_service_health() {
 
     let dashboard = client
         .get(format!("{}/dashboard?source={}", common::APP_HOST, source))
-        .bearer_auth(&auth.token)
+        .cookie_auth(&auth.cookie)
         .send()
         .unwrap()
         .json::<Value>()
@@ -1869,7 +1886,7 @@ fn test_monitoring_adapter_fetches_and_normalizes_service_health() {
 
     let run_detail = client
         .get(format!("{}/connectors/runs/{}", common::APP_HOST, run_id))
-        .bearer_auth(&auth.token)
+        .cookie_auth(&auth.cookie)
         .send()
         .unwrap();
     assert_eq!(run_detail.status(), StatusCode::OK);
@@ -1911,7 +1928,7 @@ fn test_monitoring_adapter_fetches_and_normalizes_service_health() {
 
     let response = client
         .delete(format!("{}/connectors/{}", common::APP_HOST, source))
-        .bearer_auth(&auth.token)
+        .cookie_auth(&auth.cookie)
         .send()
         .unwrap();
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
@@ -1934,7 +1951,7 @@ fn test_connector_runs_record_failed_items() {
             common::APP_HOST,
             source
         ))
-        .bearer_auth(&auth.token)
+        .cookie_auth(&auth.cookie)
         .json(&json!({
             "items": [{
                 "external_id": "ADO-invalid",
@@ -1975,7 +1992,7 @@ fn test_connector_runs_record_failed_items() {
             common::APP_HOST,
             source
         ))
-        .bearer_auth(&auth.token)
+        .cookie_auth(&auth.cookie)
         .send()
         .unwrap();
     assert_eq!(runs.status(), StatusCode::OK);
@@ -2035,7 +2052,7 @@ fn execute_sample_notification_adapter(
 
     let response = client
         .post(format!("{}/connectors", common::APP_HOST))
-        .bearer_auth(token)
+        .cookie_auth(token)
         .json(&json!({
             "source": source.clone(),
             "kind": case.kind,
@@ -2048,7 +2065,7 @@ fn execute_sample_notification_adapter(
 
     let response = client
         .put(format!("{}/connectors/{}/config", common::APP_HOST, source))
-        .bearer_auth(token)
+        .cookie_auth(token)
         .json(&json!({
             "target": "notifications",
             "enabled": true,
@@ -2062,7 +2079,7 @@ fn execute_sample_notification_adapter(
 
     let response = client
         .post(format!("{}/connectors/{}/runs", common::APP_HOST, source))
-        .bearer_auth(token)
+        .cookie_auth(token)
         .json(&json!({}))
         .send()
         .unwrap();
@@ -2088,7 +2105,7 @@ fn execute_sample_notification_adapter(
 
     let dashboard = client
         .get(format!("{}/dashboard?source={}", common::APP_HOST, source))
-        .bearer_auth(token)
+        .cookie_auth(token)
         .send()
         .unwrap()
         .json::<Value>()
@@ -2122,7 +2139,7 @@ fn wait_for_run_status(client: &Client, token: &str, run_id: i64, status: &str) 
     for _ in 0..30 {
         let response = client
             .get(format!("{}/connectors/runs/{}", common::APP_HOST, run_id))
-            .bearer_auth(token)
+            .cookie_auth(token)
             .send()
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
@@ -2148,7 +2165,7 @@ fn wait_for_scheduled_run(client: &Client, token: &str, source: &str, target: &s
                 source,
                 target
             ))
-            .bearer_auth(token)
+            .cookie_auth(token)
             .send()
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
@@ -2173,7 +2190,7 @@ fn wait_for_connector_operations(client: &Client, token: &str) -> Value {
     for _ in 0..40 {
         let response = client
             .get(format!("{}/connectors/operations", common::APP_HOST))
-            .bearer_auth(token)
+            .cookie_auth(token)
             .send()
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);

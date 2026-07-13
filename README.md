@@ -3,12 +3,12 @@
 An internal developer portal built with Rocket, Diesel Async, PostgreSQL,
 React, TypeScript, and pnpm. It includes a software catalog, service health
 snapshots, DevOps work cards, connector operations, notifications, CLI user
-management, Argon2 password hashing, session tokens, request validation, and
-integration tests for the main REST resources.
+management, local password and Microsoft Entra ID sign-in, session tokens,
+request validation, and integration tests for the main REST resources.
 
 ## Stack
 
-- Rust 1.81
+- Rust 1.85
 - Rocket 0.5
 - Diesel 2.1 and diesel-async
 - React 18, Vite, and Mantine
@@ -73,10 +73,18 @@ cp .env.production.example .env.production
 
 Edit `.env.production` so `POSTGRES_PASSWORD`, `DATABASE_URL`,
 `CONNECTOR_SECRET_KEY`, and the optional seed admin credentials are real
-environment-specific secrets. Then build and start the production stack:
+environment-specific secrets. When Entra sign-in is enabled, also set its
+tenant, client, exact HTTPS redirect URI, client secret, and an independent OIDC
+transaction key. Keep `AUTH_COOKIE_SECURE=true`: production startup rejects an
+insecure browser-session cookie. Validate the effective manifest and build an
+immutable image, then follow the maintenance, final-backup, migrate-once,
+smoke, and rollback procedure in
+[`docs/production-runbook.md`](docs/production-runbook.md). Do not use a direct
+`up --build` as an upgrade procedure while old writers are running.
 
 ```sh
-docker compose --env-file .env.production -f docker-compose.prod.yml up --build -d
+docker compose --env-file .env.production -f docker-compose.prod.yml config --quiet
+docker compose --env-file .env.production -f docker-compose.prod.yml build
 ```
 
 The production image builds release binaries for `server`, `worker`, and `cli`,
@@ -84,6 +92,9 @@ copies the built `frontend/dist` assets into the runtime image, runs as a
 non-root user, and uses `/app/server` instead of `cargo watch`. The production
 Compose file runs migrations as a one-shot `migrate` service and keeps the HTTP
 server and connector worker as separate long-running services.
+The published HTTP port defaults to `127.0.0.1:${PORT:-8000}`; terminate TLS at
+a same-host reverse proxy or use a reviewed private-container-network layout
+instead of exposing Rocket directly.
 
 The application container healthcheck calls `GET /readyz`, which runs a real
 PostgreSQL query. The worker container healthcheck verifies that the worker is
@@ -98,9 +109,30 @@ docker compose --env-file .env.production -f docker-compose.prod.yml --profile s
 
 The production stack does not seed demo data.
 
+The `2026-07-11-100000_harden_sessions` migration replaces plaintext session
+token storage with token hashes. Existing sessions cannot be converted safely,
+so the migration deletes them and every signed-in user must sign in again after
+this upgrade. Notify users before the maintenance window and keep a named admin
+account available for the post-deploy smoke test.
+
+The `2026-07-12-140000_use_timestamptz` migration is a non-rolling schema
+boundary. It converts the portal's historical naive UTC columns to PostgreSQL
+`TIMESTAMPTZ` using an explicit UTC interpretation and requires exclusive table
+locks. Drain traffic, stop both app and worker writers, take the final verified
+backup, run the migration once, and then start the matching app and worker
+image. Do not run an old binary against the converted schema or start the new
+binary before migration. All API datetimes after this boundary are RFC3339 and
+include `Z` or an explicit numeric offset; connector imports and notification
+snooze actions reject ambiguous values such as `2026-07-10T09:00:00`. Follow
+the Graph Calendar preflight and recovery procedure in
+[`docs/production-runbook.md`](docs/production-runbook.md).
+
 ## Environment
 
-Copy `.env.example` to `.env` when running tools directly on the host. The
+Copy `.env.example` to `.env` when running tools directly on the host or when
+overriding the development Compose authentication settings. Compose forwards
+the Entra variables only to the HTTP app; keep client secrets out of the worker
+and migration jobs. The
 server and CLI load `.env` automatically. The Docker Compose setup already
 provides the required environment variables.
 
@@ -108,6 +140,28 @@ Application-level config is loaded from environment variables:
 
 - `APP_ENV`
 - `AUTH_TOKEN_TTL_SECONDS`
+- `AUTH_MAX_ACTIVE_SESSIONS_PER_USER`
+- `AUTH_COOKIE_SECURE`
+- `AUTH_LOGIN_MAX_FAILURES`
+- `AUTH_LOGIN_ACCOUNT_MAX_FAILURES`
+- `AUTH_LOGIN_WINDOW_SECONDS`
+- `AUTH_LOGIN_LOCKOUT_SECONDS`
+- `AUTH_PASSWORD_LOGIN_ENABLED`
+- `AUTH_ENTRA_ENABLED`
+- `AUTH_ENTRA_TENANT_ID`
+- `AUTH_ENTRA_CLIENT_ID`
+- `AUTH_ENTRA_CLIENT_SECRET`
+- `AUTH_ENTRA_REDIRECT_URI`
+- `AUTH_OIDC_TRANSACTION_KEY`
+- `AUTH_ENTRA_ISSUER`
+- `AUTH_ENTRA_AUTHORIZATION_URL`
+- `AUTH_ENTRA_TOKEN_URL`
+- `AUTH_ENTRA_JWKS_URL`
+- `AUTH_ENTRA_JIT_PROVISIONING`
+- `AUTH_ENTRA_REQUIRED_ROLE`
+- `AUTH_OIDC_TRANSACTION_TTL_SECONDS`
+- `AUTH_ENTRA_JWKS_CACHE_SECONDS`
+- `AUTH_ENTRA_CLOCK_SKEW_SECONDS`
 - `DATABASE_URL`
 - `SEED_ADMIN_USERNAME`
 - `SEED_ADMIN_PASSWORD`
@@ -133,12 +187,92 @@ Application-level config is loaded from environment variables:
 
 `APP_ENV` must be `development`, `test`, or `production`.
 `AUTH_TOKEN_TTL_SECONDS` defaults to `86400` only when it is absent; a supplied
-value must be an integer greater than zero. In production, startup requires
-`DATABASE_URL` (or `ROCKET_DATABASES` for the HTTP server) and a
-`CONNECTOR_SECRET_KEY` of at least 32 bytes. Placeholder and low-diversity keys
-are rejected. Generate a random key and keep it stable so previously encrypted
-connector credentials remain decryptable. Invalid startup configuration exits
-with a non-zero status instead of falling back silently.
+value must be an integer greater than zero.
+`AUTH_MAX_ACTIVE_SESSIONS_PER_USER` defaults to `20` and accepts `1` through
+`100`. The limit is shared by password and Entra sessions: a successful login
+removes that user's expired sessions and, at capacity, atomically evicts the
+oldest active session before creating the new one. Sessions belonging to other
+users are never counted or evicted. Lowering the setting takes full effect for
+each user on their next successful login; use `POST /sessions/revoke-all` when
+immediate revocation is required. `AUTH_COOKIE_SECURE` defaults to `false`
+outside production and `true` in production, where setting it to false is
+rejected. Login throttling defaults to five failures per normalized
+username/client-IP pair and 50 failures account-wide in a shared 900-second
+window, followed by a 900-second lockout. Thresholds must be positive, and the
+account-wide threshold must be at least twice the per-client threshold. In
+production, startup also requires `DATABASE_URL` (or
+`ROCKET_DATABASES` for the HTTP server) and a `CONNECTOR_SECRET_KEY` of at least
+32 bytes. Placeholder and low-diversity keys are rejected. Generate a random
+key and keep it stable so previously encrypted connector credentials remain
+decryptable. Invalid startup configuration exits with a non-zero status instead
+of falling back silently.
+
+Portal usernames are case-insensitive authentication identifiers. Login and
+all user-management CLI selectors trim surrounding whitespace and lowercase
+the supplied value; newly created users are stored in that canonical form.
+Historical users keep their original casing for display compatibility, but a
+database unique index on `lower(username)` ensures that `Admin` and `admin`
+cannot be separate accounts. The canonical-username migration deliberately
+fails if existing case-only collisions or surrounding-whitespace usernames are
+present. Rename those accounts explicitly before retrying; the portal never
+silently merges users, roles, sessions, or external identities.
+
+### Microsoft Entra ID sign-in
+
+`AUTH_PASSWORD_LOGIN_ENABLED` defaults to `true` and `AUTH_ENTRA_ENABLED`
+defaults to `false`. At least one login method must remain enabled. A production
+Entra configuration requires:
+
+- tenant-specific UUID values in `AUTH_ENTRA_TENANT_ID` and
+  `AUTH_ENTRA_CLIENT_ID`;
+- an exact HTTPS `AUTH_ENTRA_REDIRECT_URI` whose path is fixed to
+  `/auth/entra/callback` (no path prefix or trailing slash), normally
+  `https://portal.internal.example/auth/entra/callback`;
+- `AUTH_ENTRA_CLIENT_SECRET` for the confidential authorization-code exchange;
+- a separate, high-entropy `AUTH_OIDC_TRANSACTION_KEY` of at least 32 bytes.
+
+Unauthenticated `GET /auth/config` returns only
+`password_login_enabled` and `entra_login_enabled` booleans so the login screen
+can select the available methods without exposing provider configuration or
+secrets.
+
+The Entra browser flow currently requires the frontend and API to share one
+public origin. This is the default production layout, where Rocket serves
+`frontend/dist`, and the supported Vite development layout proxies `/auth` and
+`/sessions` to the API. Do not deploy the frontend on a separate origin until a
+reviewed cross-origin cookie, CORS, CSRF, and callback-origin design is added.
+
+The current implementation uses client-secret authentication. Certificate or
+`private_key_jwt` client authentication is not implemented, and PKCE does not
+replace the client secret. The browser authorization-code flow uses S256 PKCE;
+the transaction key protects the short-lived server-side verifier and must not
+be reused as `CONNECTOR_SECRET_KEY`. Production Compose injects the client
+secret and transaction key only into the HTTP `app`, not `worker`, `migrate`, or
+`seed-admin`.
+
+Issuer, authorization, token, and JWKS URLs default to tenant-specific Microsoft
+endpoints. The `AUTH_ENTRA_*_URL` overrides exist for controlled test providers
+or an explicitly reviewed endpoint change; production overrides must use HTTPS.
+The OIDC transaction TTL defaults to 600 seconds and accepts 60-1800, JWKS cache
+TTL defaults to 300 seconds and accepts 30-86400, and clock skew defaults to 120
+seconds and accepts 1-300.
+
+`AUTH_ENTRA_JIT_PROVISIONING=false` requires the Entra external identity to
+already be linked to a portal user. When JIT is enabled in production,
+`AUTH_ENTRA_REQUIRED_ROLE` is mandatory. Whenever a required role is configured,
+every Entra login must contain that exact app-role value. This is an admission
+check only: a JIT user receives the portal `member` role, and the Entra role is
+not mapped to portal `admin`. Assign portal admin and maintainer permissions
+through the portal's existing role and ownership controls.
+
+Register the application as a single-tenant **Web** application in Entra ID,
+enter the redirect URI exactly, leave implicit/hybrid token issuance disabled,
+and create the configured app role before assigning users or groups. Keep local
+password login enabled during rollout and retain named, vaulted recovery
+accounts until Entra sign-in and rollback have been rehearsed. The current
+`POST /logout` revokes the portal session only; it does not propagate logout to
+the Microsoft session. See `docs/production-runbook.md` for rollout, rotation,
+acceptance, and rollback procedures.
 
 ## CLI
 
@@ -169,6 +303,21 @@ cargo run --bin cli -- users ensure-admin --username admin --password admin123 -
 Use `--reset-password` when you intentionally want to replace the password for
 an existing seed account.
 
+With Entra enabled in the current environment, pre-link an existing portal user
+to the immutable Entra object ID before using JIT-off mode:
+
+```sh
+cargo run --bin cli -- users link-entra \
+  --username alice \
+  --object-id aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa
+```
+
+Use `--user-id` instead of `--username` when appropriate. The command takes the
+tenant and issuer from the enabled Entra configuration, is idempotent for the
+same user/object link, rejects cross-user conflicts, and writes an audit record.
+Do not select or link an identity by email or UPN. `--subject` is optional and
+should be supplied only from an authoritative identity record.
+
 Seed local demo data:
 
 ```sh
@@ -196,9 +345,13 @@ powershell -ExecutionPolicy Bypass -File .\scripts\local-validate.ps1 -Mode Full
 See `docs/local-validation.md` for details. The CI workflow runs frontend
 builds and regression tests, formatting, build checks, Clippy, Diesel
 migrations, a real Rocket server, and the integration tests against PostgreSQL
-16. Destructive retention coverage uses a separately migrated database whose
-name includes `test`; the test also requires `APP_ENV=test` before it can issue
-any cleanup DELETE.
+16. Normal integration coverage uses the disposable `portal_integration_test`
+database through `PORTAL_TEST_DATABASE_URL`; destructive retention coverage
+alone uses `portal_retention_test`. Both require `APP_ENV=test`, verify
+PostgreSQL's actual `current_database()`, and never fall back to `app_db`.
+`PORTAL_TEST_BASE_URL` is the single HTTP origin shared by the isolated server
+and request tests. Full local validation recreates both test databases and
+proves every public-table row count in the development database is unchanged.
 
 ## API Shape
 
@@ -233,18 +386,38 @@ Errors use a consistent error body:
 }
 ```
 
-Authenticated routes expect:
+Browser login creates an `idp_session` cookie in development and test. In
+production it uses the host-prefixed `__Host-idp_session` cookie to prevent
+sibling subdomains from injecting a session cookie. Both use `HttpOnly`,
+`SameSite=Lax`, and `Path=/`; production also requires the `Secure` attribute,
+so the browser must reach the portal over HTTPS. The frontend relies on this
+cookie and does not need JavaScript access to the session token. A successful
+production login also expires the legacy `idp_session` cookie.
+Cookie-authenticated write requests must also send `X-IDP-CSRF: 1`; the shared
+frontend client adds it automatically. The API rejects cookie writes without
+this non-simple header so an untrusted same-site subdomain cannot submit
+mutations with a plain HTML form.
 
-```text
-Authorization: Bearer <token>
-```
+`POST /login` is cookie-only: its `{ "data": ... }` response contains safe
+metadata such as `expires_at` and `auth_method`, but never a raw session token.
+Automation that exercises the browser login flow must use an HTTP cookie jar and
+send `X-IDP-CSRF: 1` on protected writes. The request guard retains Bearer
+compatibility for separately provisioned non-browser credentials, but `/login`
+is not a token-minting endpoint and browser code must never read or reconstruct
+the `HttpOnly` cookie value. `POST /logout` revokes only the current session.
+`POST /sessions/revoke-all` revokes every session for the authenticated user,
+clears the browser cookie, and returns the number of revoked sessions. Use it
+after suspected credential exposure or to sign out other browsers/devices.
 
 ## Ownership and Permissions
 
-- Read routes require a bearer token. `GET /health`, `GET /livez`, `GET /readyz`,
-  and `POST /login` remain public so probes and login work before a session
-  exists. `/health` is a compatibility alias with readiness semantics; use
-  `/livez` for process liveness and `/readyz` for traffic readiness.
+- Read routes require the browser session cookie or a separately provisioned
+  Bearer credential.
+  `GET /health`, `GET /livez`, `GET /readyz`, `GET /auth/config`, the Entra
+  start/callback endpoints, and enabled `POST /login` remain public so probes
+  and login work before a session exists. `/health` is a compatibility alias
+  with readiness semantics; use `/livez` for process liveness and `/readyz` for
+  traffic readiness.
 - `admin` users can manage maintainers, work cards, notifications, connector
   registry, connector imports, connector run history, audit logs, and
   maintainer membership.
@@ -292,12 +465,16 @@ Authorization: Bearer <token>
 - `GET /health`
 - `GET /livez`
 - `GET /readyz`
+- `GET /auth/config`
+- `GET /auth/entra/start?return_to=<allow-listed-portal-route>`
+- `GET /auth/entra/callback`
 - `GET /dashboard`
 - `GET /dashboard?maintainer_id=<id>`
 - `GET /dashboard?source=<connector>`
 - `POST /login`
 - `GET /me`
 - `POST /logout`
+- `POST /sessions/revoke-all`
 - `GET /audit-logs`
 - `GET /audit-logs?resource_type=<type>&resource_id=<id>`
 - `GET /maintainers`
@@ -320,6 +497,7 @@ Authorization: Bearer <token>
 - `PUT /services/<id>`
 - `DELETE /services/<id>`
 - `GET /work-cards`
+- `GET /me/work-cards?status=<status>&due=<overdue|today|next_7_days|none>&project=<project>&work_item_type=<type>&source=<connector>&sort=<attention|due_asc|source_updated_desc>&page=<n>&page_size=<n>`
 - `POST /work-cards`
 - `GET /work-cards/<id>`
 - `PUT /work-cards/<id>`
@@ -350,6 +528,13 @@ Authorization: Bearer <token>
 - `GET /connectors/runs/<id>`
 - `POST /connectors/runs/<id>/retry`
 - `POST /connectors/runs/<id>/cancel`
+
+`GET /me/work-cards` powers the My Work screen. It returns only cards that are
+explicitly mapped to the signed-in portal user and already fall within that
+user's connector/maintainer visibility. It never treats a display name or
+email address as an identity key. The response is paginated and includes
+authorized project, work-item-type, source, and status facets so filters remain
+stable in the URL and can be shared or restored after sign-in.
 
 ## Connector Runtime
 
@@ -385,6 +570,9 @@ incremental or lookback-based.
 The built-in scheduler reads enabled connector configs with `schedule_cron` and
 creates queued runs when `next_run_at` is due. Supported schedule values are
 `@every <n>s`, `@every <n>m`, `@every <n>h`, `@hourly`, and `@daily`.
+The minimum effective interval is 60 seconds. The API rejects new sub-minute
+schedules, and workers clamp legacy sub-minute configs to one minute so a stale
+configuration cannot flood run history and audit logs.
 
 Connector configs can also select a real adapter. Supported adapters include
 `azure_devops` for the `work_cards` target, `monitoring` for the
@@ -413,7 +601,10 @@ Microsoft button in the connector config editor after setting `tenant_id`,
 Entra app. The backend creates the authorize URL, validates callback state,
 exchanges the authorization code, and stores the returned access and refresh
 tokens in the encrypted connector config. `authorization_url` and `token_url`
-can be overridden for local mocks or proxy testing.
+can be overridden for local mocks or proxy testing. The callback response sets
+`Cache-Control: no-store` and `Referrer-Policy: no-referrer`, and production
+proxies must log this exact path without its query string or Referer because it
+carries short-lived authorization code/state values.
 For product walkthroughs and local development, three notification adapters are
 available without external credentials: `calendar_sample`, `outlook_mail_sample`,
 and `erp_messages_sample`. These target `notifications` and normalize sample
@@ -437,9 +628,19 @@ Minimal config:
   "project": "platform",
   "personal_access_token": "...",
   "wiql": "SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = @project",
+  "due_date_field": "Custom.TargetDate",
+  "assignee_user_mappings": {
+    "aad.REPLACE_WITH_AZURE_DESCRIPTOR": 27
+  },
   "timeout_seconds": 15
 }
 ```
+
+`due_date_field` is optional because Azure DevOps process templates do not all
+use the same due-date field. `assignee_user_mappings` must map a stable Azure
+IdentityRef `descriptor` (or its `id` fallback) to an existing portal user ID.
+Unmapped identities remain unassigned in My Work; the portal deliberately does
+not guess from `displayName`, `uniqueName`, or email.
 
 For development or custom Azure DevOps proxies, `wiql_url` and
 `work_items_url` can be provided directly.
@@ -472,7 +673,6 @@ Microsoft Graph Calendar adapter config:
   "client_secret": "...",
   "refresh_token": "",
   "scope": "https://graph.microsoft.com/Calendars.Read offline_access",
-  "time_zone": "Taipei Standard Time",
   "lookahead_hours": 24,
   "top": 25,
   "timeout_seconds": 15
@@ -483,11 +683,15 @@ By default the adapter calls
 `https://graph.microsoft.com/v1.0/me/calendarView`. Set `user_id` to a user
 principal name to call `/users/<user_id>/calendarView`, or set
 `calendar_view_url` for a custom proxy or mock server. `start_at` and `end_at`
-can be provided explicitly; otherwise the adapter imports the next
-`lookahead_hours` hours from the current time. Events are normalized into
-notification records with `Calendar: ...` titles, organizer/location/time
-details, importance-derived severity, and Outlook or Teams join links when
-available.
+can be provided explicitly as offset-aware RFC3339 instants; otherwise the
+adapter imports the next `lookahead_hours` hours from the current time. The
+adapter requests the default UTC Graph response and emits normalized `Z`
+instants while retaining the source event's original time-zone label for
+display. Legacy configs that set a non-UTC `time_zone` must complete the
+documented UTC preflight/resync before the TIMESTAMPTZ migration. Events are
+normalized into notification records with `Calendar: ...` titles,
+organizer/location/time details, importance-derived severity, and Outlook or
+Teams join links when available.
 
 Microsoft Graph Mail adapter config:
 
@@ -587,7 +791,11 @@ deletes old `service_health_checks` by `checked_at`,
 `created_at`. Run item snapshots and item errors cascade with their run. Set a
 retention value to `0` to disable that cleanup path. Defaults keep high-volume
 health history shorter, connector run history at 90 days, and audit logs at a
-longer 365-day window.
+longer 365-day window. Every enabled retention pass also removes expired
+sessions, expired OIDC login transactions, and inactive login-throttle buckets
+older than 30 days; these authentication tables are bounded even when no new
+interactive login occurs. Setting all three configurable history values to `0`
+does not disable this authentication cleanup.
 
 The worker writes heartbeat status to `connector_workers`, and each retention
 cleanup writes a `maintenance_runs` history row. `GET /connectors/operations`

@@ -28,6 +28,7 @@ export function StatusBadge({ value, className }: { value?: unknown; className?:
     missing: "red",
     none: "gray",
     owner: "teal",
+    overdue: "red",
     partial_success: "yellow",
     paused: "yellow",
     queued: "gray",

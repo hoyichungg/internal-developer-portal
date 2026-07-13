@@ -1,7 +1,10 @@
 #![allow(dead_code)]
 
 use rocket::serde::json::Json;
-use utoipa::openapi::security::{Http, HttpAuthScheme, SecurityScheme};
+use utoipa::openapi::path::Operation;
+use utoipa::openapi::security::{
+    ApiKey, ApiKeyValue, Http, HttpAuthScheme, SecurityRequirement, SecurityScheme,
+};
 use utoipa::openapi::OpenApi;
 use utoipa::{Modify, OpenApi as OpenApiDerive};
 
@@ -14,7 +17,7 @@ use crate::models::{
 };
 use crate::rocket_routes::authorization::{
     Credentials, LoginResponse, MeCapabilities, MeMaintainerAccess, MeOverviewResponse, MeResponse,
-    UserSummary,
+    RevokeAllSessionsResponse, UserSummary,
 };
 use crate::rocket_routes::connectors::{
     CalendarEventImportItem, CalendarEventImportRequest, ConnectorConfigResponse,
@@ -28,12 +31,14 @@ use crate::rocket_routes::dashboard::{
     DashboardResponse, DashboardScope, DashboardSummary, ServiceHealthHistory,
     ServiceHealthHistorySummary,
 };
+use crate::rocket_routes::entra_auth::PublicAuthConfig;
 use crate::rocket_routes::health::{HealthResponse, ReadinessChecks, ReadinessResponse};
 use crate::rocket_routes::maintainers::MaintainerMemberRequest;
 use crate::rocket_routes::notifications::NotificationSnoozeRequest;
 use crate::rocket_routes::services::{
     ServiceHealthOverview, ServiceLinks, ServiceOverview, ServiceOwner,
 };
+use crate::rocket_routes::work_cards::{MyWorkCardFacets, MyWorkCardsResponse};
 use crate::validation::FieldViolation;
 
 #[derive(OpenApiDerive)]
@@ -48,8 +53,12 @@ use crate::validation::FieldViolation;
         health_doc,
         livez_doc,
         readyz_doc,
+        auth_config_doc,
+        start_entra_login_doc,
+        finish_entra_login_doc,
         login_doc,
         logout_doc,
+        revoke_all_sessions_doc,
         me_doc,
         list_users_doc,
         me_overview_doc,
@@ -96,6 +105,7 @@ use crate::validation::FieldViolation;
         update_package_doc,
         delete_package_doc,
         list_work_cards_doc,
+        list_my_work_cards_doc,
         get_work_card_doc,
         create_work_card_doc,
         update_work_card_doc,
@@ -125,6 +135,8 @@ use crate::validation::FieldViolation;
         ApiResponse<DashboardResponse>,
         ApiResponse<HealthResponse>,
         ApiResponse<ReadinessResponse>,
+        ApiResponse<PublicAuthConfig>,
+        ApiResponse<RevokeAllSessionsResponse>,
         ApiResponse<LoginResponse>,
         ApiResponse<Maintainer>,
         ApiResponse<MaintainerMember>,
@@ -138,6 +150,7 @@ use crate::validation::FieldViolation;
         ApiResponse<Service>,
         ApiResponse<ServiceOverview>,
         ApiResponse<WorkCard>,
+        ApiResponse<MyWorkCardsResponse>,
         ApiResponse<Vec<AuditLog>>,
         ApiResponse<Vec<CalendarEvent>>,
         ApiResponse<Vec<Connector>>,
@@ -182,6 +195,8 @@ use crate::validation::FieldViolation;
         MeCapabilities,
         MeMaintainerAccess,
         MeResponse,
+        MyWorkCardFacets,
+        MyWorkCardsResponse,
         MicrosoftOAuthAuthorizeRequest,
         MicrosoftOAuthAuthorizeResponse,
         MicrosoftOAuthCallbackRequest,
@@ -198,8 +213,10 @@ use crate::validation::FieldViolation;
         NotificationImportItem,
         NotificationImportRequest,
         Package,
+        PublicAuthConfig,
         ReadinessChecks,
         ReadinessResponse,
+        RevokeAllSessionsResponse,
         Service,
         ServiceHealthCheck,
         ServiceHealthHistory,
@@ -247,7 +264,63 @@ impl Modify for SecurityAddon {
                 "bearer_auth",
                 SecurityScheme::Http(Http::new(HttpAuthScheme::Bearer)),
             );
+            components.add_security_scheme(
+                "session_cookie",
+                SecurityScheme::ApiKey(ApiKey::Cookie(ApiKeyValue::with_description(
+                    "__Host-idp_session",
+                    "Production HttpOnly browser session cookie. Development and test use idp_session. Cookie-authenticated writes also require X-IDP-CSRF: 1.",
+                ))),
+            );
+            components.add_security_scheme(
+                "csrf_header",
+                SecurityScheme::ApiKey(ApiKey::Header(ApiKeyValue::with_description(
+                    "X-IDP-CSRF",
+                    "Required with the exact value 1 when a state-changing operation is authenticated with session_cookie. Bearer authentication does not require this header.",
+                ))),
+            );
         }
+
+        let read_security = vec![
+            SecurityRequirement::new("bearer_auth", Vec::<String>::new()),
+            SecurityRequirement::new("session_cookie", Vec::<String>::new()),
+        ];
+        let cookie_and_csrf = SecurityRequirement::new("session_cookie", Vec::<String>::new())
+            .add("csrf_header", Vec::<String>::new());
+        let write_security = vec![
+            SecurityRequirement::new("bearer_auth", Vec::<String>::new()),
+            cookie_and_csrf,
+        ];
+
+        for path_item in openapi.paths.paths.values_mut() {
+            for operation in [
+                &mut path_item.get,
+                &mut path_item.head,
+                &mut path_item.options,
+                &mut path_item.trace,
+            ] {
+                replace_documented_security(operation, &read_security);
+            }
+            for operation in [
+                &mut path_item.post,
+                &mut path_item.put,
+                &mut path_item.patch,
+                &mut path_item.delete,
+            ] {
+                replace_documented_security(operation, &write_security);
+            }
+        }
+    }
+}
+
+fn replace_documented_security(
+    operation: &mut Option<Operation>,
+    requirements: &[SecurityRequirement],
+) {
+    if let Some(operation) = operation
+        .as_mut()
+        .filter(|operation| operation.security.is_some())
+    {
+        operation.security = Some(requirements.to_vec());
     }
 }
 
@@ -294,15 +367,60 @@ fn livez_doc() {}
 fn readyz_doc() {}
 
 #[utoipa::path(
+    get,
+    path = "/auth/config",
+    tag = "Auth",
+    operation_id = "getPublicAuthConfig",
+    responses((status = 200, description = "Public login-method availability. No tenant, client, endpoint, or secret values are exposed.", body = ApiResponse<PublicAuthConfig>))
+)]
+fn auth_config_doc() {}
+
+#[utoipa::path(
+    get,
+    path = "/auth/entra/start",
+    tag = "Auth",
+    operation_id = "startEntraLogin",
+    params(("return_to" = Option<String>, Query, description = "Same-origin portal hash route restored after login; unsafe values fall back to the dashboard.")),
+    responses(
+        (status = 303, description = "Creates a short-lived HttpOnly browser-bound transaction and redirects to the configured tenant authorization endpoint."),
+        (status = 404, description = "Entra login is disabled.", body = ApiErrorResponse),
+        (status = 429, description = "The bounded OIDC transaction capacity is temporarily full. Retry-After contains the retry delay.", body = ApiErrorResponse),
+        (status = 503, description = "The database is unavailable.", body = ApiErrorResponse)
+    )
+)]
+fn start_entra_login_doc() {}
+
+#[utoipa::path(
+    get,
+    path = "/auth/entra/callback",
+    tag = "Auth",
+    operation_id = "finishEntraLogin",
+    params(
+        ("code" = Option<String>, Query, description = "Single-use authorization code returned by Entra."),
+        ("state" = Option<String>, Query, description = "Single-use state returned by Entra."),
+        ("error" = Option<String>, Query, description = "Provider error code when authorization did not complete."),
+        ("error_description" = Option<String>, Query, description = "Provider detail accepted but never reflected or logged.")
+    ),
+    responses(
+        (status = 303, description = "On success, creates an HttpOnly portal session and redirects to a fixed success marker; failures use only whitelisted error markers."),
+        (status = 503, description = "A database connection could not be acquired before callback processing.", body = ApiErrorResponse)
+    )
+)]
+fn finish_entra_login_doc() {}
+
+#[utoipa::path(
     post,
     path = "/login",
     tag = "Auth",
     operation_id = "login",
     request_body(content = Credentials, description = "Username/password credentials.", content_type = "application/json"),
     responses(
-        (status = 200, description = "Bearer token and expiration.", body = ApiResponse<LoginResponse>),
+        (status = 200, description = "Creates an HttpOnly SameSite session cookie. The JSON envelope contains only non-secret session metadata; raw session credentials are never returned in the body.", body = ApiResponse<LoginResponse>),
         (status = 400, description = "Invalid request body.", body = ApiErrorResponse),
-        (status = 401, description = "Invalid credentials.", body = ApiErrorResponse)
+        (status = 401, description = "Invalid credentials.", body = ApiErrorResponse),
+        (status = 403, description = "Password login is disabled.", body = ApiErrorResponse),
+        (status = 429, description = "Too many failed sign-in attempts. Retry-After contains the lockout duration.", body = ApiErrorResponse),
+        (status = 503, description = "The database is unavailable.", body = ApiErrorResponse)
     )
 )]
 fn login_doc() {}
@@ -312,23 +430,43 @@ fn login_doc() {}
     path = "/logout",
     tag = "Auth",
     operation_id = "logout",
-    security(("bearer_auth" = [])),
+    security(("bearer_auth" = []), ("session_cookie" = [], "csrf_header" = [])),
+    params(("X-IDP-CSRF" = Option<String>, Header, description = "Required with value 1 when authenticating by session cookie; not required for Bearer authentication.")),
     responses(
         (status = 204, description = "Session deleted."),
-        (status = 401, description = "Authentication is required.", body = ApiErrorResponse)
+        (status = 401, description = "Authentication is required.", body = ApiErrorResponse),
+        (status = 403, description = "A Cookie-authenticated write omitted the CSRF header.", body = ApiErrorResponse),
+        (status = 503, description = "The database is unavailable.", body = ApiErrorResponse)
     )
 )]
 fn logout_doc() {}
+
+#[utoipa::path(
+    post,
+    path = "/sessions/revoke-all",
+    tag = "Auth",
+    operation_id = "revokeAllSessions",
+    security(("bearer_auth" = []), ("session_cookie" = [], "csrf_header" = [])),
+    params(("X-IDP-CSRF" = Option<String>, Header, description = "Required with value 1 when authenticating by session cookie; not required for Bearer authentication.")),
+    responses(
+        (status = 200, description = "All sessions for the current user were revoked and the browser cookie was cleared.", body = ApiResponse<RevokeAllSessionsResponse>),
+        (status = 401, description = "Authentication is required.", body = ApiErrorResponse),
+        (status = 403, description = "A Cookie-authenticated write omitted the CSRF header.", body = ApiErrorResponse),
+        (status = 503, description = "The database is unavailable.", body = ApiErrorResponse)
+    )
+)]
+fn revoke_all_sessions_doc() {}
 
 #[utoipa::path(
     get,
     path = "/me",
     tag = "Auth",
     operation_id = "getCurrentUser",
-    security(("bearer_auth" = [])),
+    security(("bearer_auth" = []), ("session_cookie" = [])),
     responses(
         (status = 200, description = "Current authenticated user.", body = ApiResponse<MeResponse>),
-        (status = 401, description = "Authentication is required.", body = ApiErrorResponse)
+        (status = 401, description = "Authentication is required.", body = ApiErrorResponse),
+        (status = 503, description = "The database is unavailable.", body = ApiErrorResponse)
     )
 )]
 fn me_doc() {}
@@ -338,11 +476,12 @@ fn me_doc() {}
     path = "/users",
     tag = "Auth",
     operation_id = "listUsers",
-    security(("bearer_auth" = [])),
+    security(("bearer_auth" = []), ("session_cookie" = [])),
     responses(
         (status = 200, description = "Admin and maintainer-owner user directory for membership assignment. Password hashes are never returned.", body = ApiResponse<Vec<UserSummary>>),
         (status = 401, description = "Authentication is required.", body = ApiErrorResponse),
-        (status = 403, description = "Admin or maintainer owner access is required.", body = ApiErrorResponse)
+        (status = 403, description = "Admin or maintainer owner access is required.", body = ApiErrorResponse),
+        (status = 503, description = "The database is unavailable.", body = ApiErrorResponse)
     )
 )]
 fn list_users_doc() {}
@@ -352,10 +491,11 @@ fn list_users_doc() {}
     path = "/me/overview",
     tag = "Auth",
     operation_id = "getCurrentUserOverview",
-    security(("bearer_auth" = [])),
+    security(("bearer_auth" = []), ("session_cookie" = [])),
     responses(
         (status = 200, description = "User-scoped daily operational context.", body = ApiResponse<MeOverviewResponse>),
-        (status = 401, description = "Authentication is required.", body = ApiErrorResponse)
+        (status = 401, description = "Authentication is required.", body = ApiErrorResponse),
+        (status = 503, description = "The database is unavailable.", body = ApiErrorResponse)
     )
 )]
 fn me_overview_doc() {}
@@ -772,6 +912,29 @@ fn delete_package_doc() {}
 #[utoipa::path(get, path = "/work-cards", tag = "Catalog", operation_id = "listWorkCards", security(("bearer_auth" = [])), responses((status = 200, description = "Work card records.", body = ApiResponse<Vec<WorkCard>>)))]
 fn list_work_cards_doc() {}
 
+#[utoipa::path(
+    get,
+    path = "/me/work-cards",
+    tag = "Catalog",
+    operation_id = "listMyWorkCards",
+    security(("bearer_auth" = [])),
+    params(
+        ("status" = Option<String>, Query, description = "Exact status: todo, in_progress, blocked, or done."),
+        ("due" = Option<String>, Query, description = "UTC due window: overdue (before today's UTC midnight, excluding done), today, next_7_days ([today, today + 7 days)), or none."),
+        ("project" = Option<String>, Query, description = "Exact project name."),
+        ("work_item_type" = Option<String>, Query, description = "Exact work item type."),
+        ("source" = Option<String>, Query, description = "Exact connector source."),
+        ("sort" = Option<String>, Query, description = "Sort: attention (default), due_asc, or source_updated_desc."),
+        ("page" = Option<i64>, Query, description = "One-based page number from 1 to 1,000,000. Defaults to 1."),
+        ("page_size" = Option<i64>, Query, description = "Page size from 1 to 100. Defaults to 25.")
+    ),
+    responses(
+        (status = 200, description = "Accessible work cards explicitly assigned to the current user.", body = ApiResponse<MyWorkCardsResponse>),
+        (status = 400, description = "A filter or pagination value is invalid.", body = ApiErrorResponse)
+    )
+)]
+fn list_my_work_cards_doc() {}
+
 #[utoipa::path(get, path = "/work-cards/{id}", tag = "Catalog", operation_id = "getWorkCard", security(("bearer_auth" = [])), params(("id" = i32, Path, description = "Work card id.")), responses((status = 200, description = "Work card record.", body = ApiResponse<WorkCard>), (status = 404, description = "Work card was not found.", body = ApiErrorResponse)))]
 fn get_work_card_doc() {}
 
@@ -838,6 +1001,28 @@ fn list_audit_logs_doc() {}
 #[cfg(test)]
 mod tests {
     use super::spec;
+    use serde_json::Value;
+
+    fn security_key_sets(operation: &Value) -> Vec<Vec<String>> {
+        let mut requirements = operation
+            .get("security")
+            .and_then(Value::as_array)
+            .expect("protected operation must have a security array")
+            .iter()
+            .map(|requirement| {
+                let mut keys = requirement
+                    .as_object()
+                    .expect("security requirement must be an object")
+                    .keys()
+                    .cloned()
+                    .collect::<Vec<_>>();
+                keys.sort();
+                keys
+            })
+            .collect::<Vec<_>>();
+        requirements.sort();
+        requirements
+    }
 
     #[test]
     fn openapi_spec_documents_connector_imports_and_auth_scheme() {
@@ -851,8 +1036,12 @@ mod tests {
             "/health",
             "/livez",
             "/readyz",
+            "/auth/config",
+            "/auth/entra/start",
+            "/auth/entra/callback",
             "/calendar-events",
             "/calendar-events/{id}",
+            "/me/work-cards",
             "/connectors/{source}/calendar-events/import",
             "/connectors/{source}/service-health/import",
             "/connectors/{source}/work-cards/import",
@@ -867,6 +1056,7 @@ mod tests {
             "/notifications/{id}/dismiss",
             "/notifications/{id}/snooze",
             "/notifications/{id}/restore",
+            "/sessions/revoke-all",
             "/openapi.json",
         ] {
             assert!(paths.contains_key(path), "{path} should be documented");
@@ -896,6 +1086,88 @@ mod tests {
             security_schemes.contains_key("bearer_auth"),
             "bearer auth scheme should be documented"
         );
+        assert!(
+            security_schemes.contains_key("session_cookie"),
+            "browser session cookie scheme should be documented"
+        );
+        assert_eq!(
+            security_schemes["session_cookie"]
+                .get("name")
+                .and_then(|name| name.as_str()),
+            Some("__Host-idp_session")
+        );
+        assert_eq!(
+            security_schemes["csrf_header"]
+                .get("name")
+                .and_then(|name| name.as_str()),
+            Some("X-IDP-CSRF")
+        );
+        assert_eq!(
+            security_schemes["csrf_header"]
+                .get("in")
+                .and_then(|location| location.as_str()),
+            Some("header")
+        );
+
+        let login_response_properties = value["components"]["schemas"]["LoginResponse"]
+            ["properties"]
+            .as_object()
+            .expect("LoginResponse properties exist");
+        assert!(login_response_properties.contains_key("expires_at"));
+        assert!(login_response_properties.contains_key("auth_method"));
+        assert!(!login_response_properties.contains_key("token"));
+        assert!(!login_response_properties.contains_key("token_type"));
+
+        let mut protected_operations = 0;
+        for (path, path_item) in paths {
+            for method in [
+                "get", "head", "options", "trace", "post", "put", "patch", "delete",
+            ] {
+                let Some(operation) = path_item.get(method) else {
+                    continue;
+                };
+                if operation.get("security").is_none() {
+                    continue;
+                }
+
+                protected_operations += 1;
+                let expected = if matches!(method, "get" | "head" | "options" | "trace") {
+                    vec![
+                        vec!["bearer_auth".to_owned()],
+                        vec!["session_cookie".to_owned()],
+                    ]
+                } else {
+                    vec![
+                        vec!["bearer_auth".to_owned()],
+                        vec!["csrf_header".to_owned(), "session_cookie".to_owned()],
+                    ]
+                };
+                assert_eq!(
+                    security_key_sets(operation),
+                    expected,
+                    "{method} {path} must document the actual Bearer or Cookie/CSRF contract"
+                );
+            }
+        }
+        assert!(
+            protected_operations >= 50,
+            "the structural security assertion should cover the complete protected API"
+        );
+
+        for (path, method) in [
+            ("/health", "get"),
+            ("/livez", "get"),
+            ("/readyz", "get"),
+            ("/auth/config", "get"),
+            ("/auth/entra/start", "get"),
+            ("/auth/entra/callback", "get"),
+            ("/login", "post"),
+        ] {
+            assert!(
+                paths[path][method].get("security").is_none(),
+                "{method} {path} must remain public"
+            );
+        }
 
         let readiness_responses = paths
             .get("/readyz")
@@ -905,5 +1177,32 @@ mod tests {
             .expect("readiness responses exist");
         assert!(readiness_responses.contains_key("200"));
         assert!(readiness_responses.contains_key("503"));
+
+        let entra_start_responses = paths
+            .get("/auth/entra/start")
+            .and_then(|path| path.get("get"))
+            .and_then(|operation| operation.get("responses"))
+            .and_then(|responses| responses.as_object())
+            .expect("Entra start responses exist");
+        assert!(entra_start_responses.contains_key("303"));
+        assert!(entra_start_responses.contains_key("429"));
+        assert!(entra_start_responses.contains_key("503"));
+
+        for (path, method) in [
+            ("/login", "post"),
+            ("/logout", "post"),
+            ("/sessions/revoke-all", "post"),
+            ("/me", "get"),
+            ("/users", "get"),
+            ("/me/overview", "get"),
+        ] {
+            let responses = paths[path][method]["responses"]
+                .as_object()
+                .expect("auth operation responses must be an object");
+            assert!(
+                responses.contains_key("503"),
+                "{method} {path} must document database unavailability"
+            );
+        }
     }
 }

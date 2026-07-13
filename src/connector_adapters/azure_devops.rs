@@ -1,4 +1,4 @@
-﻿use serde::Deserialize;
+use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
@@ -22,6 +22,9 @@ struct AzureDevOpsConfig {
     pat: Option<String>,
     wiql: Option<String>,
     web_url_base: Option<String>,
+    due_date_field: Option<String>,
+    #[serde(default)]
+    assignee_user_mappings: HashMap<String, i32>,
     max_items: Option<u64>,
     timeout_seconds: Option<u64>,
 }
@@ -83,19 +86,27 @@ pub(super) async fn fetch_azure_devops_work_cards(config_json: &str) -> Result<V
 
     let work_items = wiql_response
         .get("workItems")
-        .and_then(Value::as_array)
-        .map(Vec::as_slice)
-        .unwrap_or_default();
+        .ok_or_else(|| {
+            "azure_devops WIQL response must include an explicit workItems array".to_owned()
+        })?
+        .as_array()
+        .ok_or_else(|| "azure_devops WIQL response field workItems must be an array".to_owned())?;
     // Azure WIQL has no portable continuation contract. A response that fills the
     // configured `$top` may be truncated, so it must never drive reconciliation.
     let snapshot_complete = work_items.len() < max_items;
     let mut seen_ids = HashSet::new();
-    let ids = work_items
-        .iter()
-        .filter_map(|item| item.get("id").and_then(Value::as_i64))
-        .filter(|id| seen_ids.insert(*id))
-        .take(max_items)
-        .collect::<Vec<_>>();
+    let mut ids = Vec::with_capacity(work_items.len().min(max_items));
+    for (index, item) in work_items.iter().enumerate() {
+        let id = item.get("id").and_then(Value::as_i64).ok_or_else(|| {
+            format!(
+                "azure_devops WIQL response workItems item {} must include a numeric id",
+                index + 1
+            )
+        })?;
+        if seen_ids.insert(id) && ids.len() < max_items {
+            ids.push(id);
+        }
+    }
 
     if ids.is_empty() {
         return Ok(json!({
@@ -110,18 +121,33 @@ pub(super) async fn fetch_azure_devops_work_cards(config_json: &str) -> Result<V
         .or(config.pat.as_deref());
     let batch_count = ids.len().div_ceil(WORK_ITEMS_BATCH_SIZE);
     let mut items = Vec::with_capacity(ids.len());
+    let mut requested_fields = vec![
+        "System.Id".to_owned(),
+        "System.Title".to_owned(),
+        "System.State".to_owned(),
+        "System.AssignedTo".to_owned(),
+        "System.TeamProject".to_owned(),
+        "System.WorkItemType".to_owned(),
+        "System.ChangedDate".to_owned(),
+        "System.BoardLane".to_owned(),
+        "Microsoft.VSTS.Common.Priority".to_owned(),
+    ];
+    if let Some(due_date_field) = config
+        .due_date_field
+        .as_deref()
+        .map(str::trim)
+        .filter(|field| !field.is_empty())
+    {
+        if !requested_fields.iter().any(|field| field == due_date_field) {
+            requested_fields.push(due_date_field.to_owned());
+        }
+    }
 
     for (batch_index, batch_ids) in ids.chunks(WORK_ITEMS_BATCH_SIZE).enumerate() {
         let work_items_response = send_azure_request(
             client.post(&work_items_url).json(&json!({
                 "ids": batch_ids,
-                "fields": [
-                    "System.Id",
-                    "System.Title",
-                    "System.State",
-                    "System.AssignedTo",
-                    "Microsoft.VSTS.Common.Priority"
-                ]
+                "fields": requested_fields
             })),
             token,
         )
@@ -134,22 +160,51 @@ pub(super) async fn fetch_azure_devops_work_cards(config_json: &str) -> Result<V
             )
         })?;
 
-        let mut response_items = work_items_response
+        let response_values = work_items_response
             .get("value")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter_map(|item| item.get("id").and_then(Value::as_i64).map(|id| (id, item)))
-            .map(|(id, item)| (id, item.clone()))
-            .collect::<HashMap<_, _>>();
+            .ok_or_else(|| {
+                format!(
+                    "azure_devops work item batch {}/{} response must include an explicit value array",
+                    batch_index + 1,
+                    batch_count
+                )
+            })?
+            .as_array()
+            .ok_or_else(|| {
+                format!(
+                    "azure_devops work item batch {}/{} response field value must be an array",
+                    batch_index + 1,
+                    batch_count
+                )
+            })?;
+        let mut response_items = HashMap::with_capacity(response_values.len());
+        for (index, item) in response_values.iter().enumerate() {
+            let id = item.get("id").and_then(Value::as_i64).ok_or_else(|| {
+                format!(
+                    "azure_devops work item batch {}/{} response item {} must include a numeric id",
+                    batch_index + 1,
+                    batch_count,
+                    index + 1
+                )
+            })?;
+            response_items.insert(id, item.clone());
+        }
 
         for id in batch_ids {
-            if let Some(item) = response_items.remove(id) {
-                items.push(normalize_azure_work_item(
-                    &item,
-                    config.web_url_base.as_deref(),
-                ));
-            }
+            let item = response_items.remove(id).ok_or_else(|| {
+                format!(
+                    "azure_devops work item batch {}/{} did not return requested work item id {}",
+                    batch_index + 1,
+                    batch_count,
+                    id
+                )
+            })?;
+            items.push(normalize_azure_work_item(
+                &item,
+                config.web_url_base.as_deref(),
+                config.due_date_field.as_deref(),
+                &config.assignee_user_mappings,
+            ));
         }
     }
 
@@ -216,7 +271,12 @@ async fn send_azure_request(
         .map_err(|error| format!("azure_devops response was not valid JSON: {error}"))
 }
 
-fn normalize_azure_work_item(item: &Value, web_url_base: Option<&str>) -> Value {
+fn normalize_azure_work_item(
+    item: &Value,
+    web_url_base: Option<&str>,
+    due_date_field: Option<&str>,
+    assignee_user_mappings: &HashMap<String, i32>,
+) -> Value {
     let id = item.get("id").and_then(Value::as_i64).unwrap_or_default();
     let fields = item.get("fields").unwrap_or(&Value::Null);
     let title = fields
@@ -227,12 +287,33 @@ fn normalize_azure_work_item(item: &Value, web_url_base: Option<&str>) -> Value 
         .get("System.State")
         .and_then(Value::as_str)
         .unwrap_or("New");
+    let board_lane = fields.get("System.BoardLane").and_then(Value::as_str);
+    let normalized_status = if board_lane.is_some_and(|lane| lane.eq_ignore_ascii_case("blocked")) {
+        "blocked"
+    } else {
+        normalize_azure_state(state)
+    };
     let priority = fields
         .get("Microsoft.VSTS.Common.Priority")
         .and_then(Value::as_i64);
     let assignee = fields
         .get("System.AssignedTo")
         .and_then(assignee_display_name);
+    let assignee_source_id = fields
+        .get("System.AssignedTo")
+        .and_then(assignee_source_descriptor);
+    let assignee_user_id = assignee_source_id
+        .as_deref()
+        .and_then(|descriptor| assignee_user_mappings.get(descriptor))
+        .copied();
+    let project = fields.get("System.TeamProject").and_then(Value::as_str);
+    let work_item_type = fields.get("System.WorkItemType").and_then(Value::as_str);
+    let source_updated_at = fields.get("System.ChangedDate").and_then(Value::as_str);
+    let due_at = due_date_field
+        .map(str::trim)
+        .filter(|field| !field.is_empty())
+        .and_then(|field| fields.get(field))
+        .and_then(Value::as_str);
     let url = item
         .pointer("/_links/html/href")
         .and_then(Value::as_str)
@@ -242,10 +323,15 @@ fn normalize_azure_work_item(item: &Value, web_url_base: Option<&str>) -> Value 
     json!({
         "external_id": id.to_string(),
         "title": title,
-        "status": normalize_azure_state(state),
+        "status": normalized_status,
         "priority": normalize_azure_priority(priority),
         "assignee": assignee,
-        "due_at": null,
+        "project": project,
+        "work_item_type": work_item_type,
+        "assignee_source_id": assignee_source_id,
+        "assignee_user_id": assignee_user_id,
+        "due_at": due_at,
+        "source_updated_at": source_updated_at,
         "url": url
     })
 }
@@ -256,6 +342,17 @@ fn assignee_display_name(value: &Value) -> Option<String> {
         .and_then(Value::as_str)
         .map(ToOwned::to_owned)
         .or_else(|| value.as_str().map(ToOwned::to_owned))
+}
+
+fn assignee_source_descriptor(value: &Value) -> Option<String> {
+    ["descriptor", "id"].iter().find_map(|field| {
+        value
+            .get(*field)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|descriptor| !descriptor.is_empty())
+            .map(ToOwned::to_owned)
+    })
 }
 
 fn normalize_azure_state(state: &str) -> &'static str {
@@ -429,6 +526,203 @@ mod tests {
             "unexpected error: {error}"
         );
         assert!(error.contains("503 Service Unavailable"));
+    }
+
+    #[rocket::async_test]
+    async fn rejects_a_wiql_success_response_without_work_items() {
+        let server = MockHttpServer::start(vec![MockResponse::json(r#"{"queryType":"flat"}"#)]);
+        let config = json!({
+            "adapter": "azure_devops",
+            "wiql_url": server.url("/wiql"),
+            "work_items_url": server.url("/workitemsbatch"),
+            "max_items": 10
+        });
+
+        let error = fetch_azure_devops_work_cards(&config.to_string())
+            .await
+            .expect_err("an unknown WIQL response must not become a complete empty snapshot");
+
+        assert!(
+            error.contains("must include an explicit workItems array"),
+            "unexpected error: {error}"
+        );
+        assert_eq!(server.requests().len(), 1);
+    }
+
+    #[rocket::async_test]
+    async fn accepts_an_explicit_empty_wiql_collection_as_complete() {
+        let server = MockHttpServer::start(vec![MockResponse::json(r#"{"workItems":[]}"#)]);
+        let config = json!({
+            "adapter": "azure_devops",
+            "wiql_url": server.url("/wiql"),
+            "work_items_url": server.url("/workitemsbatch"),
+            "max_items": 10
+        });
+
+        let payload = fetch_azure_devops_work_cards(&config.to_string())
+            .await
+            .expect("an explicit empty WIQL result is a valid complete snapshot");
+
+        assert_eq!(payload["snapshot_complete"], true);
+        assert!(payload["items"].as_array().is_some_and(Vec::is_empty));
+        assert_eq!(server.requests().len(), 1);
+    }
+
+    #[rocket::async_test]
+    async fn rejects_a_detail_batch_that_omits_a_requested_id() {
+        let server = MockHttpServer::start(vec![
+            MockResponse::json(r#"{"workItems":[{"id":1},{"id":2}]}"#),
+            MockResponse::json(json!({ "value": [azure_item(1)] }).to_string()),
+        ]);
+        let config = json!({
+            "adapter": "azure_devops",
+            "wiql_url": server.url("/wiql"),
+            "work_items_url": server.url("/workitemsbatch"),
+            "max_items": 10
+        });
+
+        let error = fetch_azure_devops_work_cards(&config.to_string())
+            .await
+            .expect_err("a missing requested detail must fail instead of proving completeness");
+
+        assert!(
+            error.contains("did not return requested work item id 2"),
+            "unexpected error: {error}"
+        );
+        assert_eq!(server.requests().len(), 2);
+    }
+
+    #[rocket::async_test]
+    async fn rejects_a_detail_success_response_without_a_value_collection() {
+        let server = MockHttpServer::start(vec![
+            MockResponse::json(r#"{"workItems":[{"id":1}]}"#),
+            MockResponse::json(r#"{"count":0}"#),
+        ]);
+        let config = json!({
+            "adapter": "azure_devops",
+            "wiql_url": server.url("/wiql"),
+            "work_items_url": server.url("/workitemsbatch"),
+            "max_items": 10
+        });
+
+        let error = fetch_azure_devops_work_cards(&config.to_string())
+            .await
+            .expect_err("an unknown detail response must not prove snapshot completeness");
+
+        assert!(
+            error.contains("must include an explicit value array"),
+            "unexpected error: {error}"
+        );
+        assert_eq!(server.requests().len(), 2);
+    }
+
+    #[rocket::async_test]
+    async fn maps_assignees_only_by_explicit_source_descriptor_and_normalizes_my_work_fields() {
+        let work_item = json!({
+            "id": 42,
+            "fields": {
+                "System.Title": "Fix production login",
+                "System.State": "Active",
+                "System.AssignedTo": {
+                    "displayName": "Alice Example",
+                    "uniqueName": "alice@example.test",
+                    "descriptor": "aad.explicit-alice"
+                },
+                "System.TeamProject": "Developer Portal",
+                "System.WorkItemType": "Bug",
+                "System.ChangedDate": "2026-07-12T03:04:05Z",
+                "System.BoardLane": "Expedite",
+                "Custom.TargetDate": "2026-07-16T00:00:00Z",
+                "Microsoft.VSTS.Common.Priority": 1
+            }
+        });
+        let server = MockHttpServer::start(vec![
+            MockResponse::json(r#"{"workItems":[{"id":42}]}"#),
+            MockResponse::json(json!({ "value": [work_item] }).to_string()),
+        ]);
+        let config = json!({
+            "adapter": "azure_devops",
+            "wiql_url": server.url("/wiql"),
+            "work_items_url": server.url("/workitemsbatch"),
+            "max_items": 10,
+            "due_date_field": "Custom.TargetDate",
+            "assignee_user_mappings": {
+                "aad.explicit-alice": 77,
+                "alice@example.test": 999
+            }
+        });
+
+        let payload = fetch_azure_devops_work_cards(&config.to_string())
+            .await
+            .expect("explicit descriptor mapping should normalize");
+        let item = &payload["items"][0];
+
+        assert_eq!(item["assignee"], "Alice Example");
+        assert_eq!(item["assignee_source_id"], "aad.explicit-alice");
+        assert_eq!(item["assignee_user_id"], 77);
+        assert_eq!(item["project"], "Developer Portal");
+        assert_eq!(item["work_item_type"], "Bug");
+        assert_eq!(item["source_updated_at"], "2026-07-12T03:04:05Z");
+        assert_eq!(item["due_at"], "2026-07-16T00:00:00Z");
+
+        let requests = server.requests();
+        let batch_request = request_json(&requests[1]);
+        let fields = batch_request["fields"]
+            .as_array()
+            .expect("batch fields")
+            .iter()
+            .map(|field| field.as_str().expect("field name"))
+            .collect::<Vec<_>>();
+        for expected in [
+            "System.TeamProject",
+            "System.WorkItemType",
+            "System.ChangedDate",
+            "System.BoardLane",
+            "Custom.TargetDate",
+        ] {
+            assert!(fields.contains(&expected), "missing batch field {expected}");
+        }
+    }
+
+    #[rocket::async_test]
+    async fn does_not_guess_an_assignee_from_display_name_or_email() {
+        let work_item = json!({
+            "id": 43,
+            "fields": {
+                "System.Title": "Review access",
+                "System.State": "New",
+                "System.AssignedTo": {
+                    "displayName": "Alice Example",
+                    "uniqueName": "alice@example.test",
+                    "id": "azure-user-guid"
+                },
+                "System.BoardLane": "BLOCKED"
+            }
+        });
+        let server = MockHttpServer::start(vec![
+            MockResponse::json(r#"{"workItems":[{"id":43}]}"#),
+            MockResponse::json(json!({ "value": [work_item] }).to_string()),
+        ]);
+        let config = json!({
+            "adapter": "azure_devops",
+            "wiql_url": server.url("/wiql"),
+            "work_items_url": server.url("/workitemsbatch"),
+            "max_items": 10,
+            "assignee_user_mappings": {
+                "Alice Example": 77,
+                "alice@example.test": 77
+            }
+        });
+
+        let payload = fetch_azure_devops_work_cards(&config.to_string())
+            .await
+            .expect("an unmapped identity should remain unassigned");
+        let item = &payload["items"][0];
+
+        assert_eq!(item["assignee"], "Alice Example");
+        assert_eq!(item["assignee_source_id"], "azure-user-guid");
+        assert!(item["assignee_user_id"].is_null());
+        assert_eq!(item["status"], "blocked");
     }
 
     fn azure_item(id: i64) -> Value {

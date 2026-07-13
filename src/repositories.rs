@@ -1,10 +1,16 @@
-use chrono::{Duration, NaiveDateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
+use diesel::dsl::sql;
+use diesel::pg::Pg;
 use diesel::prelude::*;
+use diesel::sql_types::Integer;
 use diesel::OptionalExtension;
 use diesel_async::{AsyncConnection, AsyncPgConnection, RunQueryDsl};
-use std::collections::HashMap;
+use sha2::{Digest, Sha256};
+use std::{collections::HashMap, io};
 
-use crate::{models::*, schema::*};
+use crate::{models::*, schema::*, validation::canonical_username};
+
+diesel::sql_function!(fn lower(value: diesel::sql_types::VarChar) -> diesel::sql_types::VarChar);
 
 #[derive(Clone, Debug)]
 pub struct RecordAccessScope {
@@ -35,7 +41,7 @@ impl ConnectorWorkerRepository {
         c: &mut AsyncPgConnection,
         heartbeat: ConnectorWorkerHeartbeat,
     ) -> QueryResult<ConnectorWorker> {
-        let now = Utc::now().naive_utc();
+        let now = Utc::now();
         let worker_id = heartbeat.worker_id.clone();
 
         diesel::insert_into(connector_workers::table)
@@ -230,7 +236,7 @@ impl ConnectorRepository {
         source: &str,
         fallback_kind: &str,
         run_status: &str,
-        finished_at: NaiveDateTime,
+        finished_at: DateTime<Utc>,
     ) -> QueryResult<Connector> {
         let connector_status = if run_status == "failed" {
             "error"
@@ -299,7 +305,7 @@ impl ConnectorConfigRepository {
 
     pub async fn find_due_for_schedule(
         c: &mut AsyncPgConnection,
-        now: NaiveDateTime,
+        now: DateTime<Utc>,
         limit: i64,
     ) -> QueryResult<Vec<ConnectorConfig>> {
         connector_configs::table
@@ -324,7 +330,7 @@ impl ConnectorConfigRepository {
         config: ConnectorConfigUpdate,
     ) -> QueryResult<ConnectorConfig> {
         let next_run_at = if config.schedule_cron.is_some() {
-            Some(Utc::now().naive_utc())
+            Some(Utc::now())
         } else {
             None
         };
@@ -378,7 +384,7 @@ impl ConnectorConfigRepository {
     pub async fn mark_scheduled(
         c: &mut AsyncPgConnection,
         source: &str,
-        scheduled_at: NaiveDateTime,
+        scheduled_at: DateTime<Utc>,
         interval_seconds: i64,
         run_id: Option<i32>,
     ) -> QueryResult<ConnectorConfig> {
@@ -424,6 +430,42 @@ impl ConnectorRunRepository {
 
         if let Some(target) = target {
             query = query.filter(connector_runs::target.eq(target));
+        }
+
+        query
+            .order(connector_runs::started_at.desc())
+            .limit(limit)
+            .get_results(c)
+            .await
+    }
+
+    pub async fn find_multiple_for_access(
+        c: &mut AsyncPgConnection,
+        limit: i64,
+        source: Option<&str>,
+        target: Option<&str>,
+        access: &RecordAccessScope,
+    ) -> QueryResult<Vec<ConnectorRun>> {
+        let mut query = connector_runs::table
+            .inner_join(connectors::table.on(connectors::source.eq(connector_runs::source)))
+            .select(connector_runs::all_columns)
+            .into_boxed();
+
+        if let Some(source) = source {
+            query = query.filter(connector_runs::source.eq(source));
+        }
+        if let Some(target) = target {
+            query = query.filter(connector_runs::target.eq(target));
+        }
+        if !access.is_admin {
+            query = query.filter(
+                connectors::owner_user_id
+                    .eq(Some(access.user_id))
+                    .or(connectors::maintainer_id.eq_any(&access.maintainer_ids))
+                    .or(connectors::owner_user_id
+                        .is_null()
+                        .and(connectors::maintainer_id.is_null())),
+            );
         }
 
         query
@@ -582,7 +624,7 @@ impl ConnectorRunRepository {
     ) -> QueryResult<Option<ConnectorRun>> {
         c.transaction::<Option<ConnectorRun>, diesel::result::Error, _>(|conn| {
             Box::pin(async move {
-                let now = Utc::now().naive_utc();
+                let now = Utc::now();
                 let queued = connector_runs::table
                     .filter(connector_runs::status.eq("queued"))
                     .filter(connector_runs::next_attempt_at.le(now))
@@ -612,8 +654,8 @@ impl ConnectorRunRepository {
                         connector_runs::lease_expires_at
                             .eq(Some(now + Duration::seconds(lease_seconds))),
                         connector_runs::heartbeat_at.eq(Some(now)),
-                        connector_runs::finished_at.eq::<Option<NaiveDateTime>>(None),
-                        connector_runs::cancelled_at.eq::<Option<NaiveDateTime>>(None),
+                        connector_runs::finished_at.eq::<Option<DateTime<Utc>>>(None),
+                        connector_runs::cancelled_at.eq::<Option<DateTime<Utc>>>(None),
                     ))
                     .get_result(conn)
                     .await
@@ -629,7 +671,7 @@ impl ConnectorRunRepository {
         worker_id: &str,
         lease_seconds: i64,
     ) -> QueryResult<bool> {
-        let now = Utc::now().naive_utc();
+        let now = Utc::now();
         let updated = diesel::update(
             connector_runs::table
                 .find(id)
@@ -659,7 +701,7 @@ impl ConnectorRunRepository {
             .filter(connector_runs::cancel_requested_at.is_null())
             .into_boxed();
         if let Some(worker_id) = worker_id {
-            let now = Utc::now().naive_utc();
+            let now = Utc::now();
             query = query
                 .filter(connector_runs::worker_id.eq(worker_id))
                 .filter(connector_runs::lease_expires_at.gt(now));
@@ -686,7 +728,7 @@ impl ConnectorRunRepository {
         worker_id: Option<&str>,
         state: ConnectorRunStateUpdate,
     ) -> QueryResult<Option<ConnectorRun>> {
-        let now = Utc::now().naive_utc();
+        let now = Utc::now();
         let changes = (
             connector_runs::status.eq(state.status),
             connector_runs::success_count.eq(state.success_count),
@@ -696,7 +738,7 @@ impl ConnectorRunRepository {
             connector_runs::finished_at.eq(state.finished_at),
             connector_runs::snapshot_complete.eq(state.snapshot_complete),
             connector_runs::archived_count.eq(state.archived_count),
-            connector_runs::lease_expires_at.eq::<Option<NaiveDateTime>>(None),
+            connector_runs::lease_expires_at.eq::<Option<DateTime<Utc>>>(None),
             connector_runs::heartbeat_at.eq(Some(now)),
         );
 
@@ -739,7 +781,7 @@ impl ConnectorRunRepository {
                     .for_update()
                     .first::<ConnectorRun>(conn)
                     .await?;
-                let now = Utc::now().naive_utc();
+                let now = Utc::now();
 
                 match run.status.as_str() {
                     "queued" => diesel::update(connector_runs::table.find(id))
@@ -748,7 +790,7 @@ impl ConnectorRunRepository {
                             connector_runs::cancel_requested_at.eq(Some(now)),
                             connector_runs::cancelled_at.eq(Some(now)),
                             connector_runs::finished_at.eq(Some(now)),
-                            connector_runs::lease_expires_at.eq::<Option<NaiveDateTime>>(None),
+                            connector_runs::lease_expires_at.eq::<Option<DateTime<Utc>>>(None),
                         ))
                         .get_result(conn)
                         .await
@@ -770,12 +812,12 @@ impl ConnectorRunRepository {
         id: i32,
         worker_id: Option<&str>,
     ) -> QueryResult<Option<ConnectorRun>> {
-        let now = Utc::now().naive_utc();
+        let now = Utc::now();
         let changes = (
             connector_runs::status.eq("cancelled"),
             connector_runs::cancelled_at.eq(Some(now)),
             connector_runs::finished_at.eq(Some(now)),
-            connector_runs::lease_expires_at.eq::<Option<NaiveDateTime>>(None),
+            connector_runs::lease_expires_at.eq::<Option<DateTime<Utc>>>(None),
             connector_runs::heartbeat_at.eq(Some(now)),
             connector_runs::error_message.eq(Some("cancelled by operator".to_owned())),
         );
@@ -814,7 +856,7 @@ impl ConnectorRunRepository {
     ) -> QueryResult<ConnectorRunRecoveryStats> {
         c.transaction::<ConnectorRunRecoveryStats, diesel::result::Error, _>(|conn| {
             Box::pin(async move {
-                let now = Utc::now().naive_utc();
+                let now = Utc::now();
                 let expired = connector_runs::table
                     .filter(connector_runs::status.eq("running"))
                     .filter(connector_runs::lease_expires_at.le(now))
@@ -834,7 +876,7 @@ impl ConnectorRunRepository {
                                 connector_runs::cancelled_at.eq(Some(now)),
                                 connector_runs::finished_at.eq(Some(now)),
                                 connector_runs::lease_expires_at
-                                    .eq::<Option<NaiveDateTime>>(None),
+                                    .eq::<Option<DateTime<Utc>>>(None),
                                 connector_runs::error_message
                                     .eq(Some("cancelled after worker lease expired".to_owned())),
                             ))
@@ -847,7 +889,7 @@ impl ConnectorRunRepository {
                                 connector_runs::status.eq("failed"),
                                 connector_runs::finished_at.eq(Some(now)),
                                 connector_runs::lease_expires_at
-                                    .eq::<Option<NaiveDateTime>>(None),
+                                    .eq::<Option<DateTime<Utc>>>(None),
                                 connector_runs::error_message.eq(Some(format!(
                                     "worker lease expired after {} attempt(s); retry limit reached",
                                     run.attempt_count
@@ -877,11 +919,11 @@ impl ConnectorRunRepository {
                                 connector_runs::status.eq("queued"),
                                 connector_runs::next_attempt_at
                                     .eq(now + Duration::seconds(backoff_seconds)),
-                                connector_runs::claimed_at.eq::<Option<NaiveDateTime>>(None),
+                                connector_runs::claimed_at.eq::<Option<DateTime<Utc>>>(None),
                                 connector_runs::worker_id.eq::<Option<String>>(None),
                                 connector_runs::lease_expires_at
-                                    .eq::<Option<NaiveDateTime>>(None),
-                                connector_runs::heartbeat_at.eq::<Option<NaiveDateTime>>(None),
+                                    .eq::<Option<DateTime<Utc>>>(None),
+                                connector_runs::heartbeat_at.eq::<Option<DateTime<Utc>>>(None),
                                 connector_runs::error_message.eq(Some(format!(
                                     "worker lease expired on attempt {}; retry scheduled in {} second(s)",
                                     run.attempt_count, backoff_seconds
@@ -914,8 +956,8 @@ impl ConnectorRunRepository {
                 connector_runs::finished_at.eq(state.finished_at),
                 connector_runs::snapshot_complete.eq(state.snapshot_complete),
                 connector_runs::archived_count.eq(state.archived_count),
-                connector_runs::lease_expires_at.eq::<Option<NaiveDateTime>>(None),
-                connector_runs::heartbeat_at.eq(Some(Utc::now().naive_utc())),
+                connector_runs::lease_expires_at.eq::<Option<DateTime<Utc>>>(None),
+                connector_runs::heartbeat_at.eq(Some(Utc::now())),
             ))
             .get_result(c)
             .await
@@ -923,7 +965,7 @@ impl ConnectorRunRepository {
 
     pub async fn delete_finished_older_than(
         c: &mut AsyncPgConnection,
-        finished_before: NaiveDateTime,
+        finished_before: DateTime<Utc>,
     ) -> QueryResult<usize> {
         diesel::delete(
             connector_runs::table
@@ -1058,8 +1100,8 @@ pub struct AuditLogFilters<'a> {
     pub resource_id: Option<&'a str>,
     pub actor_user_id: Option<i32>,
     pub action: Option<&'a str>,
-    pub created_from: Option<NaiveDateTime>,
-    pub created_to: Option<NaiveDateTime>,
+    pub created_from: Option<DateTime<Utc>>,
+    pub created_to: Option<DateTime<Utc>>,
 }
 
 impl AuditLogRepository {
@@ -1113,7 +1155,7 @@ impl AuditLogRepository {
 
     pub async fn delete_older_than(
         c: &mut AsyncPgConnection,
-        created_before: NaiveDateTime,
+        created_before: DateTime<Utc>,
     ) -> QueryResult<usize> {
         diesel::delete(audit_logs::table.filter(audit_logs::created_at.lt(created_before)))
             .execute(c)
@@ -1437,9 +1479,7 @@ impl ServiceRepository {
                     Some(existing) => Self::update(conn, existing.id, service).await?,
                     None => Self::create(conn, service).await?,
                 };
-                let checked_at = service
-                    .last_checked_at
-                    .unwrap_or_else(|| Utc::now().naive_utc());
+                let checked_at = service.last_checked_at.unwrap_or_else(Utc::now);
 
                 ServiceHealthCheckRepository::create(
                     conn,
@@ -1481,7 +1521,7 @@ impl ServiceHealthCheckRepository {
     pub async fn find_recent_scoped(
         c: &mut AsyncPgConnection,
         limit: i64,
-        since: NaiveDateTime,
+        since: DateTime<Utc>,
         maintainer_id: Option<i32>,
         source: Option<&str>,
     ) -> QueryResult<Vec<ServiceHealthCheck>> {
@@ -1520,7 +1560,7 @@ impl ServiceHealthCheckRepository {
     pub async fn find_recent_for_maintainers(
         c: &mut AsyncPgConnection,
         limit: i64,
-        since: NaiveDateTime,
+        since: DateTime<Utc>,
         maintainer_ids: &[i32],
     ) -> QueryResult<Vec<ServiceHealthCheck>> {
         if maintainer_ids.is_empty() {
@@ -1540,7 +1580,7 @@ impl ServiceHealthCheckRepository {
 
     pub async fn delete_older_than(
         c: &mut AsyncPgConnection,
-        checked_before: NaiveDateTime,
+        checked_before: DateTime<Utc>,
     ) -> QueryResult<usize> {
         diesel::delete(
             service_health_checks::table
@@ -1553,6 +1593,142 @@ impl ServiceHealthCheckRepository {
 
 pub struct WorkCardRepository;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WorkCardDueFilter {
+    Overdue,
+    Today,
+    NextSevenDays,
+    None,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WorkCardSort {
+    Attention,
+    DueAsc,
+    SourceUpdatedDesc,
+}
+
+#[derive(Clone, Debug)]
+pub struct MyWorkCardFilters {
+    pub status: Option<String>,
+    pub due: Option<WorkCardDueFilter>,
+    pub project: Option<String>,
+    pub work_item_type: Option<String>,
+    pub source: Option<String>,
+    pub sort: WorkCardSort,
+    pub today_start: DateTime<Utc>,
+    pub tomorrow_start: DateTime<Utc>,
+    pub next_seven_days_end: DateTime<Utc>,
+}
+
+pub struct MyWorkCardPage {
+    pub items: Vec<WorkCard>,
+    pub total: i64,
+}
+
+pub struct MyWorkCardFacetValues {
+    pub statuses: Vec<String>,
+    pub projects: Vec<String>,
+    pub work_item_types: Vec<String>,
+    pub sources: Vec<String>,
+}
+
+fn my_work_base_query(access: &RecordAccessScope) -> work_cards::BoxedQuery<'static, Pg> {
+    let mut query = work_cards::table
+        .filter(work_cards::archived_at.is_null())
+        .filter(work_cards::assignee_user_id.eq(Some(access.user_id)))
+        .into_boxed();
+
+    if !access.is_admin {
+        query = query.filter(
+            work_cards::owner_user_id
+                .eq(Some(access.user_id))
+                .or(work_cards::maintainer_id.eq_any(access.maintainer_ids.clone()))
+                .or(work_cards::owner_user_id
+                    .is_null()
+                    .and(work_cards::maintainer_id.is_null())),
+        );
+    }
+
+    query
+}
+
+fn apply_my_work_filters(
+    mut query: work_cards::BoxedQuery<'static, Pg>,
+    filters: &MyWorkCardFilters,
+) -> work_cards::BoxedQuery<'static, Pg> {
+    if let Some(status) = &filters.status {
+        query = query.filter(work_cards::status.eq(status.clone()));
+    }
+    if let Some(project) = &filters.project {
+        query = query.filter(work_cards::project.eq(Some(project.clone())));
+    }
+    if let Some(work_item_type) = &filters.work_item_type {
+        query = query.filter(work_cards::work_item_type.eq(Some(work_item_type.clone())));
+    }
+    if let Some(source) = &filters.source {
+        query = query.filter(work_cards::source.eq(source.clone()));
+    }
+    match filters.due {
+        Some(WorkCardDueFilter::Overdue) => {
+            query = query
+                .filter(work_cards::status.ne("done"))
+                .filter(work_cards::due_at.lt(filters.today_start));
+        }
+        Some(WorkCardDueFilter::Today) => {
+            query = query
+                .filter(work_cards::due_at.ge(filters.today_start))
+                .filter(work_cards::due_at.lt(filters.tomorrow_start));
+        }
+        Some(WorkCardDueFilter::NextSevenDays) => {
+            query = query
+                .filter(work_cards::due_at.ge(filters.today_start))
+                .filter(work_cards::due_at.lt(filters.next_seven_days_end));
+        }
+        Some(WorkCardDueFilter::None) => {
+            query = query.filter(work_cards::due_at.is_null());
+        }
+        None => {}
+    }
+
+    query
+}
+
+fn apply_my_work_sort(
+    query: work_cards::BoxedQuery<'static, Pg>,
+    filters: &MyWorkCardFilters,
+) -> work_cards::BoxedQuery<'static, Pg> {
+    match filters.sort {
+        WorkCardSort::Attention => query.order((
+            work_cards::status.eq("blocked").desc(),
+            work_cards::status
+                .ne("done")
+                .and(work_cards::due_at.lt(filters.today_start))
+                .desc(),
+            work_cards::status.eq("done").asc(),
+            sql::<Integer>(
+                "CASE work_cards.priority WHEN 'urgent' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 ELSE 1 END",
+            )
+            .desc(),
+            work_cards::due_at.is_null().asc(),
+            work_cards::due_at.asc(),
+            work_cards::source_updated_at.is_null().asc(),
+            work_cards::source_updated_at.desc(),
+            work_cards::id.asc(),
+        )),
+        WorkCardSort::DueAsc => query.order((
+            work_cards::due_at.is_null().asc(),
+            work_cards::due_at.asc(),
+            work_cards::id.asc(),
+        )),
+        WorkCardSort::SourceUpdatedDesc => query.order((
+            work_cards::source_updated_at.is_null().asc(),
+            work_cards::source_updated_at.desc(),
+            work_cards::id.desc(),
+        )),
+    }
+}
+
 pub struct CalendarEventRepository;
 
 impl CalendarEventRepository {
@@ -1563,8 +1739,8 @@ impl CalendarEventRepository {
     pub async fn find_upcoming_for_access(
         c: &mut AsyncPgConnection,
         limit: i64,
-        starts_from: NaiveDateTime,
-        starts_before: NaiveDateTime,
+        starts_from: DateTime<Utc>,
+        starts_before: DateTime<Utc>,
         maintainer_id: Option<i32>,
         source: Option<&str>,
         access: &RecordAccessScope,
@@ -1648,7 +1824,7 @@ impl CalendarEventRepository {
         connector_id: i32,
         run_id: i32,
     ) -> QueryResult<usize> {
-        let now = Utc::now().naive_utc();
+        let now = Utc::now();
         diesel::update(
             calendar_events::table
                 .filter(calendar_events::connector_id.eq(connector_id))
@@ -1697,6 +1873,77 @@ impl WorkCardRepository {
             .limit(limit)
             .get_results(c)
             .await
+    }
+
+    pub async fn find_my_work(
+        c: &mut AsyncPgConnection,
+        access: &RecordAccessScope,
+        filters: &MyWorkCardFilters,
+        page: i64,
+        page_size: i64,
+    ) -> QueryResult<MyWorkCardPage> {
+        let total = apply_my_work_filters(my_work_base_query(access), filters)
+            .count()
+            .get_result(c)
+            .await?;
+        let offset = (page - 1) * page_size;
+        let items = apply_my_work_sort(
+            apply_my_work_filters(my_work_base_query(access), filters),
+            filters,
+        )
+        .offset(offset)
+        .limit(page_size)
+        .get_results(c)
+        .await?;
+
+        Ok(MyWorkCardPage { items, total })
+    }
+
+    pub async fn my_work_facets(
+        c: &mut AsyncPgConnection,
+        access: &RecordAccessScope,
+    ) -> QueryResult<MyWorkCardFacetValues> {
+        let statuses = my_work_base_query(access)
+            .select(work_cards::status)
+            .distinct()
+            .order(work_cards::status.asc())
+            .get_results(c)
+            .await?;
+        let projects = my_work_base_query(access)
+            .filter(work_cards::project.is_not_null())
+            .filter(work_cards::project.ne(""))
+            .select(work_cards::project)
+            .distinct()
+            .order(work_cards::project.asc())
+            .get_results::<Option<String>>(c)
+            .await?
+            .into_iter()
+            .flatten()
+            .collect();
+        let work_item_types = my_work_base_query(access)
+            .filter(work_cards::work_item_type.is_not_null())
+            .filter(work_cards::work_item_type.ne(""))
+            .select(work_cards::work_item_type)
+            .distinct()
+            .order(work_cards::work_item_type.asc())
+            .get_results::<Option<String>>(c)
+            .await?
+            .into_iter()
+            .flatten()
+            .collect();
+        let sources = my_work_base_query(access)
+            .select(work_cards::source)
+            .distinct()
+            .order(work_cards::source.asc())
+            .get_results(c)
+            .await?;
+
+        Ok(MyWorkCardFacetValues {
+            statuses,
+            projects,
+            work_item_types,
+            sources,
+        })
     }
 
     pub async fn find_open_for_access(
@@ -1821,7 +2068,7 @@ impl WorkCardRepository {
         connector_id: i32,
         run_id: i32,
     ) -> QueryResult<usize> {
-        let now = Utc::now().naive_utc();
+        let now = Utc::now();
         diesel::update(
             work_cards::table
                 .filter(work_cards::connector_id.eq(connector_id))
@@ -1878,15 +2125,15 @@ impl NotificationReceiptRepository {
         notification_id: i32,
         user_id: i32,
     ) -> QueryResult<NotificationReceipt> {
-        let now = Utc::now().naive_utc();
+        let now = Utc::now();
 
         diesel::insert_into(notification_receipts::table)
             .values((
                 notification_receipts::notification_id.eq(notification_id),
                 notification_receipts::user_id.eq(user_id),
                 notification_receipts::read_at.eq(Some(now)),
-                notification_receipts::dismissed_at.eq::<Option<NaiveDateTime>>(None),
-                notification_receipts::snoozed_until.eq::<Option<NaiveDateTime>>(None),
+                notification_receipts::dismissed_at.eq::<Option<DateTime<Utc>>>(None),
+                notification_receipts::snoozed_until.eq::<Option<DateTime<Utc>>>(None),
             ))
             .on_conflict((
                 notification_receipts::notification_id,
@@ -1906,15 +2153,15 @@ impl NotificationReceiptRepository {
         notification_id: i32,
         user_id: i32,
     ) -> QueryResult<NotificationReceipt> {
-        let now = Utc::now().naive_utc();
+        let now = Utc::now();
 
         diesel::insert_into(notification_receipts::table)
             .values((
                 notification_receipts::notification_id.eq(notification_id),
                 notification_receipts::user_id.eq(user_id),
-                notification_receipts::read_at.eq::<Option<NaiveDateTime>>(None),
-                notification_receipts::dismissed_at.eq::<Option<NaiveDateTime>>(None),
-                notification_receipts::snoozed_until.eq::<Option<NaiveDateTime>>(None),
+                notification_receipts::read_at.eq::<Option<DateTime<Utc>>>(None),
+                notification_receipts::dismissed_at.eq::<Option<DateTime<Utc>>>(None),
+                notification_receipts::snoozed_until.eq::<Option<DateTime<Utc>>>(None),
             ))
             .on_conflict((
                 notification_receipts::notification_id,
@@ -1922,7 +2169,7 @@ impl NotificationReceiptRepository {
             ))
             .do_update()
             .set((
-                notification_receipts::read_at.eq::<Option<NaiveDateTime>>(None),
+                notification_receipts::read_at.eq::<Option<DateTime<Utc>>>(None),
                 notification_receipts::updated_at.eq(now),
             ))
             .get_result(c)
@@ -1934,15 +2181,15 @@ impl NotificationReceiptRepository {
         notification_id: i32,
         user_id: i32,
     ) -> QueryResult<NotificationReceipt> {
-        let now = Utc::now().naive_utc();
+        let now = Utc::now();
 
         diesel::insert_into(notification_receipts::table)
             .values((
                 notification_receipts::notification_id.eq(notification_id),
                 notification_receipts::user_id.eq(user_id),
-                notification_receipts::read_at.eq::<Option<NaiveDateTime>>(None),
+                notification_receipts::read_at.eq::<Option<DateTime<Utc>>>(None),
                 notification_receipts::dismissed_at.eq(Some(now)),
-                notification_receipts::snoozed_until.eq::<Option<NaiveDateTime>>(None),
+                notification_receipts::snoozed_until.eq::<Option<DateTime<Utc>>>(None),
             ))
             .on_conflict((
                 notification_receipts::notification_id,
@@ -1951,7 +2198,7 @@ impl NotificationReceiptRepository {
             .do_update()
             .set((
                 notification_receipts::dismissed_at.eq(Some(now)),
-                notification_receipts::snoozed_until.eq::<Option<NaiveDateTime>>(None),
+                notification_receipts::snoozed_until.eq::<Option<DateTime<Utc>>>(None),
                 notification_receipts::updated_at.eq(now),
             ))
             .get_result(c)
@@ -1962,16 +2209,16 @@ impl NotificationReceiptRepository {
         c: &mut AsyncPgConnection,
         notification_id: i32,
         user_id: i32,
-        snoozed_until: NaiveDateTime,
+        snoozed_until: DateTime<Utc>,
     ) -> QueryResult<NotificationReceipt> {
-        let now = Utc::now().naive_utc();
+        let now = Utc::now();
 
         diesel::insert_into(notification_receipts::table)
             .values((
                 notification_receipts::notification_id.eq(notification_id),
                 notification_receipts::user_id.eq(user_id),
-                notification_receipts::read_at.eq::<Option<NaiveDateTime>>(None),
-                notification_receipts::dismissed_at.eq::<Option<NaiveDateTime>>(None),
+                notification_receipts::read_at.eq::<Option<DateTime<Utc>>>(None),
+                notification_receipts::dismissed_at.eq::<Option<DateTime<Utc>>>(None),
                 notification_receipts::snoozed_until.eq(Some(snoozed_until)),
             ))
             .on_conflict((
@@ -1980,7 +2227,7 @@ impl NotificationReceiptRepository {
             ))
             .do_update()
             .set((
-                notification_receipts::dismissed_at.eq::<Option<NaiveDateTime>>(None),
+                notification_receipts::dismissed_at.eq::<Option<DateTime<Utc>>>(None),
                 notification_receipts::snoozed_until.eq(Some(snoozed_until)),
                 notification_receipts::updated_at.eq(now),
             ))
@@ -1993,15 +2240,15 @@ impl NotificationReceiptRepository {
         notification_id: i32,
         user_id: i32,
     ) -> QueryResult<NotificationReceipt> {
-        let now = Utc::now().naive_utc();
+        let now = Utc::now();
 
         diesel::insert_into(notification_receipts::table)
             .values((
                 notification_receipts::notification_id.eq(notification_id),
                 notification_receipts::user_id.eq(user_id),
-                notification_receipts::read_at.eq::<Option<NaiveDateTime>>(None),
-                notification_receipts::dismissed_at.eq::<Option<NaiveDateTime>>(None),
-                notification_receipts::snoozed_until.eq::<Option<NaiveDateTime>>(None),
+                notification_receipts::read_at.eq::<Option<DateTime<Utc>>>(None),
+                notification_receipts::dismissed_at.eq::<Option<DateTime<Utc>>>(None),
+                notification_receipts::snoozed_until.eq::<Option<DateTime<Utc>>>(None),
             ))
             .on_conflict((
                 notification_receipts::notification_id,
@@ -2009,8 +2256,8 @@ impl NotificationReceiptRepository {
             ))
             .do_update()
             .set((
-                notification_receipts::dismissed_at.eq::<Option<NaiveDateTime>>(None),
-                notification_receipts::snoozed_until.eq::<Option<NaiveDateTime>>(None),
+                notification_receipts::dismissed_at.eq::<Option<DateTime<Utc>>>(None),
+                notification_receipts::snoozed_until.eq::<Option<DateTime<Utc>>>(None),
                 notification_receipts::updated_at.eq(now),
             ))
             .get_result(c)
@@ -2032,7 +2279,7 @@ impl NotificationRepository {
         source: Option<&str>,
         access: &RecordAccessScope,
     ) -> QueryResult<Vec<NotificationView>> {
-        let now = Utc::now().naive_utc();
+        let now = Utc::now();
         let mut query = notifications::table
             .left_join(
                 notification_receipts::table.on(notification_receipts::notification_id
@@ -2082,7 +2329,7 @@ impl NotificationRepository {
         source: Option<&str>,
         access: &RecordAccessScope,
     ) -> QueryResult<i64> {
-        let now = Utc::now().naive_utc();
+        let now = Utc::now();
         let mut query = notifications::table
             .left_join(
                 notification_receipts::table.on(notification_receipts::notification_id
@@ -2216,7 +2463,7 @@ impl NotificationRepository {
         connector_id: i32,
         run_id: i32,
     ) -> QueryResult<usize> {
-        let now = Utc::now().naive_utc();
+        let now = Utc::now();
         diesel::update(
             notifications::table
                 .filter(notifications::connector_id.eq(connector_id))
@@ -2333,6 +2580,229 @@ impl DashboardRepository {
     }
 }
 
+pub struct ExternalIdentityRepository;
+
+pub struct JitProvisionedIdentity {
+    pub user: User,
+    pub identity: ExternalIdentity,
+    pub created: bool,
+}
+
+pub struct ExternalIdentityLoginProfile<'a> {
+    pub issuer: &'a str,
+    pub subject: &'a str,
+    pub preferred_username: Option<&'a str>,
+    pub display_name: Option<&'a str>,
+    pub email: Option<&'a str>,
+    pub last_login_at: DateTime<Utc>,
+}
+
+#[derive(QueryableByName)]
+struct AdvisoryLockResult {
+    #[diesel(sql_type = diesel::sql_types::Text)]
+    #[allow(dead_code)]
+    lock_result: String,
+}
+
+impl ExternalIdentityRepository {
+    pub async fn find_by_entra_object(
+        c: &mut AsyncPgConnection,
+        tenant_id: &str,
+        object_id: &str,
+    ) -> QueryResult<ExternalIdentity> {
+        external_identities::table
+            .filter(external_identities::provider.eq("entra"))
+            .filter(external_identities::tenant_id.eq(tenant_id))
+            .filter(external_identities::object_id.eq(object_id))
+            .first(c)
+            .await
+    }
+
+    pub async fn update_login_profile(
+        c: &mut AsyncPgConnection,
+        id: i32,
+        profile: ExternalIdentityLoginProfile<'_>,
+    ) -> QueryResult<ExternalIdentity> {
+        diesel::update(
+            external_identities::table
+                .find(id)
+                .filter(external_identities::issuer.eq(profile.issuer))
+                .filter(
+                    external_identities::subject
+                        .is_null()
+                        .or(external_identities::subject.eq(profile.subject)),
+                ),
+        )
+        .set((
+            external_identities::subject.eq(Some(profile.subject)),
+            external_identities::preferred_username.eq(profile.preferred_username),
+            external_identities::display_name.eq(profile.display_name),
+            external_identities::email.eq(profile.email),
+            external_identities::last_login_at.eq(Some(profile.last_login_at)),
+            external_identities::updated_at.eq(Utc::now()),
+        ))
+        .get_result(c)
+        .await
+    }
+
+    pub async fn find_or_create_jit_user(
+        c: &mut AsyncPgConnection,
+        mut new_user: NewUser,
+        mut identity: NewExternalIdentity,
+    ) -> QueryResult<JitProvisionedIdentity> {
+        new_user.username = canonical_username(&new_user.username);
+        c.transaction::<_, diesel::result::Error, _>(|conn| {
+            Box::pin(async move {
+                let lock_key = format!("entra:{}:{}", identity.tenant_id, identity.object_id);
+                diesel::sql_query(
+                    "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))::text AS lock_result",
+                )
+                .bind::<diesel::sql_types::Text, _>(lock_key)
+                .get_result::<AdvisoryLockResult>(conn)
+                .await?;
+
+                match Self::find_by_entra_object(conn, &identity.tenant_id, &identity.object_id)
+                    .await
+                {
+                    Ok(existing_identity) => {
+                        let user = users::table
+                            .find(existing_identity.user_id)
+                            .get_result(conn)
+                            .await?;
+                        return Ok(JitProvisionedIdentity {
+                            user,
+                            identity: existing_identity,
+                            created: false,
+                        });
+                    }
+                    Err(diesel::result::Error::NotFound) => {}
+                    Err(error) => return Err(error),
+                }
+
+                let user = diesel::insert_into(users::table)
+                    .values(new_user)
+                    .get_result::<User>(conn)
+                    .await?;
+                diesel::insert_into(roles::table)
+                    .values(NewRole {
+                        code: "member".to_owned(),
+                        name: "member".to_owned(),
+                    })
+                    .on_conflict(roles::code)
+                    .do_nothing()
+                    .execute(conn)
+                    .await?;
+                let role = RoleRepository::find_by_code(conn, "member").await?;
+                diesel::insert_into(users_roles::table)
+                    .values(NewUserRole {
+                        user_id: user.id,
+                        role_id: role.id,
+                    })
+                    .get_result::<UserRole>(conn)
+                    .await?;
+
+                identity.user_id = user.id;
+                let tenant_id = identity.tenant_id.clone();
+                let object_id = identity.object_id.clone();
+                let created_identity = diesel::insert_into(external_identities::table)
+                    .values(identity)
+                    .get_result::<ExternalIdentity>(conn)
+                    .await?;
+                diesel::insert_into(audit_logs::table)
+                    .values(NewAuditLog {
+                        actor_user_id: Some(user.id),
+                        action: "auth.entra_jit_provisioned".to_owned(),
+                        resource_type: "user".to_owned(),
+                        resource_id: Some(user.id.to_string()),
+                        metadata: Some(
+                            serde_json::json!({
+                                "provider": "entra",
+                                "tenant_id": tenant_id,
+                                "object_id": object_id,
+                            })
+                            .to_string(),
+                        ),
+                    })
+                    .execute(conn)
+                    .await?;
+
+                Ok(JitProvisionedIdentity {
+                    user,
+                    identity: created_identity,
+                    created: true,
+                })
+            })
+        })
+        .await
+    }
+}
+
+pub struct OidcLoginTransactionRepository;
+
+impl OidcLoginTransactionRepository {
+    pub async fn create_bounded(
+        c: &mut AsyncPgConnection,
+        transaction: NewOidcLoginTransaction,
+        now: DateTime<Utc>,
+        max_pending: i64,
+    ) -> QueryResult<Option<OidcLoginTransaction>> {
+        c.transaction::<_, diesel::result::Error, _>(|conn| {
+            Box::pin(async move {
+                diesel::sql_query(
+                    "SELECT pg_advisory_xact_lock(\
+                         hashtextextended('portal:oidc-login-transaction-capacity', 0)\
+                     )::text AS lock_result",
+                )
+                .get_result::<AdvisoryLockResult>(conn)
+                .await?;
+                Self::delete_expired(conn, now).await?;
+                let pending = oidc_login_transactions::table
+                    .filter(oidc_login_transactions::expires_at.gt(now))
+                    .count()
+                    .get_result::<i64>(conn)
+                    .await?;
+                if pending >= max_pending {
+                    return Ok(None);
+                }
+
+                diesel::insert_into(oidc_login_transactions::table)
+                    .values(transaction)
+                    .get_result(conn)
+                    .await
+                    .map(Some)
+            })
+        })
+        .await
+    }
+
+    pub async fn consume(
+        c: &mut AsyncPgConnection,
+        state_hash: &str,
+        browser_binding_hash: &str,
+        now: DateTime<Utc>,
+    ) -> QueryResult<OidcLoginTransaction> {
+        diesel::delete(
+            oidc_login_transactions::table
+                .filter(oidc_login_transactions::state_hash.eq(state_hash))
+                .filter(oidc_login_transactions::browser_binding_hash.eq(browser_binding_hash))
+                .filter(oidc_login_transactions::expires_at.gt(now)),
+        )
+        .get_result(c)
+        .await
+    }
+
+    pub async fn delete_expired(
+        c: &mut AsyncPgConnection,
+        now: DateTime<Utc>,
+    ) -> QueryResult<usize> {
+        diesel::delete(
+            oidc_login_transactions::table.filter(oidc_login_transactions::expires_at.le(now)),
+        )
+        .execute(c)
+        .await
+    }
+}
+
 pub struct UserRepository;
 
 impl UserRepository {
@@ -2341,8 +2811,9 @@ impl UserRepository {
     }
 
     pub async fn find_by_username(c: &mut AsyncPgConnection, username: &str) -> QueryResult<User> {
+        let username = canonical_username(username);
         users::table
-            .filter(users::username.eq(username))
+            .filter(lower(users::username).eq(username))
             .get_result(c)
             .await
     }
@@ -2361,9 +2832,10 @@ impl UserRepository {
 
     pub async fn create(
         c: &mut AsyncPgConnection,
-        new_user: NewUser,
+        mut new_user: NewUser,
         role_codes: Vec<String>,
     ) -> QueryResult<User> {
+        new_user.username = canonical_username(&new_user.username);
         c.transaction::<_, diesel::result::Error, _>(|conn| {
             Box::pin(async move {
                 let user = diesel::insert_into(users::table)
@@ -2409,15 +2881,20 @@ impl UserRepository {
     }
 
     pub async fn delete(c: &mut AsyncPgConnection, id: i32) -> QueryResult<usize> {
-        diesel::delete(maintainer_members::table.filter(maintainer_members::user_id.eq(id)))
-            .execute(c)
-            .await?;
-
-        diesel::delete(users_roles::table.filter(users_roles::user_id.eq(id)))
-            .execute(c)
-            .await?;
-
-        diesel::delete(users::table.find(id)).execute(c).await
+        c.transaction::<_, diesel::result::Error, _>(|conn| {
+            Box::pin(async move {
+                diesel::delete(
+                    maintainer_members::table.filter(maintainer_members::user_id.eq(id)),
+                )
+                .execute(conn)
+                .await?;
+                diesel::delete(users_roles::table.filter(users_roles::user_id.eq(id)))
+                    .execute(conn)
+                    .await?;
+                diesel::delete(users::table.find(id)).execute(conn).await
+            })
+        })
+        .await
     }
 
     pub async fn update_password(
@@ -2434,34 +2911,240 @@ impl UserRepository {
 
 pub struct SessionRepository;
 
+pub struct CreateSession {
+    pub user_id: i32,
+    pub token: String,
+    pub expires_at: DateTime<Utc>,
+    pub max_active_sessions: i64,
+    pub auth_method: String,
+    pub ip_address: Option<String>,
+    pub user_agent: Option<String>,
+}
+
 impl SessionRepository {
-    pub async fn create(
-        c: &mut AsyncPgConnection,
-        user_id: i32,
-        token: String,
-        expires_at: NaiveDateTime,
-    ) -> QueryResult<Session> {
-        diesel::insert_into(sessions::table)
-            .values(NewSession {
-                user_id,
-                token,
-                expires_at,
+    pub async fn create(c: &mut AsyncPgConnection, session: CreateSession) -> QueryResult<Session> {
+        if !(1..=100).contains(&session.max_active_sessions) {
+            return Err(diesel::result::Error::QueryBuilderError(Box::new(
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "max_active_sessions must be between 1 and 100",
+                ),
+            )));
+        }
+
+        let CreateSession {
+            user_id,
+            token,
+            expires_at,
+            max_active_sessions,
+            auth_method,
+            ip_address,
+            user_agent,
+        } = session;
+        let token_hash = session_token_hash(&token);
+
+        c.transaction::<_, diesel::result::Error, _>(|conn| {
+            Box::pin(async move {
+                // Serialize session creation per user. Without this lock, concurrent
+                // password and Entra callbacks can all observe capacity and exceed it.
+                let lock_key = format!("portal:session-capacity:{user_id}");
+                diesel::sql_query(
+                    "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))::text AS lock_result",
+                )
+                .bind::<diesel::sql_types::Text, _>(lock_key)
+                .get_result::<AdvisoryLockResult>(conn)
+                .await?;
+
+                // Read the cutoff after waiting for the per-user lock so a session
+                // that expires while another login is committing is also pruned.
+                let now = Utc::now();
+
+                diesel::delete(
+                    sessions::table
+                        .filter(sessions::user_id.eq(user_id))
+                        .filter(sessions::expires_at.le(now)),
+                )
+                .execute(conn)
+                .await?;
+
+                let active_count = sessions::table
+                    .filter(sessions::user_id.eq(user_id))
+                    .filter(sessions::expires_at.gt(now))
+                    .count()
+                    .get_result::<i64>(conn)
+                    .await?;
+                let eviction_count = (active_count - max_active_sessions + 1).max(0);
+                if eviction_count > 0 {
+                    let oldest_ids = sessions::table
+                        .filter(sessions::user_id.eq(user_id))
+                        .filter(sessions::expires_at.gt(now))
+                        .order((sessions::created_at.asc(), sessions::id.asc()))
+                        .select(sessions::id)
+                        .limit(eviction_count)
+                        .load::<i32>(conn)
+                        .await?;
+                    diesel::delete(sessions::table.filter(sessions::id.eq_any(oldest_ids)))
+                        .execute(conn)
+                        .await?;
+                }
+
+                diesel::insert_into(sessions::table)
+                    .values(NewSession {
+                        user_id,
+                        token_hash,
+                        expires_at,
+                        auth_method,
+                        last_seen_at: now,
+                        ip_address,
+                        user_agent,
+                    })
+                    .get_result(conn)
+                    .await
             })
-            .get_result(c)
-            .await
+        })
+        .await
     }
 
     pub async fn find_by_token(c: &mut AsyncPgConnection, token: &str) -> QueryResult<Session> {
         sessions::table
-            .filter(sessions::token.eq(token))
+            .filter(sessions::token_hash.eq(session_token_hash(token)))
             .first::<Session>(c)
             .await
     }
 
     pub async fn delete_by_token(c: &mut AsyncPgConnection, token: &str) -> QueryResult<usize> {
-        diesel::delete(sessions::table.filter(sessions::token.eq(token)))
+        diesel::delete(sessions::table.filter(sessions::token_hash.eq(session_token_hash(token))))
             .execute(c)
             .await
+    }
+
+    pub async fn delete_by_user(c: &mut AsyncPgConnection, user_id: i32) -> QueryResult<usize> {
+        diesel::delete(sessions::table.filter(sessions::user_id.eq(user_id)))
+            .execute(c)
+            .await
+    }
+
+    pub async fn delete_expired(
+        c: &mut AsyncPgConnection,
+        now: DateTime<Utc>,
+    ) -> QueryResult<usize> {
+        diesel::delete(sessions::table.filter(sessions::expires_at.le(now)))
+            .execute(c)
+            .await
+    }
+}
+
+fn session_token_hash(token: &str) -> String {
+    format!("{:x}", Sha256::digest(token.as_bytes()))
+}
+
+pub struct LoginThrottleRepository;
+
+impl LoginThrottleRepository {
+    pub async fn retry_after_seconds(
+        c: &mut AsyncPgConnection,
+        bucket_hash: &str,
+        now: DateTime<Utc>,
+    ) -> QueryResult<Option<i64>> {
+        let locked_until = login_throttle_buckets::table
+            .find(bucket_hash)
+            .select(login_throttle_buckets::locked_until)
+            .first::<Option<DateTime<Utc>>>(c)
+            .await
+            .optional()?
+            .flatten();
+
+        Ok(locked_until
+            .filter(|locked_until| *locked_until > now)
+            .map(|locked_until| (locked_until - now).num_seconds().max(1)))
+    }
+
+    pub async fn record_failure(
+        c: &mut AsyncPgConnection,
+        bucket_hash: &str,
+        now: DateTime<Utc>,
+        max_failures: i32,
+        window_seconds: i64,
+        lockout_seconds: i64,
+    ) -> QueryResult<Option<i64>> {
+        let bucket_hash = bucket_hash.to_owned();
+        c.transaction::<Option<i64>, diesel::result::Error, _>(|conn| {
+            Box::pin(async move {
+                diesel::insert_into(login_throttle_buckets::table)
+                    .values(NewLoginThrottleBucket {
+                        bucket_hash: bucket_hash.clone(),
+                        failure_count: 0,
+                        window_started_at: now,
+                        locked_until: None,
+                        updated_at: now,
+                    })
+                    .on_conflict(login_throttle_buckets::bucket_hash)
+                    .do_nothing()
+                    .execute(conn)
+                    .await?;
+
+                let bucket = login_throttle_buckets::table
+                    .find(&bucket_hash)
+                    .for_update()
+                    .first::<LoginThrottleBucket>(conn)
+                    .await?;
+                let window_expired =
+                    bucket.window_started_at <= now - Duration::seconds(window_seconds);
+                let failure_count = if window_expired {
+                    1
+                } else {
+                    bucket.failure_count.saturating_add(1)
+                };
+                let window_started_at = if window_expired {
+                    now
+                } else {
+                    bucket.window_started_at
+                };
+                let locked_until = if failure_count >= max_failures {
+                    Some(now + Duration::seconds(lockout_seconds))
+                } else {
+                    bucket
+                        .locked_until
+                        .filter(|locked_until| *locked_until > now)
+                };
+
+                diesel::update(login_throttle_buckets::table.find(&bucket_hash))
+                    .set((
+                        login_throttle_buckets::failure_count.eq(failure_count),
+                        login_throttle_buckets::window_started_at.eq(window_started_at),
+                        login_throttle_buckets::locked_until.eq(locked_until),
+                        login_throttle_buckets::updated_at.eq(now),
+                    ))
+                    .execute(conn)
+                    .await?;
+
+                Ok(locked_until.map(|locked_until| (locked_until - now).num_seconds().max(1)))
+            })
+        })
+        .await
+    }
+
+    pub async fn clear(c: &mut AsyncPgConnection, bucket_hash: &str) -> QueryResult<usize> {
+        diesel::delete(login_throttle_buckets::table.find(bucket_hash))
+            .execute(c)
+            .await
+    }
+
+    pub async fn prune_before(
+        c: &mut AsyncPgConnection,
+        cutoff: DateTime<Utc>,
+    ) -> QueryResult<usize> {
+        diesel::delete(
+            login_throttle_buckets::table.filter(
+                login_throttle_buckets::updated_at.lt(cutoff).and(
+                    login_throttle_buckets::locked_until
+                        .is_null()
+                        .or(login_throttle_buckets::locked_until.lt(cutoff)),
+                ),
+            ),
+        )
+        .execute(c)
+        .await
     }
 }
 

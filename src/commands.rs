@@ -1,5 +1,5 @@
 use argon2::password_hash::{rand_core::OsRng, PasswordHasher, SaltString};
-use chrono::{Duration, Utc};
+use chrono::{DateTime, Duration, SecondsFormat, Utc};
 use diesel::prelude::*;
 use diesel::result::Error as DieselError;
 use diesel::OptionalExtension;
@@ -7,6 +7,7 @@ use diesel_async::{AsyncConnection, AsyncPgConnection, RunQueryDsl};
 use serde_json::{json, Value};
 
 use crate::{
+    config::{validate_test_database_url, verify_test_database_connection},
     models::{
         ConnectorRun, ConnectorRunStateUpdate, ConnectorUpdate, NewCalendarEvent, NewConnector,
         NewConnectorRun, NewConnectorRunItem, NewConnectorRunItemError, NewMaintainer,
@@ -21,8 +22,9 @@ use crate::{
     },
     schema::{
         connector_configs, connector_run_item_errors, connector_run_items, connector_runs,
-        packages, service_health_checks, users,
+        packages, service_health_checks,
     },
+    validation::canonical_username,
 };
 
 const DEMO_SOURCE: &str = "demo-workday";
@@ -53,13 +55,24 @@ struct DemoProductConnectorSeed<'a> {
 
 async fn load_db_connection() -> AsyncPgConnection {
     let database_url = std::env::var("DATABASE_URL").expect("Cannot load DB url environment");
-    AsyncPgConnection::establish(&database_url)
+    let environment = std::env::var("APP_ENV").unwrap_or_else(|_| "development".to_owned());
+    let test_target = validate_test_database_url(&environment, &database_url, "DATABASE_URL")
+        .unwrap_or_else(|error| panic!("database safety check failed: {error}"));
+    let mut connection = AsyncPgConnection::establish(&database_url)
         .await
-        .expect("Cannot connect to Postgres")
+        .expect("Cannot connect to Postgres");
+    if let Some(target) = test_target.as_ref() {
+        verify_test_database_connection(&mut connection, target, "DATABASE_URL")
+            .await
+            .unwrap_or_else(|error| panic!("database safety check failed: {error}"));
+    }
+
+    connection
 }
 
 pub async fn create_user(username: String, password: String, role_codes: Vec<String>) {
     let mut c = load_db_connection().await;
+    let username = canonical_username(&username);
 
     let new_user = NewUser {
         username,
@@ -80,6 +93,7 @@ pub async fn ensure_admin_user(
     reset_password: bool,
 ) {
     let mut c = load_db_connection().await;
+    let username = canonical_username(&username);
     let role_codes = normalized_roles(role_codes);
     let user = match UserRepository::find_by_username(&mut c, &username).await {
         Ok(user) if reset_password => {
@@ -172,15 +186,13 @@ async fn seed_demo_data_transaction(
     c: &mut AsyncPgConnection,
     admin_username: &str,
 ) -> Result<DemoSeedSummary, DieselError> {
-    let now = Utc::now().naive_utc();
+    let now = Utc::now();
     let maintainer = ensure_demo_maintainer(c).await?;
 
-    if let Some(admin) = users::table
-        .filter(users::username.eq(admin_username))
-        .first::<crate::models::User>(c)
+    let admin = UserRepository::find_by_username(c, admin_username)
         .await
-        .optional()?
-    {
+        .optional()?;
+    if let Some(admin) = &admin {
         MaintainerMemberRepository::upsert(
             c,
             NewMaintainerMember {
@@ -254,7 +266,7 @@ async fn seed_demo_data_transaction(
 
     let work_run = prepare_demo_run(c, "work_cards", "import", now).await?;
     clear_demo_run_artifacts(c, work_run.id, false).await?;
-    let work_cards = seed_demo_work_cards(c, now).await?;
+    let work_cards = seed_demo_work_cards(c, now, admin.as_ref().map(|user| user.id)).await?;
     write_imported_run_items(c, work_run.id, "work_cards", &work_cards).await?;
     ConnectorRunItemErrorRepository::create_many(
         c,
@@ -399,15 +411,12 @@ async fn ensure_demo_connector(
             enabled: true,
             schedule_cron: Some("@every 15m".to_owned()),
             config: "{}".to_owned(),
-            sample_payload: demo_service_health_payload(maintainer_id, Utc::now().naive_utc())
-                .to_string(),
+            sample_payload: demo_service_health_payload(maintainer_id, Utc::now()).to_string(),
         },
     )
     .await?;
     diesel::update(connector_configs::table.filter(connector_configs::source.eq(DEMO_SOURCE)))
-        .set(
-            connector_configs::next_run_at.eq(Some(Utc::now().naive_utc() + Duration::minutes(15))),
-        )
+        .set(connector_configs::next_run_at.eq(Some(Utc::now() + Duration::minutes(15))))
         .execute(c)
         .await?;
 
@@ -430,8 +439,8 @@ async fn ensure_demo_product_connectors(c: &mut AsyncPgConnection) -> Result<(),
                 "subject": "Calendar: Platform standup",
                 "organizer": "Taylor Lin",
                 "location": "Teams",
-                "starts_at": (Utc::now().naive_utc() + Duration::minutes(30)).format("%Y-%m-%dT%H:%M:%S").to_string(),
-                "ends_at": (Utc::now().naive_utc() + Duration::minutes(60)).format("%Y-%m-%dT%H:%M:%S").to_string(),
+                "starts_at": (Utc::now() + Duration::minutes(30)).to_rfc3339_opts(SecondsFormat::Secs, true),
+                "ends_at": (Utc::now() + Duration::minutes(60)).to_rfc3339_opts(SecondsFormat::Secs, true),
                 "web_link": "https://calendar.example.test/events/platform-standup"
             }]
             }),
@@ -442,8 +451,8 @@ async fn ensure_demo_product_connectors(c: &mut AsyncPgConnection) -> Result<(),
                 "body": "Organizer: Taylor Lin | Location: Teams",
                 "organizer": "Taylor Lin",
                 "location": "Teams",
-                "starts_at": (Utc::now().naive_utc() + Duration::minutes(30)).format("%Y-%m-%dT%H:%M:%S").to_string(),
-                "ends_at": (Utc::now().naive_utc() + Duration::minutes(60)).format("%Y-%m-%dT%H:%M:%S").to_string(),
+                "starts_at": (Utc::now() + Duration::minutes(30)).to_rfc3339_opts(SecondsFormat::Secs, true),
+                "ends_at": (Utc::now() + Duration::minutes(60)).to_rfc3339_opts(SecondsFormat::Secs, true),
                 "time_zone": "UTC",
                 "is_all_day": false,
                 "is_cancelled": false,
@@ -521,7 +530,7 @@ async fn ensure_demo_product_connectors(c: &mut AsyncPgConnection) -> Result<(),
 
 async fn seed_demo_calendar_events(
     c: &mut AsyncPgConnection,
-    now: chrono::NaiveDateTime,
+    now: chrono::DateTime<Utc>,
 ) -> Result<Vec<crate::models::CalendarEvent>, DieselError> {
     let connector = ConnectorRepository::find_by_source(c, DEMO_CALENDAR_SOURCE).await?;
     let event = CalendarEventRepository::upsert_from_connector(
@@ -610,9 +619,7 @@ async fn ensure_demo_product_connector(
     )
     .await?;
     diesel::update(connector_configs::table.filter(connector_configs::source.eq(source)))
-        .set(
-            connector_configs::next_run_at.eq(Some(Utc::now().naive_utc() + Duration::minutes(15))),
-        )
+        .set(connector_configs::next_run_at.eq(Some(Utc::now() + Duration::minutes(15))))
         .execute(c)
         .await?;
 
@@ -641,7 +648,7 @@ async fn prepare_demo_run(
     c: &mut AsyncPgConnection,
     target: &str,
     trigger: &str,
-    started_at: chrono::NaiveDateTime,
+    started_at: chrono::DateTime<Utc>,
 ) -> Result<ConnectorRun, DieselError> {
     let existing = connector_runs::table
         .filter(connector_runs::source.eq(DEMO_SOURCE))
@@ -661,17 +668,17 @@ async fn prepare_demo_run(
                     connector_runs::duration_ms.eq(0_i64),
                     connector_runs::error_message.eq::<Option<String>>(None),
                     connector_runs::started_at.eq(started_at),
-                    connector_runs::finished_at.eq::<Option<chrono::NaiveDateTime>>(None),
+                    connector_runs::finished_at.eq::<Option<chrono::DateTime<Utc>>>(None),
                     connector_runs::payload.eq::<Option<String>>(None),
-                    connector_runs::claimed_at.eq::<Option<chrono::NaiveDateTime>>(None),
+                    connector_runs::claimed_at.eq::<Option<chrono::DateTime<Utc>>>(None),
                     connector_runs::worker_id.eq::<Option<String>>(None),
                     connector_runs::attempt_count.eq(1),
                     connector_runs::max_attempts.eq(1),
                     connector_runs::next_attempt_at.eq(started_at),
-                    connector_runs::lease_expires_at.eq::<Option<chrono::NaiveDateTime>>(None),
-                    connector_runs::heartbeat_at.eq::<Option<chrono::NaiveDateTime>>(None),
-                    connector_runs::cancel_requested_at.eq::<Option<chrono::NaiveDateTime>>(None),
-                    connector_runs::cancelled_at.eq::<Option<chrono::NaiveDateTime>>(None),
+                    connector_runs::lease_expires_at.eq::<Option<chrono::DateTime<Utc>>>(None),
+                    connector_runs::heartbeat_at.eq::<Option<chrono::DateTime<Utc>>>(None),
+                    connector_runs::cancel_requested_at.eq::<Option<chrono::DateTime<Utc>>>(None),
+                    connector_runs::cancelled_at.eq::<Option<chrono::DateTime<Utc>>>(None),
                     connector_runs::parent_run_id.eq::<Option<i32>>(None),
                     connector_runs::snapshot_complete.eq::<Option<bool>>(None),
                     connector_runs::archived_count.eq(0),
@@ -745,7 +752,7 @@ async fn seed_demo_services(
     c: &mut AsyncPgConnection,
     maintainer_id: i32,
     run_id: i32,
-    now: chrono::NaiveDateTime,
+    now: chrono::DateTime<Utc>,
 ) -> Result<Vec<SeededRecord>, DieselError> {
     let items = vec![
         json!({
@@ -759,7 +766,7 @@ async fn seed_demo_services(
             "repository_url": "https://github.com/acme/checkout-api",
             "dashboard_url": "https://grafana.acme.test/d/checkout-api",
             "runbook_url": "https://docs.acme.test/runbooks/checkout-api",
-            "last_checked_at": (now - Duration::minutes(8)).format("%Y-%m-%dT%H:%M:%S").to_string()
+            "last_checked_at": (now - Duration::minutes(8)).to_rfc3339_opts(SecondsFormat::Secs, true)
         }),
         json!({
             "external_id": "build-runner",
@@ -772,7 +779,7 @@ async fn seed_demo_services(
             "repository_url": "https://github.com/acme/build-runner",
             "dashboard_url": "https://grafana.acme.test/d/build-runner",
             "runbook_url": "https://docs.acme.test/runbooks/build-runner",
-            "last_checked_at": (now - Duration::minutes(13)).format("%Y-%m-%dT%H:%M:%S").to_string()
+            "last_checked_at": (now - Duration::minutes(13)).to_rfc3339_opts(SecondsFormat::Secs, true)
         }),
         json!({
             "external_id": "erp-bridge",
@@ -785,7 +792,7 @@ async fn seed_demo_services(
             "repository_url": "https://github.com/acme/erp-bridge",
             "dashboard_url": "https://grafana.acme.test/d/erp-bridge",
             "runbook_url": "https://docs.acme.test/runbooks/erp-bridge",
-            "last_checked_at": (now - Duration::minutes(21)).format("%Y-%m-%dT%H:%M:%S").to_string()
+            "last_checked_at": (now - Duration::minutes(21)).to_rfc3339_opts(SecondsFormat::Secs, true)
         }),
     ];
     let mut records = Vec::new();
@@ -805,10 +812,10 @@ async fn seed_demo_services(
                 repository_url: item["repository_url"].as_str().map(ToOwned::to_owned),
                 dashboard_url: item["dashboard_url"].as_str().map(ToOwned::to_owned),
                 runbook_url: item["runbook_url"].as_str().map(ToOwned::to_owned),
-                last_checked_at: chrono::NaiveDateTime::parse_from_str(
+                last_checked_at: DateTime::parse_from_rfc3339(
                     item["last_checked_at"].as_str().unwrap(),
-                    "%Y-%m-%dT%H:%M:%S",
                 )
+                .map(|datetime| datetime.with_timezone(&Utc))
                 .ok(),
             },
             run_id,
@@ -828,9 +835,11 @@ async fn seed_demo_services(
 
 async fn seed_demo_work_cards(
     c: &mut AsyncPgConnection,
-    now: chrono::NaiveDateTime,
+    now: chrono::DateTime<Utc>,
+    assignee_user_id: Option<i32>,
 ) -> Result<Vec<SeededRecord>, DieselError> {
     let connector = ConnectorRepository::find_by_source(c, DEMO_SOURCE).await?;
+    let assignee_source_id = assignee_user_id.map(|_| "demo.portal-admin");
     let items = vec![
         json!({
             "external_id": "DP-104",
@@ -838,7 +847,12 @@ async fn seed_demo_work_cards(
             "status": "in_progress",
             "priority": "urgent",
             "assignee": "platform-team",
-            "due_at": (now + Duration::hours(4)).format("%Y-%m-%dT%H:%M:%S").to_string(),
+            "project": "Developer Portal",
+            "work_item_type": "Bug",
+            "assignee_source_id": assignee_source_id,
+            "assignee_user_id": assignee_user_id,
+            "due_at": (now + Duration::hours(4)).to_rfc3339_opts(SecondsFormat::Secs, true),
+            "source_updated_at": now.to_rfc3339_opts(SecondsFormat::Secs, true),
             "url": "https://dev.azure.test/work-items/DP-104"
         }),
         json!({
@@ -847,7 +861,12 @@ async fn seed_demo_work_cards(
             "status": "blocked",
             "priority": "high",
             "assignee": "release-captain",
-            "due_at": (now + Duration::days(1)).format("%Y-%m-%dT%H:%M:%S").to_string(),
+            "project": "Developer Portal",
+            "work_item_type": "Task",
+            "assignee_source_id": assignee_source_id,
+            "assignee_user_id": assignee_user_id,
+            "due_at": (now + Duration::days(1)).to_rfc3339_opts(SecondsFormat::Secs, true),
+            "source_updated_at": now.to_rfc3339_opts(SecondsFormat::Secs, true),
             "url": "https://dev.azure.test/work-items/DP-118"
         }),
     ];
@@ -863,16 +882,24 @@ async fn seed_demo_work_cards(
                 status: item["status"].as_str().unwrap().to_owned(),
                 priority: item["priority"].as_str().unwrap().to_owned(),
                 assignee: item["assignee"].as_str().map(ToOwned::to_owned),
-                due_at: chrono::NaiveDateTime::parse_from_str(
-                    item["due_at"].as_str().unwrap(),
-                    "%Y-%m-%dT%H:%M:%S",
-                )
-                .ok(),
+                project: item["project"].as_str().map(ToOwned::to_owned),
+                work_item_type: item["work_item_type"].as_str().map(ToOwned::to_owned),
+                assignee_source_id: item["assignee_source_id"].as_str().map(ToOwned::to_owned),
+                assignee_user_id: item["assignee_user_id"]
+                    .as_i64()
+                    .and_then(|value| i32::try_from(value).ok()),
+                due_at: DateTime::parse_from_rfc3339(item["due_at"].as_str().unwrap())
+                    .map(|datetime| datetime.with_timezone(&Utc))
+                    .ok(),
                 url: item["url"].as_str().map(ToOwned::to_owned),
                 connector_id: Some(connector.id),
                 owner_user_id: connector.owner_user_id,
                 maintainer_id: connector.maintainer_id,
-                source_updated_at: Some(now),
+                source_updated_at: DateTime::parse_from_rfc3339(
+                    item["source_updated_at"].as_str().unwrap(),
+                )
+                .map(|datetime| datetime.with_timezone(&Utc))
+                .ok(),
                 last_seen_run_id: None,
                 archived_at: None,
             },
@@ -893,7 +920,7 @@ async fn seed_demo_notifications(
     c: &mut AsyncPgConnection,
 ) -> Result<Vec<SeededRecord>, DieselError> {
     let connector = ConnectorRepository::find_by_source(c, DEMO_SOURCE).await?;
-    let source_updated_at = Utc::now().naive_utc();
+    let source_updated_at = Utc::now();
     let items = vec![
         json!({
             "external_id": "OUTLOOK-9001",
@@ -1011,7 +1038,7 @@ struct SeededRecord {
     snapshot: Option<String>,
 }
 
-fn demo_service_health_payload(maintainer_id: i32, now: chrono::NaiveDateTime) -> Value {
+fn demo_service_health_payload(maintainer_id: i32, now: chrono::DateTime<Utc>) -> Value {
     json!({
         "items": [{
             "external_id": "checkout-api",
@@ -1024,7 +1051,7 @@ fn demo_service_health_payload(maintainer_id: i32, now: chrono::NaiveDateTime) -
             "repository_url": "https://github.com/acme/checkout-api",
             "dashboard_url": "https://grafana.acme.test/d/checkout-api",
             "runbook_url": "https://docs.acme.test/runbooks/checkout-api",
-            "last_checked_at": (now - Duration::minutes(8)).format("%Y-%m-%dT%H:%M:%S").to_string()
+            "last_checked_at": (now - Duration::minutes(8)).to_rfc3339_opts(SecondsFormat::Secs, true)
         }, {
             "external_id": "build-runner",
             "maintainer_id": maintainer_id,
@@ -1036,7 +1063,7 @@ fn demo_service_health_payload(maintainer_id: i32, now: chrono::NaiveDateTime) -
             "repository_url": "https://github.com/acme/build-runner",
             "dashboard_url": "https://grafana.acme.test/d/build-runner",
             "runbook_url": "https://docs.acme.test/runbooks/build-runner",
-            "last_checked_at": (now - Duration::minutes(13)).format("%Y-%m-%dT%H:%M:%S").to_string()
+            "last_checked_at": (now - Duration::minutes(13)).to_rfc3339_opts(SecondsFormat::Secs, true)
         }, {
             "external_id": "erp-bridge",
             "maintainer_id": maintainer_id,
@@ -1048,7 +1075,7 @@ fn demo_service_health_payload(maintainer_id: i32, now: chrono::NaiveDateTime) -
             "repository_url": "https://github.com/acme/erp-bridge",
             "dashboard_url": "https://grafana.acme.test/d/erp-bridge",
             "runbook_url": "https://docs.acme.test/runbooks/erp-bridge",
-            "last_checked_at": (now - Duration::minutes(21)).format("%Y-%m-%dT%H:%M:%S").to_string()
+            "last_checked_at": (now - Duration::minutes(21)).to_rfc3339_opts(SecondsFormat::Secs, true)
         }]
     })
 }

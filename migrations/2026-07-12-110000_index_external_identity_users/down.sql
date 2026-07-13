@@ -1,0 +1,1 @@
+DROP INDEX external_identities_user_id_idx;

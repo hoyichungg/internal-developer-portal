@@ -37,8 +37,8 @@ use crate::validation::validate_request;
 
 #[rocket::get("/connectors")]
 pub async fn get_connectors(
-    mut db: Connection<DbConn>,
     auth: AuthenticatedUser,
+    mut db: Connection<DbConn>,
 ) -> ApiResult<Vec<Connector>> {
     let access = record_access_scope(&mut db, &auth).await?;
     let connectors = ConnectorRepository::find_multiple_for_access(&mut db, 100, &access).await?;
@@ -48,11 +48,11 @@ pub async fn get_connectors(
 
 #[rocket::get("/connectors/operations")]
 pub async fn get_connector_operations(
-    mut db: Connection<DbConn>,
     auth: AuthenticatedUser,
+    mut db: Connection<DbConn>,
 ) -> ApiResult<ConnectorOperationsResponse> {
     require_admin(&auth)?;
-    let now = Utc::now().naive_utc();
+    let now = Utc::now();
     let stale_after_seconds = connector_worker_stale_after_seconds();
     let workers = ConnectorWorkerRepository::find_recent(&mut db, 20)
         .await?
@@ -71,8 +71,8 @@ pub async fn get_connector_operations(
 
 #[rocket::get("/connectors/<source>")]
 pub async fn view_connector(
-    mut db: Connection<DbConn>,
     auth: AuthenticatedUser,
+    mut db: Connection<DbConn>,
     source: String,
 ) -> ApiResult<Connector> {
     let source = validate_source(source)?;
@@ -87,8 +87,8 @@ pub async fn view_connector(
 
 #[rocket::post("/connectors", format = "json", data = "<connector>")]
 pub async fn create_connector(
-    mut db: Connection<DbConn>,
     auth: AuthenticatedUser,
+    mut db: Connection<DbConn>,
     connector: Json<NewConnector>,
 ) -> CreatedApiResult<Connector> {
     require_admin(&auth)?;
@@ -132,8 +132,8 @@ pub async fn create_connector(
 
 #[rocket::put("/connectors/<source>", format = "json", data = "<connector>")]
 pub async fn update_connector(
-    mut db: Connection<DbConn>,
     auth: AuthenticatedUser,
+    mut db: Connection<DbConn>,
     source: String,
     connector: Json<ConnectorUpdate>,
 ) -> ApiResult<Connector> {
@@ -159,8 +159,8 @@ pub async fn update_connector(
 
 #[rocket::put("/connectors/<source>/scope", format = "json", data = "<scope>")]
 pub async fn update_connector_scope(
-    mut db: Connection<DbConn>,
     auth: AuthenticatedUser,
+    mut db: Connection<DbConn>,
     source: String,
     scope: Json<ConnectorScopeUpdate>,
 ) -> ApiResult<Connector> {
@@ -213,8 +213,8 @@ pub async fn update_connector_scope(
 
 #[rocket::delete("/connectors/<source>")]
 pub async fn delete_connector(
-    mut db: Connection<DbConn>,
     auth: AuthenticatedUser,
+    mut db: Connection<DbConn>,
     source: String,
 ) -> Result<rocket::response::status::NoContent, ApiError> {
     require_admin(&auth)?;
@@ -227,8 +227,8 @@ pub async fn delete_connector(
 
 #[rocket::get("/connectors/<source>/config", rank = 2)]
 pub async fn get_connector_config(
-    mut db: Connection<DbConn>,
     auth: AuthenticatedUser,
+    mut db: Connection<DbConn>,
     source: String,
 ) -> ApiResult<ConnectorConfigResponse> {
     require_admin(&auth)?;
@@ -240,8 +240,8 @@ pub async fn get_connector_config(
 
 #[rocket::put("/connectors/<source>/config", format = "json", data = "<config>")]
 pub async fn upsert_connector_config(
-    mut db: Connection<DbConn>,
     auth: AuthenticatedUser,
+    mut db: Connection<DbConn>,
     source: String,
     config: Json<ConnectorConfigUpdate>,
 ) -> ApiResult<ConnectorConfigResponse> {
@@ -283,8 +283,8 @@ pub async fn upsert_connector_config(
 
 #[rocket::get("/connectors/runs?<source>&<target>")]
 pub async fn get_connector_runs(
-    mut db: Connection<DbConn>,
     auth: AuthenticatedUser,
+    mut db: Connection<DbConn>,
     source: Option<String>,
     target: Option<String>,
 ) -> ApiResult<Vec<ConnectorRun>> {
@@ -306,8 +306,8 @@ pub async fn get_connector_runs(
 
 #[rocket::get("/connectors/runs/<id>", rank = 1)]
 pub async fn get_connector_run(
-    mut db: Connection<DbConn>,
     auth: AuthenticatedUser,
+    mut db: Connection<DbConn>,
     id: i32,
 ) -> ApiResult<ConnectorRunDetail> {
     require_admin(&auth)?;
@@ -326,8 +326,8 @@ pub async fn get_connector_run(
 
 #[rocket::post("/connectors/runs/<id>/retry")]
 pub async fn retry_connector_run(
-    mut db: Connection<DbConn>,
     auth: AuthenticatedUser,
+    mut db: Connection<DbConn>,
     id: i32,
 ) -> CreatedApiResult<ConnectorRunExecutionResponse> {
     require_admin(&auth)?;
@@ -408,8 +408,8 @@ mod tests {
 
 #[rocket::post("/connectors/runs/<id>/cancel")]
 pub async fn cancel_connector_run(
-    mut db: Connection<DbConn>,
     auth: AuthenticatedUser,
+    mut db: Connection<DbConn>,
     id: i32,
 ) -> ApiResult<ConnectorRun> {
     require_admin(&auth)?;
@@ -441,8 +441,8 @@ pub async fn cancel_connector_run(
 
 #[rocket::post("/connectors/<source>/runs", format = "json", data = "<request>")]
 pub async fn run_connector(
-    mut db: Connection<DbConn>,
     auth: AuthenticatedUser,
+    mut db: Connection<DbConn>,
     source: String,
     request: Json<ManualConnectorRunRequest>,
 ) -> CreatedApiResult<ConnectorRunExecutionResponse> {
@@ -533,8 +533,8 @@ pub async fn run_connector(
     data = "<request>"
 )]
 pub async fn import_calendar_events(
-    mut db: Connection<DbConn>,
     auth: AuthenticatedUser,
+    mut db: Connection<DbConn>,
     source: String,
     request: Json<CalendarEventImportRequest>,
 ) -> CreatedApiResult<ConnectorRunExecutionResponse> {
@@ -597,8 +597,8 @@ pub async fn import_calendar_events(
     data = "<request>"
 )]
 pub async fn import_work_cards(
-    mut db: Connection<DbConn>,
     auth: AuthenticatedUser,
+    mut db: Connection<DbConn>,
     source: String,
     request: Json<WorkCardImportRequest>,
 ) -> CreatedApiResult<ConnectorRunExecutionResponse> {
@@ -662,8 +662,8 @@ pub async fn import_work_cards(
     data = "<request>"
 )]
 pub async fn import_notifications(
-    mut db: Connection<DbConn>,
     auth: AuthenticatedUser,
+    mut db: Connection<DbConn>,
     source: String,
     request: Json<NotificationImportRequest>,
 ) -> CreatedApiResult<ConnectorRunExecutionResponse> {
@@ -728,8 +728,8 @@ pub async fn import_notifications(
     data = "<request>"
 )]
 pub async fn import_service_health(
-    mut db: Connection<DbConn>,
     auth: AuthenticatedUser,
+    mut db: Connection<DbConn>,
     source: String,
     request: Json<ServiceHealthImportRequest>,
 ) -> CreatedApiResult<ConnectorRunExecutionResponse> {

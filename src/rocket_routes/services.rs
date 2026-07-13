@@ -1,6 +1,7 @@
 use crate::api::{created, ok, ApiError, ApiResult, CreatedApiResult};
 use crate::auth::{
-    can_view_maintainer_members, require_maintainer_write_access, AuthenticatedUser,
+    can_view_maintainer_members, record_access_scope, require_maintainer_write_access,
+    AuthenticatedUser,
 };
 use crate::models::{
     Connector, ConnectorRun, Maintainer, MaintainerMember, NewService, Package, Service,
@@ -44,7 +45,7 @@ pub struct ServiceOwner {
 pub struct ServiceHealthOverview {
     pub status: String,
     pub lifecycle_status: String,
-    pub last_checked_at: Option<chrono::NaiveDateTime>,
+    pub last_checked_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -56,8 +57,8 @@ pub struct ServiceLinks {
 
 #[rocket::get("/services")]
 pub async fn get_services(
-    mut db: Connection<DbConn>,
     _auth: AuthenticatedUser,
+    mut db: Connection<DbConn>,
 ) -> ApiResult<Vec<Service>> {
     let services = ServiceRepository::find_multiple(&mut db, 100).await?;
     ok(services)
@@ -65,8 +66,8 @@ pub async fn get_services(
 
 #[rocket::get("/services/<id>")]
 pub async fn view_service(
-    mut db: Connection<DbConn>,
     _auth: AuthenticatedUser,
+    mut db: Connection<DbConn>,
     id: i32,
 ) -> ApiResult<Service> {
     let service = ServiceRepository::find(&mut db, id).await?;
@@ -75,13 +76,14 @@ pub async fn view_service(
 
 #[rocket::get("/services/<id>/overview")]
 pub async fn service_overview(
-    mut db: Connection<DbConn>,
     auth: AuthenticatedUser,
+    mut db: Connection<DbConn>,
     id: i32,
 ) -> ApiResult<ServiceOverview> {
     let service = ServiceRepository::find(&mut db, id).await?;
     let maintainer_id = service.maintainer_id;
     let source = service.source.clone();
+    let access = record_access_scope(&mut db, &auth).await?;
 
     let maintainer = MaintainerRepository::find(&mut db, maintainer_id).await?;
     let maintainer_members = if can_view_maintainer_members(&mut db, &auth, maintainer_id).await? {
@@ -95,10 +97,20 @@ pub async fn service_overview(
         Ok(connector) => Some(connector),
         Err(DieselError::NotFound) => None,
         Err(error) => return Err(error.into()),
+    }
+    .filter(|connector| access.allows(connector.owner_user_id, connector.maintainer_id));
+    let recent_connector_runs = if connector.is_some() {
+        ConnectorRunRepository::find_multiple_for_access(
+            &mut db,
+            10,
+            Some(&source),
+            Some("service_health"),
+            &access,
+        )
+        .await?
+    } else {
+        Vec::new()
     };
-    let recent_connector_runs =
-        ConnectorRunRepository::find_multiple(&mut db, 10, Some(&source), Some("service_health"))
-            .await?;
     let owner = ServiceOwner {
         id: maintainer.id,
         display_name: maintainer.display_name.clone(),
@@ -130,8 +142,8 @@ pub async fn service_overview(
 
 #[rocket::post("/services", format = "json", data = "<new_service>")]
 pub async fn create_service(
-    mut db: Connection<DbConn>,
     auth: AuthenticatedUser,
+    mut db: Connection<DbConn>,
     new_service: Json<NewService>,
 ) -> CreatedApiResult<Service> {
     let new_service = validate_request(new_service.into_inner())?;
@@ -156,8 +168,8 @@ pub async fn create_service(
 
 #[rocket::put("/services/<id>", format = "json", data = "<service>")]
 pub async fn update_service(
-    mut db: Connection<DbConn>,
     auth: AuthenticatedUser,
+    mut db: Connection<DbConn>,
     id: i32,
     service: Json<NewService>,
 ) -> ApiResult<Service> {
@@ -185,8 +197,8 @@ pub async fn update_service(
 
 #[rocket::delete("/services/<id>")]
 pub async fn delete_service(
-    mut db: Connection<DbConn>,
     auth: AuthenticatedUser,
+    mut db: Connection<DbConn>,
     id: i32,
 ) -> Result<NoContent, ApiError> {
     let service = ServiceRepository::find(&mut db, id).await?;

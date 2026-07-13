@@ -1,5 +1,5 @@
-use diesel::result::Error as DieselError;
-use rocket::http::Status;
+use diesel::result::{DatabaseErrorKind, Error as DieselError};
+use rocket::http::{Header, Status};
 use rocket::request::Request;
 use rocket::response::status::Custom;
 use rocket::response::{self, Responder};
@@ -32,6 +32,8 @@ pub enum ApiError {
     BadRequest,
     Validation(Vec<FieldViolation>),
     Unauthorized,
+    RateLimited { retry_after_seconds: i64 },
+    AuthenticationCapacityLimited { retry_after_seconds: i64 },
     Forbidden,
     NotFound,
     Database(DieselError),
@@ -61,6 +63,13 @@ pub fn unauthorized() -> ApiError {
     ApiError::Unauthorized
 }
 
+#[rocket::catch(429)]
+pub fn too_many_requests() -> ApiError {
+    ApiError::RateLimited {
+        retry_after_seconds: 60,
+    }
+}
+
 #[rocket::catch(403)]
 pub fn forbidden() -> ApiError {
     ApiError::Forbidden
@@ -87,10 +96,13 @@ pub fn service_unavailable() -> ApiError {
 }
 
 impl ApiError {
-    fn status(&self) -> Status {
+    pub(crate) fn status(&self) -> Status {
         match self {
             Self::BadRequest | Self::Validation(_) => Status::BadRequest,
             Self::Unauthorized => Status::Unauthorized,
+            Self::RateLimited { .. } | Self::AuthenticationCapacityLimited { .. } => {
+                Status::TooManyRequests
+            }
             Self::Forbidden => Status::Forbidden,
             Self::NotFound => Status::NotFound,
             Self::Database(_) | Self::Internal => Status::InternalServerError,
@@ -107,6 +119,16 @@ impl ApiError {
                 Some(errors.clone()),
             ),
             Self::Unauthorized => ("unauthorized", "Authentication is required.", None),
+            Self::RateLimited { .. } => (
+                "login_throttled",
+                "Too many sign-in attempts. Try again later.",
+                None,
+            ),
+            Self::AuthenticationCapacityLimited { .. } => (
+                "authentication_capacity_limited",
+                "Sign-in is temporarily at capacity. Try again later.",
+                None,
+            ),
             Self::Forbidden => (
                 "forbidden",
                 "You are not allowed to perform this action.",
@@ -139,6 +161,14 @@ impl From<DieselError> for ApiError {
     fn from(error: DieselError) -> Self {
         match error {
             DieselError::NotFound => Self::NotFound,
+            DieselError::DatabaseError(
+                kind @ (DatabaseErrorKind::ClosedConnection
+                | DatabaseErrorKind::UnableToSendCommand),
+                information,
+            ) => Self::DatabaseUnavailable(DieselError::DatabaseError(kind, information)),
+            DieselError::BrokenTransactionManager => {
+                Self::DatabaseUnavailable(DieselError::BrokenTransactionManager)
+            }
             error => Self::Database(error),
         }
     }
@@ -146,6 +176,15 @@ impl From<DieselError> for ApiError {
 
 impl<'r> Responder<'r, 'static> for ApiError {
     fn respond_to(self, request: &'r Request<'_>) -> response::Result<'static> {
+        let retry_after_seconds = match &self {
+            Self::RateLimited {
+                retry_after_seconds,
+            }
+            | Self::AuthenticationCapacityLimited {
+                retry_after_seconds,
+            } => Some(*retry_after_seconds),
+            _ => None,
+        };
         if matches!(
             self,
             Self::Database(_)
@@ -156,6 +195,71 @@ impl<'r> Responder<'r, 'static> for ApiError {
             rocket::error!("{:?}", self);
         }
 
-        Custom(self.status(), Json(self.body())).respond_to(request)
+        let mut response = Custom(self.status(), Json(self.body())).respond_to(request)?;
+        if let Some(retry_after_seconds) = retry_after_seconds {
+            response.set_header(Header::new(
+                "Retry-After",
+                retry_after_seconds.max(1).to_string(),
+            ));
+        }
+
+        Ok(response)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[rocket::get("/login-throttled")]
+    fn login_throttled() -> ApiError {
+        ApiError::RateLimited {
+            retry_after_seconds: 90,
+        }
+    }
+
+    #[rocket::get("/authentication-capacity-limited")]
+    fn authentication_capacity_limited() -> ApiError {
+        ApiError::AuthenticationCapacityLimited {
+            retry_after_seconds: 60,
+        }
+    }
+
+    #[test]
+    fn broken_database_connections_are_reported_as_unavailable() {
+        let error = ApiError::from(DieselError::BrokenTransactionManager);
+
+        assert!(matches!(error, ApiError::DatabaseUnavailable(_)));
+        assert_eq!(error.status(), Status::ServiceUnavailable);
+    }
+
+    #[test]
+    fn authentication_capacity_has_a_distinct_structured_429_contract() {
+        let rocket = rocket::build().mount(
+            "/",
+            rocket::routes![login_throttled, authentication_capacity_limited],
+        );
+        let client = rocket::local::blocking::Client::tracked(rocket).unwrap();
+
+        let login_response = client.get("/login-throttled").dispatch();
+        assert_eq!(login_response.status(), Status::TooManyRequests);
+        assert_eq!(login_response.headers().get_one("Retry-After"), Some("90"));
+        assert_eq!(
+            login_response.into_json::<serde_json::Value>().unwrap()["error"]["code"],
+            "login_throttled"
+        );
+
+        let capacity_response = client.get("/authentication-capacity-limited").dispatch();
+        assert_eq!(capacity_response.status(), Status::TooManyRequests);
+        assert_eq!(
+            capacity_response.headers().get_one("Retry-After"),
+            Some("60")
+        );
+        let body = capacity_response.into_json::<serde_json::Value>().unwrap();
+        assert_eq!(body["error"]["code"], "authentication_capacity_limited");
+        assert_eq!(
+            body["error"]["message"],
+            "Sign-in is temporarily at capacity. Try again later."
+        );
     }
 }

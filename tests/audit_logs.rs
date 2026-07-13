@@ -2,6 +2,7 @@ use reqwest::{blocking::Client, StatusCode};
 use serde_json::{json, Value};
 
 pub mod common;
+use common::CookieAuthRequest;
 
 #[test]
 fn test_writes_create_audit_log_entries() {
@@ -11,7 +12,7 @@ fn test_writes_create_audit_log_entries() {
 
     let response = client
         .post(format!("{}/packages", common::APP_HOST))
-        .bearer_auth(&auth.token)
+        .cookie_auth(&auth.cookie)
         .json(&json!({
             "maintainer_id": maintainer["id"],
             "slug": "audit-api",
@@ -33,7 +34,7 @@ fn test_writes_create_audit_log_entries() {
             common::APP_HOST,
             package["id"]
         ))
-        .bearer_auth(&auth.token)
+        .cookie_auth(&auth.cookie)
         .send()
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);

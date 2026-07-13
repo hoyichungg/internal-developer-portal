@@ -3,7 +3,7 @@ name = "internal-developer-portal"
 default-run = "server"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.81"
+rust-version = "1.85"
 description = "Internal developer portal for service health, work cards, connector operations, audit logs, and team dashboards."
 
 [dependencies]
@@ -24,3 +24,4 @@ aes-gcm = "0.10"
 base64 = "0.22"
 sha2 = "0.10"
 utoipa = { version = "5.5.0", features = ["chrono"] }
+jsonwebtoken = { version = "=10.3.0", default-features = false, features = ["rust_crypto"] }

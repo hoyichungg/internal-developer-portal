@@ -10,7 +10,7 @@ const maintainer = {
   id: 1,
   display_name: "Platform Team",
   email: "platform@example.test",
-  created_at: "2026-05-19T00:00:00"
+  created_at: "2026-05-19T00:00:00Z"
 };
 
 const service = {
@@ -25,8 +25,8 @@ const service = {
   dashboard_url: null,
   runbook_url: null,
   last_checked_at: null,
-  created_at: "2026-05-19T00:00:00",
-  updated_at: "2026-05-19T00:00:00",
+  created_at: "2026-05-19T00:00:00Z",
+  updated_at: "2026-05-19T00:00:00Z",
   source: "monitoring",
   external_id: "identity-api"
 };
@@ -38,11 +38,11 @@ const packageRecord = {
   name: "Identity SDK",
   version: "1.0.0",
   description: null,
-  created_at: "2026-05-19T00:00:00",
+  created_at: "2026-05-19T00:00:00Z",
   status: "active",
   repository_url: null,
   documentation_url: null,
-  updated_at: "2026-05-19T00:00:00"
+  updated_at: "2026-05-19T00:00:00Z"
 };
 
 describe("CatalogView capability controls", () => {
@@ -70,7 +70,7 @@ describe("CatalogView capability controls", () => {
       "GET /services": [service],
       "GET /packages": [packageRecord],
       "GET /users": [
-        { id: 1, username: "admin", roles: ["admin"], created_at: "2026-05-19T00:00:00" }
+        { id: 1, username: "admin", roles: ["admin"], created_at: "2026-05-19T00:00:00Z" }
       ],
       "GET /maintainers/1/members": []
     });
@@ -93,6 +93,7 @@ function viewerUser(): MeResponse {
     id: 2,
     username: "viewer",
     roles: ["member"],
+    auth_method: "password",
     capabilities: {
       manage_connectors: false,
       view_audit: false,
@@ -110,6 +111,7 @@ function adminUser(): MeResponse {
     id: 1,
     username: "admin",
     roles: ["admin"],
+    auth_method: "password",
     capabilities: {
       manage_connectors: true,
       view_audit: true,

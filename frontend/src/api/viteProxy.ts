@@ -1,5 +1,6 @@
 export const API_PROXY_PREFIXES = [
   "/audit-logs",
+  "/auth",
   "/connectors",
   "/dashboard",
   "/health",
@@ -13,6 +14,7 @@ export const API_PROXY_PREFIXES = [
   "/packages",
   "/readyz",
   "/services",
+  "/sessions",
   "/users",
   "/work-cards"
 ] as const;

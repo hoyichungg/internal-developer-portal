@@ -21,7 +21,6 @@ struct MicrosoftGraphCalendarConfig {
     start_at: Option<String>,
     end_at: Option<String>,
     lookahead_hours: Option<i64>,
-    time_zone: Option<String>,
     top: Option<u64>,
     max_pages: Option<u64>,
     max_items: Option<u64>,
@@ -63,7 +62,7 @@ pub(in crate::connector_adapters) async fn fetch_microsoft_graph_calendar_events
             ("endDateTime", end_at),
             (
                 "$select",
-                "id,subject,bodyPreview,importance,isAllDay,isCancelled,showAs,webLink,organizer,location,start,end,onlineMeetingUrl,onlineMeeting"
+                "id,subject,bodyPreview,importance,isAllDay,isCancelled,showAs,webLink,organizer,location,start,end,originalStartTimeZone,originalEndTimeZone,onlineMeetingUrl,onlineMeeting"
                     .to_owned(),
             ),
             ("$orderby", "start/dateTime".to_owned()),
@@ -86,17 +85,11 @@ pub(in crate::connector_adapters) async fn fetch_microsoft_graph_calendar_events
         "https://graph.microsoft.com/Calendars.Read offline_access",
     )
     .await?;
-    let prefer = config
-        .time_zone
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(outlook_timezone_preference);
     let collection = fetch_graph_collection(
         &client,
         &request_url,
         &access_token.token,
-        prefer.as_deref(),
+        None,
         "microsoft_graph_calendar",
         max_pages,
         max_items,
@@ -204,7 +197,7 @@ fn graph_event_datetime(item: &Value, field_name: &str) -> Option<String> {
     let datetime = field_string(value, &["dateTime", "date_time"])?;
     let datetime = normalize_naive_datetime(&datetime).unwrap_or(datetime);
 
-    match field_string(value, &["timeZone", "time_zone"]) {
+    match graph_event_time_zone(item) {
         Some(time_zone) => Some(format!("{datetime} {time_zone}")),
         None => Some(datetime),
     }
@@ -218,9 +211,20 @@ fn graph_event_datetime_value(item: &Value, field_name: &str) -> Option<String> 
 }
 
 fn graph_event_time_zone(item: &Value) -> Option<String> {
-    ["start", "end"].into_iter().find_map(|field_name| {
-        item.get(field_name)
-            .and_then(|value| field_string(value, &["timeZone", "time_zone"]))
+    field_string(
+        item,
+        &[
+            "originalStartTimeZone",
+            "original_start_time_zone",
+            "originalEndTimeZone",
+            "original_end_time_zone",
+        ],
+    )
+    .or_else(|| {
+        ["start", "end"].into_iter().find_map(|field_name| {
+            item.get(field_name)
+                .and_then(|value| field_string(value, &["timeZone", "time_zone"]))
+        })
     })
 }
 
@@ -319,19 +323,9 @@ fn graph_calendar_time_window(config: &MicrosoftGraphCalendarConfig) -> (String,
     (start_at, end_at)
 }
 
-fn outlook_timezone_preference(time_zone: &str) -> String {
-    let sanitized = time_zone
-        .trim()
-        .replace(['\r', '\n'], "")
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"");
-
-    format!("outlook.timezone=\"{sanitized}\"")
-}
-
 #[cfg(test)]
 mod tests {
-    use super::fetch_microsoft_graph_calendar_events;
+    use super::{fetch_microsoft_graph_calendar_events, normalize_graph_calendar_event};
     use crate::connector_adapters::shared::test_support::{MockHttpServer, MockResponse};
     use serde_json::json;
 
@@ -339,7 +333,7 @@ mod tests {
     async fn follows_graph_calendar_next_links_and_merges_pages() {
         let server = MockHttpServer::start(vec![
             MockResponse::json(
-                r#"{"value":[{"id":"evt-1","subject":"First","start":{"dateTime":"2026-07-10T09:00:00","timeZone":"UTC"},"end":{"dateTime":"2026-07-10T09:30:00","timeZone":"UTC"},"organizer":{"emailAddress":{"name":"Taylor Lin"}},"location":{"displayName":"Teams"}}],"@odata.nextLink":"{{base_url}}/calendar?page=2"}"#,
+                r#"{"value":[{"id":"evt-1","subject":"First","originalStartTimeZone":"Taipei Standard Time","originalEndTimeZone":"Taipei Standard Time","start":{"dateTime":"2026-07-10T09:00:00","timeZone":"UTC"},"end":{"dateTime":"2026-07-10T09:30:00","timeZone":"UTC"},"organizer":{"emailAddress":{"name":"Taylor Lin"}},"location":{"displayName":"Teams"}}],"@odata.nextLink":"{{base_url}}/calendar?page=2"}"#,
             ),
             MockResponse::json(
                 r#"{"value":[{"id":"evt-2","subject":"Second","start":{"dateTime":"2026-07-10T10:00:00","timeZone":"UTC"},"end":{"dateTime":"2026-07-10T10:30:00","timeZone":"UTC"}}]}"#,
@@ -364,8 +358,9 @@ mod tests {
 
         assert_eq!(items.len(), 2);
         assert_eq!(items[0]["external_id"], "evt-1");
-        assert_eq!(items[0]["starts_at"], "2026-07-10T09:00:00");
-        assert_eq!(items[0]["ends_at"], "2026-07-10T09:30:00");
+        assert_eq!(items[0]["starts_at"], "2026-07-10T09:00:00Z");
+        assert_eq!(items[0]["ends_at"], "2026-07-10T09:30:00Z");
+        assert_eq!(items[0]["time_zone"], "Taipei Standard Time");
         assert_eq!(items[0]["organizer"], "Taylor Lin");
         assert_eq!(items[0]["location"], "Teams");
         assert_eq!(items[1]["external_id"], "evt-2");
@@ -375,8 +370,38 @@ mod tests {
         assert!(requests
             .iter()
             .all(|request| request.contains("authorization: Bearer test-token")));
+        assert!(requests.first().is_some_and(|request| {
+            request.contains("originalStartTimeZone") && request.contains("originalEndTimeZone")
+        }));
         assert!(requests
             .iter()
-            .all(|request| request.contains("prefer: outlook.timezone=\"Taipei Standard Time\"")));
+            .all(|request| !request.to_ascii_lowercase().contains("\r\nprefer:")));
+    }
+
+    #[test]
+    fn normalizes_offset_calendar_timestamps_to_utc_and_preserves_original_timezone() {
+        let event = normalize_graph_calendar_event(&json!({
+            "id": "evt-offset",
+            "subject": "Offset meeting",
+            "originalStartTimeZone": "Taipei Standard Time",
+            "originalEndTimeZone": "Taipei Standard Time",
+            "start": {
+                "dateTime": "2026-07-10T17:00:00+08:00",
+                "timeZone": "Taipei Standard Time"
+            },
+            "end": {
+                "dateTime": "2026-07-10T17:30:00+08:00",
+                "timeZone": "Taipei Standard Time"
+            },
+            "isAllDay": false,
+            "isCancelled": false
+        }));
+
+        assert_eq!(event["starts_at"], "2026-07-10T09:00:00Z");
+        assert_eq!(event["ends_at"], "2026-07-10T09:30:00Z");
+        assert_eq!(event["time_zone"], "Taipei Standard Time");
+        assert!(event["body"]
+            .as_str()
+            .is_some_and(|body| body.contains("2026-07-10T09:00:00Z Taipei Standard Time")));
     }
 }

@@ -1,4 +1,5 @@
 import {
+  IconBriefcase,
   IconHistory,
   IconLayoutDashboard,
   IconPlugConnected,
@@ -16,6 +17,7 @@ type NavigationItem = {
 
 export const NAV_ITEMS: NavigationItem[] = [
   { id: "dashboard", label: "Dashboard", icon: IconLayoutDashboard },
+  { id: "my-work", label: "My Work", icon: IconBriefcase },
   {
     id: "connectors",
     label: "Connectors",

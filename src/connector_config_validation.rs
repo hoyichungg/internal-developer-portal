@@ -71,6 +71,58 @@ fn validate_azure_devops(errors: &mut Vec<FieldViolation>, target: &str, config:
     );
     validate_positive_u64(errors, config, "timeout_seconds");
     validate_u64_range(errors, config, "max_items", 1, 10_000);
+    validate_azure_due_date_field(errors, config);
+    validate_azure_assignee_mappings(errors, config);
+}
+
+fn validate_azure_due_date_field(errors: &mut Vec<FieldViolation>, config: &Value) {
+    let Some(value) = config.get("due_date_field") else {
+        return;
+    };
+    let Some(field) = value
+        .as_str()
+        .map(str::trim)
+        .filter(|field| !field.is_empty())
+    else {
+        errors.push(FieldViolation::new(
+            "config",
+            "due_date_field must be a non-empty string when provided",
+        ));
+        return;
+    };
+    if field.len() > 128 {
+        errors.push(FieldViolation::new(
+            "config",
+            "due_date_field must be at most 128 characters",
+        ));
+    }
+}
+
+fn validate_azure_assignee_mappings(errors: &mut Vec<FieldViolation>, config: &Value) {
+    let Some(value) = config.get("assignee_user_mappings") else {
+        return;
+    };
+    let Some(mappings) = value.as_object() else {
+        errors.push(FieldViolation::new(
+            "config",
+            "assignee_user_mappings must be an object of source descriptors to portal user ids",
+        ));
+        return;
+    };
+    for (descriptor, user_id) in mappings {
+        if descriptor.trim().is_empty() || descriptor.len() > 512 {
+            errors.push(FieldViolation::new(
+                "config",
+                "assignee_user_mappings keys must be non-empty source descriptors of at most 512 characters",
+            ));
+        }
+        if !matches!(user_id.as_i64(), Some(value) if (1..=i64::from(i32::MAX)).contains(&value)) {
+            errors.push(FieldViolation::new(
+                "config",
+                "assignee_user_mappings values must be positive portal user ids",
+            ));
+        }
+    }
 }
 
 fn adapter_name<'a>(errors: &mut Vec<FieldViolation>, config: &'a Value) -> Option<&'a str> {
@@ -533,6 +585,55 @@ mod tests {
         assert!(messages
             .iter()
             .any(|message| message.contains("project must be set")));
+    }
+
+    #[test]
+    fn accepts_explicit_azure_assignee_mappings_and_due_field() {
+        let errors = validate(
+            "work_cards",
+            json!({
+                "adapter": "azure_devops",
+                "wiql_url": "https://dev.azure.test/wiql",
+                "work_items_url": "https://dev.azure.test/workitemsbatch",
+                "due_date_field": "Custom.TargetDate",
+                "assignee_user_mappings": {
+                    "aad.explicit-user": 42
+                }
+            }),
+        );
+
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+    }
+
+    #[test]
+    fn rejects_ambiguous_azure_assignee_mapping_shapes() {
+        let errors = validate(
+            "work_cards",
+            json!({
+                "adapter": "azure_devops",
+                "wiql_url": "https://dev.azure.test/wiql",
+                "work_items_url": "https://dev.azure.test/workitemsbatch",
+                "due_date_field": " ",
+                "assignee_user_mappings": {
+                    "": 1,
+                    "aad.invalid-user": 0
+                }
+            }),
+        );
+        let messages = errors
+            .iter()
+            .map(|error| error.message.as_str())
+            .collect::<Vec<_>>();
+
+        assert!(messages
+            .iter()
+            .any(|message| message.contains("due_date_field must be a non-empty string")));
+        assert!(messages
+            .iter()
+            .any(|message| message.contains("keys must be non-empty source descriptors")));
+        assert!(messages
+            .iter()
+            .any(|message| message.contains("values must be positive portal user ids")));
     }
 
     #[test]

@@ -2,6 +2,7 @@ use reqwest::{blocking::Client, StatusCode};
 use serde_json::{json, Value};
 
 pub mod common;
+use common::CookieAuthRequest;
 
 #[test]
 fn test_connector_data_scopes_protect_records_and_operational_overviews() {
@@ -11,10 +12,10 @@ fn test_connector_data_scopes_protect_records_and_operational_overviews() {
     let team_member = common::create_test_auth(&client, "member");
     let outsider = common::create_test_auth(&client, "member");
 
-    let maintainer = create_maintainer(&client, &admin.token);
+    let maintainer = create_maintainer(&client, &admin.cookie);
     add_maintainer_member(
         &client,
-        &admin.token,
+        &admin.cookie,
         maintainer["id"].as_i64().unwrap(),
         team_member.user_id,
     );
@@ -24,10 +25,10 @@ fn test_connector_data_scopes_protect_records_and_operational_overviews() {
     let team_source = common::unique_name("scope_team");
 
     let global_connector =
-        create_connector(&client, &admin.token, &global_source, "global", None, None);
+        create_connector(&client, &admin.cookie, &global_source, "global", None, None);
     let personal_connector = create_connector(
         &client,
-        &admin.token,
+        &admin.cookie,
         &personal_source,
         "user",
         Some(personal_owner.user_id),
@@ -35,7 +36,7 @@ fn test_connector_data_scopes_protect_records_and_operational_overviews() {
     );
     let team_connector = create_connector(
         &client,
-        &admin.token,
+        &admin.cookie,
         &team_source,
         "maintainer",
         None,
@@ -54,34 +55,34 @@ fn test_connector_data_scopes_protect_records_and_operational_overviews() {
 
     assert_connector_visibility(
         &client,
-        &admin.token,
+        &admin.cookie,
         [&global_source, &personal_source, &team_source],
         [],
     );
     assert_connector_visibility(
         &client,
-        &personal_owner.token,
+        &personal_owner.cookie,
         [&global_source, &personal_source],
         [&team_source],
     );
     assert_connector_visibility(
         &client,
-        &team_member.token,
+        &team_member.cookie,
         [&global_source, &team_source],
         [&personal_source],
     );
     assert_connector_visibility(
         &client,
-        &outsider.token,
+        &outsider.cookie,
         [&global_source],
         [&personal_source, &team_source],
     );
 
     for token in [
-        admin.token.as_str(),
-        personal_owner.token.as_str(),
-        team_member.token.as_str(),
-        outsider.token.as_str(),
+        admin.cookie.as_str(),
+        personal_owner.cookie.as_str(),
+        team_member.cookie.as_str(),
+        outsider.cookie.as_str(),
     ] {
         assert_detail_status(
             &client,
@@ -93,49 +94,49 @@ fn test_connector_data_scopes_protect_records_and_operational_overviews() {
 
     assert_detail_status(
         &client,
-        &personal_owner.token,
+        &personal_owner.cookie,
         &format!("/connectors/{personal_source}"),
         StatusCode::OK,
     );
     assert_detail_status(
         &client,
-        &personal_owner.token,
+        &personal_owner.cookie,
         &format!("/connectors/{team_source}"),
         StatusCode::NOT_FOUND,
     );
     assert_detail_status(
         &client,
-        &team_member.token,
+        &team_member.cookie,
         &format!("/connectors/{team_source}"),
         StatusCode::OK,
     );
     assert_detail_status(
         &client,
-        &team_member.token,
+        &team_member.cookie,
         &format!("/connectors/{personal_source}"),
         StatusCode::NOT_FOUND,
     );
     for source in [&personal_source, &team_source] {
         assert_detail_status(
             &client,
-            &outsider.token,
+            &outsider.cookie,
             &format!("/connectors/{source}"),
             StatusCode::NOT_FOUND,
         );
         assert_detail_status(
             &client,
-            &admin.token,
+            &admin.cookie,
             &format!("/connectors/{source}"),
             StatusCode::OK,
         );
     }
 
-    let global_work = import_work_card(&client, &admin.token, &global_source);
-    let personal_work = import_work_card(&client, &admin.token, &personal_source);
-    let team_work = import_work_card(&client, &admin.token, &team_source);
-    let global_notification = import_notification(&client, &admin.token, &global_source);
-    let personal_notification = import_notification(&client, &admin.token, &personal_source);
-    let team_notification = import_notification(&client, &admin.token, &team_source);
+    let global_work = import_work_card(&client, &admin.cookie, &global_source);
+    let personal_work = import_work_card(&client, &admin.cookie, &personal_source);
+    let team_work = import_work_card(&client, &admin.cookie, &team_source);
+    let global_notification = import_notification(&client, &admin.cookie, &global_source);
+    let personal_notification = import_notification(&client, &admin.cookie, &personal_source);
+    let team_notification = import_notification(&client, &admin.cookie, &team_source);
 
     assert_record_scope(&global_work, &global_connector, None, None);
     assert_record_scope(
@@ -166,28 +167,28 @@ fn test_connector_data_scopes_protect_records_and_operational_overviews() {
 
     assert_record_list_visibility(
         &client,
-        &personal_owner.token,
+        &personal_owner.cookie,
         "/work-cards",
         [id(&global_work), id(&personal_work)],
         [id(&team_work)],
     );
     assert_record_list_visibility(
         &client,
-        &team_member.token,
+        &team_member.cookie,
         "/work-cards",
         [id(&global_work), id(&team_work)],
         [id(&personal_work)],
     );
     assert_record_list_visibility(
         &client,
-        &outsider.token,
+        &outsider.cookie,
         "/work-cards",
         [id(&global_work)],
         [id(&personal_work), id(&team_work)],
     );
     assert_record_list_visibility(
         &client,
-        &admin.token,
+        &admin.cookie,
         "/work-cards",
         [id(&global_work), id(&personal_work), id(&team_work)],
         [],
@@ -195,28 +196,28 @@ fn test_connector_data_scopes_protect_records_and_operational_overviews() {
 
     assert_record_list_visibility(
         &client,
-        &personal_owner.token,
+        &personal_owner.cookie,
         "/notifications",
         [id(&global_notification), id(&personal_notification)],
         [id(&team_notification)],
     );
     assert_record_list_visibility(
         &client,
-        &team_member.token,
+        &team_member.cookie,
         "/notifications",
         [id(&global_notification), id(&team_notification)],
         [id(&personal_notification)],
     );
     assert_record_list_visibility(
         &client,
-        &outsider.token,
+        &outsider.cookie,
         "/notifications",
         [id(&global_notification)],
         [id(&personal_notification), id(&team_notification)],
     );
     assert_record_list_visibility(
         &client,
-        &admin.token,
+        &admin.cookie,
         "/notifications",
         [
             id(&global_notification),
@@ -228,14 +229,14 @@ fn test_connector_data_scopes_protect_records_and_operational_overviews() {
 
     for (token, allowed_work, hidden_work, allowed_notification, hidden_notification) in [
         (
-            personal_owner.token.as_str(),
+            personal_owner.cookie.as_str(),
             id(&personal_work),
             id(&team_work),
             id(&personal_notification),
             id(&team_notification),
         ),
         (
-            team_member.token.as_str(),
+            team_member.cookie.as_str(),
             id(&team_work),
             id(&personal_work),
             id(&team_notification),
@@ -273,35 +274,35 @@ fn test_connector_data_scopes_protect_records_and_operational_overviews() {
         format!("/notifications/{}", id(&personal_notification)),
         format!("/notifications/{}", id(&team_notification)),
     ] {
-        assert_detail_status(&client, &outsider.token, &path, StatusCode::NOT_FOUND);
-        assert_detail_status(&client, &admin.token, &path, StatusCode::OK);
+        assert_detail_status(&client, &outsider.cookie, &path, StatusCode::NOT_FOUND);
+        assert_detail_status(&client, &admin.cookie, &path, StatusCode::OK);
     }
 
-    let global_failed_run = create_failed_run(&client, &admin.token, &global_source);
-    let personal_failed_run = create_failed_run(&client, &admin.token, &personal_source);
-    let team_failed_run = create_failed_run(&client, &admin.token, &team_source);
+    let global_failed_run = create_failed_run(&client, &admin.cookie, &global_source);
+    let personal_failed_run = create_failed_run(&client, &admin.cookie, &personal_source);
+    let team_failed_run = create_failed_run(&client, &admin.cookie, &team_source);
 
     // The same user belongs to two maintainers so an explicitly selected team
     // scope can be verified independently from the user's broader access.
-    let second_maintainer = create_maintainer(&client, &admin.token);
+    let second_maintainer = create_maintainer(&client, &admin.cookie);
     add_maintainer_member(
         &client,
-        &admin.token,
+        &admin.cookie,
         second_maintainer["id"].as_i64().unwrap(),
         team_member.user_id,
     );
     let second_team_source = common::unique_name("scope_team_two");
     let second_team_connector = create_connector(
         &client,
-        &admin.token,
+        &admin.cookie,
         &second_team_source,
         "maintainer",
         None,
         Some(second_maintainer["id"].as_i64().unwrap()),
     );
-    let second_team_work = import_work_card(&client, &admin.token, &second_team_source);
-    let second_team_notification = import_notification(&client, &admin.token, &second_team_source);
-    let second_team_failed_run = create_failed_run(&client, &admin.token, &second_team_source);
+    let second_team_work = import_work_card(&client, &admin.cookie, &second_team_source);
+    let second_team_notification = import_notification(&client, &admin.cookie, &second_team_source);
+    let second_team_failed_run = create_failed_run(&client, &admin.cookie, &second_team_source);
     assert_record_scope(
         &second_team_work,
         &second_team_connector,
@@ -316,20 +317,20 @@ fn test_connector_data_scopes_protect_records_and_operational_overviews() {
     );
     assert_detail_status(
         &client,
-        &team_member.token,
+        &team_member.cookie,
         &format!("/connectors/{second_team_source}"),
         StatusCode::OK,
     );
     assert_detail_status(
         &client,
-        &outsider.token,
+        &outsider.cookie,
         &format!("/connectors/{second_team_source}"),
         StatusCode::NOT_FOUND,
     );
 
     assert_dashboard_source_counts(
         &client,
-        &personal_owner.token,
+        &personal_owner.cookie,
         &personal_source,
         1,
         1,
@@ -338,18 +339,18 @@ fn test_connector_data_scopes_protect_records_and_operational_overviews() {
     );
     assert_dashboard_source_counts(
         &client,
-        &team_member.token,
+        &team_member.cookie,
         &team_source,
         1,
         1,
         [id(&team_work)],
         [id(&team_notification)],
     );
-    assert_dashboard_source_counts(&client, &outsider.token, &personal_source, 0, 0, [], []);
-    assert_dashboard_source_counts(&client, &outsider.token, &team_source, 0, 0, [], []);
+    assert_dashboard_source_counts(&client, &outsider.cookie, &personal_source, 0, 0, [], []);
+    assert_dashboard_source_counts(&client, &outsider.cookie, &team_source, 0, 0, [], []);
     assert_dashboard_source_counts(
         &client,
-        &admin.token,
+        &admin.cookie,
         &personal_source,
         1,
         1,
@@ -358,7 +359,7 @@ fn test_connector_data_scopes_protect_records_and_operational_overviews() {
     );
     assert_dashboard_source_counts(
         &client,
-        &admin.token,
+        &admin.cookie,
         &team_source,
         1,
         1,
@@ -367,21 +368,21 @@ fn test_connector_data_scopes_protect_records_and_operational_overviews() {
     );
     assert_dashboard_run_scope(
         &client,
-        &personal_owner.token,
+        &personal_owner.cookie,
         &format!("source={personal_source}"),
         [id(&personal_failed_run)],
         [id(&global_failed_run), id(&team_failed_run)],
     );
     assert_dashboard_run_scope(
         &client,
-        &team_member.token,
+        &team_member.cookie,
         &format!("source={team_source}"),
         [id(&team_failed_run)],
         [id(&global_failed_run), id(&second_team_failed_run)],
     );
     assert_dashboard_run_scope(
         &client,
-        &admin.token,
+        &admin.cookie,
         &format!("source={personal_source}"),
         [id(&personal_failed_run)],
         [
@@ -393,7 +394,7 @@ fn test_connector_data_scopes_protect_records_and_operational_overviews() {
 
     assert_dashboard_maintainer_scope(
         &client,
-        &team_member.token,
+        &team_member.cookie,
         maintainer["id"].as_i64().unwrap(),
         id(&team_work),
         id(&team_notification),
@@ -404,7 +405,7 @@ fn test_connector_data_scopes_protect_records_and_operational_overviews() {
     );
     assert_dashboard_maintainer_scope(
         &client,
-        &team_member.token,
+        &team_member.cookie,
         second_maintainer["id"].as_i64().unwrap(),
         id(&second_team_work),
         id(&second_team_notification),
@@ -415,7 +416,7 @@ fn test_connector_data_scopes_protect_records_and_operational_overviews() {
     );
     assert_dashboard_maintainer_scope(
         &client,
-        &admin.token,
+        &admin.cookie,
         maintainer["id"].as_i64().unwrap(),
         id(&team_work),
         id(&team_notification),
@@ -432,14 +433,14 @@ fn test_connector_data_scopes_protect_records_and_operational_overviews() {
             id(&second_team_failed_run),
         ],
     );
-    for token in [&personal_owner.token, &outsider.token] {
+    for token in [&personal_owner.cookie, &outsider.cookie] {
         let response = client
             .get(format!(
                 "{}/dashboard?maintainer_id={}",
                 common::APP_HOST,
                 maintainer["id"].as_i64().unwrap()
             ))
-            .bearer_auth(token)
+            .cookie_auth(token)
             .send()
             .unwrap();
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
@@ -447,7 +448,7 @@ fn test_connector_data_scopes_protect_records_and_operational_overviews() {
 
     assert_overview_visibility(
         &client,
-        &personal_owner.token,
+        &personal_owner.cookie,
         [id(&global_work), id(&personal_work)],
         [id(&team_work), id(&second_team_work)],
         [id(&global_notification), id(&personal_notification)],
@@ -457,7 +458,7 @@ fn test_connector_data_scopes_protect_records_and_operational_overviews() {
     );
     assert_overview_visibility(
         &client,
-        &team_member.token,
+        &team_member.cookie,
         [id(&global_work), id(&team_work), id(&second_team_work)],
         [id(&personal_work)],
         [
@@ -475,7 +476,7 @@ fn test_connector_data_scopes_protect_records_and_operational_overviews() {
     );
     assert_overview_visibility(
         &client,
-        &outsider.token,
+        &outsider.cookie,
         [id(&global_work)],
         [id(&personal_work), id(&team_work), id(&second_team_work)],
         [id(&global_notification)],
@@ -493,7 +494,7 @@ fn test_connector_data_scopes_protect_records_and_operational_overviews() {
     );
     assert_overview_visibility(
         &client,
-        &admin.token,
+        &admin.cookie,
         [
             id(&global_work),
             id(&personal_work),
@@ -523,10 +524,10 @@ fn test_connector_data_scopes_protect_records_and_operational_overviews() {
         &team_notification,
         &second_team_notification,
     ] {
-        delete_record(&client, &admin.token, "/notifications", id(record));
+        delete_record(&client, &admin.cookie, "/notifications", id(record));
     }
     for record in [&global_work, &personal_work, &team_work, &second_team_work] {
-        delete_record(&client, &admin.token, "/work-cards", id(record));
+        delete_record(&client, &admin.cookie, "/work-cards", id(record));
     }
     for source in [
         &global_source,
@@ -536,7 +537,7 @@ fn test_connector_data_scopes_protect_records_and_operational_overviews() {
     ] {
         let response = client
             .delete(format!("{}/connectors/{source}", common::APP_HOST))
-            .bearer_auth(&admin.token)
+            .cookie_auth(&admin.cookie)
             .send()
             .unwrap();
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
@@ -547,7 +548,7 @@ fn test_connector_data_scopes_protect_records_and_operational_overviews() {
             common::APP_HOST,
             maintainer["id"].as_i64().unwrap()
         ))
-        .bearer_auth(&admin.token)
+        .cookie_auth(&admin.cookie)
         .send()
         .unwrap();
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
@@ -557,7 +558,7 @@ fn test_connector_data_scopes_protect_records_and_operational_overviews() {
             common::APP_HOST,
             second_maintainer["id"].as_i64().unwrap()
         ))
-        .bearer_auth(&admin.token)
+        .cookie_auth(&admin.cookie)
         .send()
         .unwrap();
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
@@ -572,7 +573,7 @@ fn create_maintainer(client: &Client, token: &str) -> Value {
     let unique = common::unique_name("scope_team");
     let response = client
         .post(format!("{}/maintainers", common::APP_HOST))
-        .bearer_auth(token)
+        .cookie_auth(token)
         .json(&json!({
             "display_name": format!("Scope team {unique}"),
             "email": format!("{unique}@example.test")
@@ -589,7 +590,7 @@ fn add_maintainer_member(client: &Client, token: &str, maintainer_id: i64, user_
             "{}/maintainers/{maintainer_id}/members",
             common::APP_HOST
         ))
-        .bearer_auth(token)
+        .cookie_auth(token)
         .json(&json!({
             "user_id": user_id,
             "role": "viewer"
@@ -609,7 +610,7 @@ fn create_connector(
 ) -> Value {
     let response = client
         .post(format!("{}/connectors", common::APP_HOST))
-        .bearer_auth(token)
+        .cookie_auth(token)
         .json(&json!({
             "source": source,
             "kind": "sample",
@@ -631,7 +632,7 @@ fn import_work_card(client: &Client, token: &str, source: &str) -> Value {
             "{}/connectors/{source}/work-cards/import",
             common::APP_HOST
         ))
-        .bearer_auth(token)
+        .cookie_auth(token)
         .json(&json!({
             "items": [{
                 "external_id": common::unique_name("scoped_work"),
@@ -657,7 +658,7 @@ fn import_notification(client: &Client, token: &str, source: &str) -> Value {
             "{}/connectors/{source}/notifications/import",
             common::APP_HOST
         ))
-        .bearer_auth(token)
+        .cookie_auth(token)
         .json(&json!({
             "items": [{
                 "external_id": common::unique_name("scoped_notification"),
@@ -682,7 +683,7 @@ fn create_failed_run(client: &Client, token: &str, source: &str) -> Value {
             "{}/connectors/{source}/work-cards/import",
             common::APP_HOST
         ))
-        .bearer_auth(token)
+        .cookie_auth(token)
         .json(&json!({
             "items": [{
                 "external_id": common::unique_name("invalid_scoped_work"),
@@ -872,7 +873,7 @@ fn assert_record_scope(
 fn assert_detail_status(client: &Client, token: &str, path: &str, expected: StatusCode) {
     let response = client
         .get(format!("{}{path}", common::APP_HOST))
-        .bearer_auth(token)
+        .cookie_auth(token)
         .send()
         .unwrap();
     assert_eq!(response.status(), expected, "unexpected status for {path}");
@@ -881,7 +882,7 @@ fn assert_detail_status(client: &Client, token: &str, path: &str, expected: Stat
 fn get_data(client: &Client, token: &str, path: &str) -> Value {
     let response = client
         .get(format!("{}{path}", common::APP_HOST))
-        .bearer_auth(token)
+        .cookie_auth(token)
         .send()
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK, "GET {path} failed");
@@ -891,7 +892,7 @@ fn get_data(client: &Client, token: &str, path: &str) -> Value {
 fn delete_record(client: &Client, token: &str, collection: &str, id: i64) {
     let response = client
         .delete(format!("{}{collection}/{id}", common::APP_HOST))
-        .bearer_auth(token)
+        .cookie_auth(token)
         .send()
         .unwrap();
     assert_eq!(response.status(), StatusCode::NO_CONTENT);

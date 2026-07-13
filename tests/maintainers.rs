@@ -2,6 +2,7 @@ use reqwest::{blocking::Client, StatusCode};
 use serde_json::{json, Value};
 
 pub mod common;
+use common::CookieAuthRequest;
 
 #[test]
 fn test_get_maintainers() {
@@ -12,7 +13,7 @@ fn test_get_maintainers() {
 
     let response = client
         .get(format!("{}/maintainers", common::APP_HOST))
-        .bearer_auth(&auth.token)
+        .cookie_auth(&auth.cookie)
         .send()
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
@@ -32,7 +33,7 @@ fn test_create_maintainer() {
     let auth = common::create_admin_auth(&client);
     let response = client
         .post(format!("{}/maintainers", common::APP_HOST))
-        .bearer_auth(&auth.token)
+        .cookie_auth(&auth.cookie)
         .json(&json!({
           "display_name":"Luke Ho",
           "email": "luke@ho.com"
@@ -61,7 +62,7 @@ fn test_create_maintainer_validates_request() {
     let auth = common::create_admin_auth(&client);
     let response = client
         .post(format!("{}/maintainers", common::APP_HOST))
-        .bearer_auth(&auth.token)
+        .cookie_auth(&auth.cookie)
         .json(&json!({
           "display_name":"",
           "email": "not-an-email"
@@ -87,7 +88,7 @@ fn test_view_maintainer() {
             common::APP_HOST,
             maintainer["id"]
         ))
-        .bearer_auth(&auth.token)
+        .cookie_auth(&auth.cookie)
         .send()
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
@@ -118,7 +119,7 @@ fn test_update_maintainer() {
             common::APP_HOST,
             maintainer["id"]
         ))
-        .bearer_auth(&auth.token)
+        .cookie_auth(&auth.cookie)
         .json(&json!({
           "display_name":"Platform Team",
           "email": "platform@example.com"
@@ -153,7 +154,7 @@ fn test_delete_maintainer() {
             common::APP_HOST,
             maintainer["id"]
         ))
-        .bearer_auth(&auth.token)
+        .cookie_auth(&auth.cookie)
         .send()
         .unwrap();
     assert_eq!(response.status(), StatusCode::NO_CONTENT);

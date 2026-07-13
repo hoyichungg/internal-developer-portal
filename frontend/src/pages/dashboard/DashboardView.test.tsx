@@ -118,7 +118,7 @@ describe("DashboardView daily workbench", () => {
           ),
           summary: { ...currentOverview.summary, unread_notifications: 0 }
         };
-        return { ...message, is_read: true, read_at: "2026-07-10T08:15:00" };
+        return { ...message, is_read: true, read_at: "2026-07-10T08:15:00Z" };
       }
     });
 
@@ -184,7 +184,7 @@ describe("DashboardView daily workbench", () => {
     expect(await screen.findByText("No unread messages")).toBeInTheDocument();
     const snoozeCall = calls.find((call) => call.path === "/notifications/73/snooze");
     expect((snoozeCall?.body as { snoozed_until: string }).snoozed_until).toMatch(
-      /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/
+      /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/
     );
     expect(calls.filter((call) => call.path === "/me/overview")).toHaveLength(2);
   });
@@ -224,6 +224,7 @@ function overviewWithPriorityItems(): MeOverviewResponse {
       id: 1,
       username: "admin",
       roles: ["admin"],
+      auth_method: "password",
       capabilities: {
         manage_connectors: true,
         view_audit: true,
@@ -245,9 +246,9 @@ function overviewWithPriorityItems(): MeOverviewResponse {
         repository_url: null,
         dashboard_url: null,
         runbook_url: null,
-        last_checked_at: "2026-05-19T00:00:00",
-        created_at: "2026-05-19T00:00:00",
-        updated_at: "2026-05-19T00:00:00",
+        last_checked_at: "2026-05-19T00:00:00Z",
+        created_at: "2026-05-19T00:00:00Z",
+        updated_at: "2026-05-19T00:00:00Z",
         source: "monitoring",
         external_id: "identity-api"
       }
@@ -290,8 +291,8 @@ function overviewWithPriorityItems(): MeOverviewResponse {
         assignee: "platform-team",
         due_at: null,
         url: null,
-        created_at: "2026-05-19T00:00:00",
-        updated_at: "2026-05-19T00:02:00"
+        created_at: "2026-05-19T00:00:00Z",
+        updated_at: "2026-05-19T00:02:00Z"
       }
     ],
     unread_notifications: [
@@ -305,12 +306,12 @@ function overviewWithPriorityItems(): MeOverviewResponse {
         is_read: false,
         source_is_read: false,
         url: null,
-        created_at: "2026-05-19T00:00:00",
-        updated_at: "2026-05-19T00:04:00",
+        created_at: "2026-05-19T00:00:00Z",
+        updated_at: "2026-05-19T00:04:00Z",
         connector_id: 12,
         owner_user_id: 1,
         maintainer_id: null,
-        source_updated_at: "2026-05-19T00:04:00",
+        source_updated_at: "2026-05-19T00:04:00Z",
         last_seen_run_id: 91,
         archived_at: null,
         read_at: null,
@@ -328,16 +329,16 @@ function overviewWithPriorityItems(): MeOverviewResponse {
         failure_count: 2,
         duration_ms: 120,
         error_message: "Graph request returned 401",
-        started_at: "2026-05-19T00:00:00",
-        finished_at: "2026-05-19T00:01:00",
+        started_at: "2026-05-19T00:00:00Z",
+        finished_at: "2026-05-19T00:01:00Z",
         trigger: "scheduled",
         claimed_at: null,
         worker_id: "worker-1",
         attempt_count: 1,
         max_attempts: 3,
-        next_attempt_at: "2026-05-19T00:00:00",
+        next_attempt_at: "2026-05-19T00:00:00Z",
         lease_expires_at: null,
-        heartbeat_at: "2026-05-19T00:00:15",
+        heartbeat_at: "2026-05-19T00:00:15Z",
         cancel_requested_at: null,
         cancelled_at: null,
         parent_run_id: null,
@@ -355,7 +356,7 @@ function overviewWithPriorityItems(): MeOverviewResponse {
         source: "monitoring",
         target: "service_health",
         service_id: 7,
-        occurred_at: "2026-05-19T00:00:00"
+        occurred_at: "2026-05-19T00:00:00Z"
       },
       {
         key: "run-91",
@@ -366,7 +367,7 @@ function overviewWithPriorityItems(): MeOverviewResponse {
         source: "graph-calendar",
         target: "notifications",
         record_id: 91,
-        occurred_at: "2026-05-19T00:01:00"
+        occurred_at: "2026-05-19T00:01:00Z"
       },
       {
         key: "work-42",
@@ -377,7 +378,7 @@ function overviewWithPriorityItems(): MeOverviewResponse {
         source: "azure-devops",
         target: "work_cards",
         record_id: 42,
-        occurred_at: "2026-05-19T00:02:00"
+        occurred_at: "2026-05-19T00:02:00Z"
       },
       {
         key: "notification-73",
@@ -388,7 +389,7 @@ function overviewWithPriorityItems(): MeOverviewResponse {
         source: "graph-calendar",
         target: "notifications",
         record_id: 73,
-        occurred_at: "2026-05-19T00:04:00"
+        occurred_at: "2026-05-19T00:04:00Z"
       }
     ],
     health_history: {
@@ -408,10 +409,10 @@ function overviewWithPriorityItems(): MeOverviewResponse {
       worker_status: "healthy",
       active_workers: 1,
       stale_workers: 0,
-      latest_worker_seen_at: "2026-05-19T00:00:00",
+      latest_worker_seen_at: "2026-05-19T00:00:00Z",
       worker_stale_after_seconds: 45,
       latest_retention_cleanup: null,
-      latest_health_check_at: "2026-05-19T00:00:00",
+      latest_health_check_at: "2026-05-19T00:00:00Z",
       health_data_stale: false,
       health_stale_after_hours: 24
     },
@@ -431,8 +432,5 @@ function overviewWithPriorityItems(): MeOverviewResponse {
 function localTodayAt(hours: number, minutes: number): string {
   const date = new Date();
   date.setHours(hours, minutes, 0, 0);
-  const pad = (value: number) => String(value).padStart(2, "0");
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(
-    date.getHours()
-  )}:${pad(date.getMinutes())}:00`;
+  return date.toISOString();
 }

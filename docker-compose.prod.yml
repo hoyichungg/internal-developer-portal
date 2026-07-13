@@ -4,10 +4,19 @@ x-app-build: &app-build
   context: .
   dockerfile: Dockerfile.prod
 
-x-app-environment: &app-environment
+x-database-environment: &database-environment
+  DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL in your production env file}
+
+x-runtime-environment: &runtime-environment
+  <<: *database-environment
   APP_ENV: production
   AUTH_TOKEN_TTL_SECONDS: ${AUTH_TOKEN_TTL_SECONDS:-86400}
-  DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL in your production env file}
+  AUTH_MAX_ACTIVE_SESSIONS_PER_USER: ${AUTH_MAX_ACTIVE_SESSIONS_PER_USER:-20}
+  AUTH_COOKIE_SECURE: ${AUTH_COOKIE_SECURE:-true}
+  AUTH_LOGIN_MAX_FAILURES: ${AUTH_LOGIN_MAX_FAILURES:-5}
+  AUTH_LOGIN_ACCOUNT_MAX_FAILURES: ${AUTH_LOGIN_ACCOUNT_MAX_FAILURES:-50}
+  AUTH_LOGIN_WINDOW_SECONDS: ${AUTH_LOGIN_WINDOW_SECONDS:-900}
+  AUTH_LOGIN_LOCKOUT_SECONDS: ${AUTH_LOGIN_LOCKOUT_SECONDS:-900}
   CONNECTOR_SECRET_KEY: ${CONNECTOR_SECRET_KEY:?Set CONNECTOR_SECRET_KEY in your production env file}
   CONNECTOR_WORKER_ENABLED: ${CONNECTOR_WORKER_ENABLED:-true}
   CONNECTOR_SCHEDULER_ENABLED: ${CONNECTOR_SCHEDULER_ENABLED:-true}
@@ -49,7 +58,7 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-    environment: *app-environment
+    environment: *database-environment
     command: ["diesel", "migration", "run"]
 
   app:
@@ -59,9 +68,28 @@ services:
     depends_on:
       migrate:
         condition: service_completed_successfully
-    environment: *app-environment
+    environment:
+      <<: *runtime-environment
+      AUTH_PASSWORD_LOGIN_ENABLED: ${AUTH_PASSWORD_LOGIN_ENABLED:-true}
+      AUTH_ENTRA_ENABLED: ${AUTH_ENTRA_ENABLED:-false}
+      AUTH_ENTRA_TENANT_ID: ${AUTH_ENTRA_TENANT_ID:-}
+      AUTH_ENTRA_CLIENT_ID: ${AUTH_ENTRA_CLIENT_ID:-}
+      AUTH_ENTRA_CLIENT_SECRET: ${AUTH_ENTRA_CLIENT_SECRET:-}
+      AUTH_ENTRA_REDIRECT_URI: ${AUTH_ENTRA_REDIRECT_URI:-}
+      AUTH_OIDC_TRANSACTION_KEY: ${AUTH_OIDC_TRANSACTION_KEY:-}
+      AUTH_ENTRA_ISSUER: ${AUTH_ENTRA_ISSUER:-}
+      AUTH_ENTRA_AUTHORIZATION_URL: ${AUTH_ENTRA_AUTHORIZATION_URL:-}
+      AUTH_ENTRA_TOKEN_URL: ${AUTH_ENTRA_TOKEN_URL:-}
+      AUTH_ENTRA_JWKS_URL: ${AUTH_ENTRA_JWKS_URL:-}
+      AUTH_ENTRA_JIT_PROVISIONING: ${AUTH_ENTRA_JIT_PROVISIONING:-false}
+      AUTH_ENTRA_REQUIRED_ROLE: ${AUTH_ENTRA_REQUIRED_ROLE:-}
+      AUTH_OIDC_TRANSACTION_TTL_SECONDS: ${AUTH_OIDC_TRANSACTION_TTL_SECONDS:-600}
+      AUTH_ENTRA_JWKS_CACHE_SECONDS: ${AUTH_ENTRA_JWKS_CACHE_SECONDS:-300}
+      AUTH_ENTRA_CLOCK_SKEW_SECONDS: ${AUTH_ENTRA_CLOCK_SKEW_SECONDS:-120}
+      # Rocket's normal request log includes callback query parameters.
+      ROCKET_LOG_LEVEL: critical
     ports:
-      - "${PORT:-8000}:${ROCKET_PORT:-8000}"
+      - "127.0.0.1:${PORT:-8000}:${ROCKET_PORT:-8000}"
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:${ROCKET_PORT:-8000}/readyz >/dev/null || exit 1"]
       interval: 30s
@@ -76,7 +104,7 @@ services:
     depends_on:
       migrate:
         condition: service_completed_successfully
-    environment: *app-environment
+    environment: *runtime-environment
     command: ["/app/worker"]
     healthcheck:
       test: ["CMD-SHELL", "grep -qx worker /proc/1/comm"]
@@ -94,7 +122,7 @@ services:
       migrate:
         condition: service_completed_successfully
     environment:
-      <<: *app-environment
+      <<: *database-environment
       SEED_ADMIN_USERNAME: ${SEED_ADMIN_USERNAME:-}
       SEED_ADMIN_PASSWORD: ${SEED_ADMIN_PASSWORD:-}
       SEED_ADMIN_ROLES: ${SEED_ADMIN_ROLES:-admin,member}

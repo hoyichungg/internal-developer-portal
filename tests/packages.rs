@@ -2,6 +2,7 @@ use reqwest::{blocking::Client, StatusCode};
 use serde_json::{json, Value};
 
 pub mod common;
+use common::CookieAuthRequest;
 
 #[test]
 fn test_get_packages() {
@@ -13,7 +14,7 @@ fn test_get_packages() {
 
     let response = client
         .get(format!("{}/packages", common::APP_HOST))
-        .bearer_auth(&auth.token)
+        .cookie_auth(&auth.cookie)
         .send()
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
@@ -36,7 +37,7 @@ fn test_create_package() {
 
     let response = client
         .post(format!("{}/packages", common::APP_HOST))
-        .bearer_auth(&auth.token)
+        .cookie_auth(&auth.cookie)
         .json(&json!({
           "maintainer_id": maintainer["id"],
           "slug": "catalog-api",
@@ -82,7 +83,7 @@ fn test_view_package() {
 
     let response = client
         .get(format!("{}/packages/{}", common::APP_HOST, package["id"]))
-        .bearer_auth(&auth.token)
+        .cookie_auth(&auth.cookie)
         .send()
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
@@ -118,7 +119,7 @@ fn test_update_package() {
 
     let response = client
         .put(format!("{}/packages/{}", common::APP_HOST, package["id"]))
-        .bearer_auth(&auth.token)
+        .cookie_auth(&auth.cookie)
         .json(&json!({
             "slug": "catalog-api",
             "name":"Catalog API",
@@ -154,7 +155,7 @@ fn test_update_package() {
     let maintainer2 = common::create_test_maintainer(&client);
     let response = client
         .put(format!("{}/packages/{}", common::APP_HOST, package["id"]))
-        .bearer_auth(&auth.token)
+        .cookie_auth(&auth.cookie)
         .json(&json!({
             "slug": "catalog-api",
             "name":"Catalog API",
@@ -201,7 +202,7 @@ fn test_delete_package() {
 
     let response = client
         .delete(format!("{}/packages/{}", common::APP_HOST, package["id"]))
-        .bearer_auth(&auth.token)
+        .cookie_auth(&auth.cookie)
         .send()
         .unwrap();
     assert_eq!(response.status(), StatusCode::NO_CONTENT);

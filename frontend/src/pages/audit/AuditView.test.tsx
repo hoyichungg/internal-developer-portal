@@ -27,7 +27,7 @@ describe("AuditView layout", () => {
           resource_type: "connector_config",
           resource_id: "12345678901234567890",
           metadata: longMetadata,
-          created_at: "2026-05-19T08:00:00"
+          created_at: "2026-05-19T08:00:00+08:00"
         }
       ],
       "GET /users": [
@@ -35,7 +35,7 @@ describe("AuditView layout", () => {
           id: 7,
           username: "platform-admin-with-a-long-name",
           roles: ["admin"],
-          created_at: "2026-05-19T00:00:00"
+          created_at: "2026-05-19T00:00:00Z"
         }
       ]
     });

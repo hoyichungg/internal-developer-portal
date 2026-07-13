@@ -26,5 +26,6 @@ pub(crate) use worker::connector_worker_stale_after_seconds;
 pub use worker::{
     claim_connector_run_for_test, recover_connector_runs_for_test,
     request_connector_run_cancel_for_test, run_guarded_retention_cleanup_for_test,
+    GuardedRetentionCleanupResult, RETENTION_CLEANUP_ADVISORY_LOCK_KEY,
 };
 pub use worker::{run_connector_worker_forever, spawn_connector_background_worker};

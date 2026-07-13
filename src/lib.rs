@@ -2,6 +2,9 @@ mod models;
 mod repositories;
 mod schema;
 
+#[cfg(test)]
+mod repository_db_tests;
+
 pub mod api;
 pub mod auth;
 pub mod commands;

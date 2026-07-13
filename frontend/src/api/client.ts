@@ -16,6 +16,7 @@ export type ApiClientOptions = {
   baseUrl?: string;
   timeoutMs?: number;
   onUnauthorized?: () => void;
+  getSessionGeneration?: () => number;
 };
 
 const REQUEST_TIMEOUT_MS = 15_000;
@@ -43,18 +44,20 @@ export function isApiError(error: unknown): error is ApiError {
   return error instanceof ApiError;
 }
 
-export function createApiClient(token?: string | null, options: ApiClientOptions = {}) {
+export function createApiClient(options: ApiClientOptions = {}) {
   const baseUrl = options.baseUrl ?? CONFIGURED_API_BASE_URL;
   const timeoutMs = options.timeoutMs ?? REQUEST_TIMEOUT_MS;
   const onUnauthorized = options.onUnauthorized;
+  const getSessionGeneration = options.getSessionGeneration;
 
   async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
+    const requestSessionGeneration = getSessionGeneration?.();
     const headers: Record<string, string> = { Accept: "application/json" };
-    if (token) {
-      headers.Authorization = `Bearer ${token}`;
-    }
     if (body !== undefined) {
       headers["Content-Type"] = "application/json";
+    }
+    if (!["GET", "HEAD", "OPTIONS"].includes(method)) {
+      headers["X-IDP-CSRF"] = "1";
     }
 
     const controller = new AbortController();
@@ -65,10 +68,15 @@ export function createApiClient(token?: string | null, options: ApiClientOptions
         method,
         headers,
         body: body === undefined ? undefined : JSON.stringify(body),
+        credentials: "include",
         signal: controller.signal
       });
 
-      if (token && response.status === 401) {
+      if (
+        response.status === 401 &&
+        (requestSessionGeneration === undefined ||
+          getSessionGeneration?.() === requestSessionGeneration)
+      ) {
         onUnauthorized?.();
       }
 

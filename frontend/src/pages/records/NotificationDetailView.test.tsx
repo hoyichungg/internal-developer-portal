@@ -17,7 +17,7 @@ describe("NotificationDetailView actions", () => {
     const read = {
       ...unread,
       is_read: true,
-      read_at: "2026-07-10T08:15:00"
+      read_at: "2026-07-10T08:15:00Z"
     };
     const { client, calls } = createMockApiClient({
       "GET /notifications/73": unread,
@@ -43,7 +43,7 @@ describe("NotificationDetailView actions", () => {
   it("restores a dismissed notification loaded directly from its detail URL", async () => {
     const user = userEvent.setup();
     const restored = notification();
-    const dismissed = notification({ dismissed_at: "2026-07-10T08:10:00" });
+    const dismissed = notification({ dismissed_at: "2026-07-10T08:10:00Z" });
     const { client, calls } = createMockApiClient({
       "GET /notifications/73": dismissed,
       "POST /notifications/73/restore": restored
@@ -81,7 +81,7 @@ describe("NotificationDetailView actions", () => {
     const snoozeCall = calls.find((call) => call.path === "/notifications/73/snooze");
     expect(snoozeCall).toMatchObject({ method: "POST" });
     expect((snoozeCall?.body as { snoozed_until: string }).snoozed_until).toMatch(
-      /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/
+      /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/
     );
   });
 
@@ -126,12 +126,12 @@ function notification(overrides: Partial<Notification> = {}): Notification {
     is_read: false,
     source_is_read: false,
     url: null,
-    created_at: "2026-07-10T08:00:00",
-    updated_at: "2026-07-10T08:05:00",
+    created_at: "2026-07-10T08:00:00Z",
+    updated_at: "2026-07-10T08:05:00Z",
     connector_id: 12,
     owner_user_id: 1,
     maintainer_id: null,
-    source_updated_at: "2026-07-10T08:05:00",
+    source_updated_at: "2026-07-10T08:05:00Z",
     last_seen_run_id: 91,
     archived_at: null,
     read_at: null,

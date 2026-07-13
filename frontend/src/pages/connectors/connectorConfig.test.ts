@@ -107,9 +107,118 @@ describe("connectorConfigDiagnostics", () => {
     expect(azureMessages).toContain("max_items must be an integer from 1 to 10000.");
   });
 
+  it("validates Azure My Work identity mapping and due-date configuration", () => {
+    const messages = connectorConfigDiagnostics(
+      connectorConfigForm({
+        target: "work_cards",
+        config: JSON.stringify({
+          adapter: "azure_devops",
+          organization: "acme",
+          project: "portal",
+          due_date_field: " ",
+          assignee_user_mappings: {
+            "": 1,
+            "aad.invalid": 0
+          }
+        })
+      })
+    ).map((diagnostic) => diagnostic.message);
+
+    expect(messages).toContain("due_date_field must be a non-empty string when provided.");
+    expect(messages).toContain(
+      "assignee_user_mappings keys must be non-empty source descriptors of at most 512 characters."
+    );
+    expect(messages).toContain(
+      "assignee_user_mappings values must be positive portal user ids."
+    );
+  });
+
+  it("rejects ambiguous connector datetimes before they are saved", () => {
+    const messages = connectorConfigDiagnostics(
+      connectorConfigForm({
+        target: "calendar_events",
+        config: JSON.stringify({
+          adapter: "calendar_sample",
+          events: [
+            {
+              id: "standup",
+              starts_at: "2026-07-10T09:00:00",
+              ends_at: "2026-07-10T09:30:00"
+            }
+          ]
+        }),
+        sample_payload: JSON.stringify({
+          items: [
+            {
+              external_id: "standup",
+              starts_at: "2026-07-10T09:00:00",
+              ends_at: "2026-07-10T09:30:00"
+            }
+          ]
+        })
+      })
+    ).map((diagnostic) => diagnostic.message);
+
+    expect(messages).toContain(
+      "Config JSON events[0].starts_at must be RFC3339 with Z or an explicit offset."
+    );
+    expect(messages).toContain(
+      "Sample payload items[0].ends_at must be RFC3339 with Z or an explicit offset."
+    );
+  });
+
+  it("accepts explicit non-UTC offsets and requires both calendar bounds", () => {
+    const valid = connectorConfigDiagnostics(
+      connectorConfigForm({
+        target: "calendar_events",
+        config: JSON.stringify({ adapter: "microsoft_graph_calendar" }),
+        sample_payload: JSON.stringify({
+          items: [
+            {
+              starts_at: "2026-07-10T09:00:00+08:00",
+              ends_at: "2026-07-10T09:30:00+08:00"
+            }
+          ]
+        })
+      })
+    );
+    const missingEnd = connectorConfigDiagnostics(
+      connectorConfigForm({
+        target: "calendar_events",
+        sample_payload: JSON.stringify({
+          items: [{ starts_at: "2026-07-10T09:00:00Z" }]
+        })
+      })
+    ).map((diagnostic) => diagnostic.message);
+
+    expect(valid).toEqual([]);
+    expect(missingEnd).toContain(
+      "Sample payload items[0].ends_at is required and must be RFC3339 with Z or an explicit offset."
+    );
+  });
+
+  it("ships only offset-aware datetime examples in calendar templates", () => {
+    for (const templateId of ["microsoft_graph_calendar", "calendar_notifications"]) {
+      const template = connectorConfigFromTemplate(templateId) as ConnectorConfigForm;
+      const config = JSON.parse(template.config) as {
+        events?: Array<{ starts_at?: string; ends_at?: string }>;
+      };
+      const payload = JSON.parse(template.sample_payload) as {
+        items: Array<{ starts_at: string; ends_at: string }>;
+      };
+
+      for (const item of [...(config.events || []), ...payload.items]) {
+        expect(item.starts_at).toMatch(/(?:Z|[+-]\d{2}:\d{2})$/);
+        expect(item.ends_at).toMatch(/(?:Z|[+-]\d{2}:\d{2})$/);
+      }
+    }
+  });
+
   it.each([
+    "monitoring_service_health",
     "azure_devops_work_cards",
     "microsoft_graph_calendar",
+    "calendar_notifications",
     "outlook_mail_notifications"
   ])("ships a valid bounded connector template: %s", (templateId) => {
     const config = connectorConfigFromTemplate(templateId);

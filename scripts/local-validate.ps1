@@ -4,9 +4,14 @@ param(
 
     [switch]$NoRestart,
 
-    [string]$DatabaseUrl = $env:DATABASE_URL,
+    [Alias("DatabaseUrl")]
+    [string]$PortalTestDatabaseUrl = $env:PORTAL_TEST_DATABASE_URL,
 
     [string]$RetentionTestDatabaseUrl = $env:RETENTION_TEST_DATABASE_URL,
+
+    [string]$PortalTestBaseUrl = $env:PORTAL_TEST_BASE_URL,
+
+    [string]$DevelopmentDatabaseUrl = $env:DATABASE_URL,
 
     [string]$ConnectorSecretKey = $(if ($env:CONNECTOR_SECRET_KEY) { $env:CONNECTOR_SECRET_KEY } else { "dev-connector-secret-key" }),
 
@@ -21,18 +26,46 @@ Set-StrictMode -Version Latest
 $PSNativeCommandUseErrorActionPreference = $false
 
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
-$DefaultDatabaseUrl = "postgres://postgres:postgres@localhost:5432/app_db"
+$DefaultPortalTestDatabaseUrl = "postgres://postgres:postgres@localhost:5432/portal_integration_test"
 $DefaultRetentionTestDatabaseUrl = "postgres://postgres:postgres@localhost:5432/portal_retention_test"
+$DefaultDevelopmentDatabaseUrl = "postgres://postgres:postgres@localhost:5432/app_db"
+$FastValidationDatabaseUrl = "postgres://unused:unused@127.0.0.1:1/fast_validation_test_no_database"
 $ServiceTargetDir = Join-Path $RepoRoot "target\local-services"
 $ClippyTargetDir = Join-Path $RepoRoot "target\validation-clippy"
 $LogDir = Join-Path $RepoRoot "target\local-validation-logs"
 
-if (-not $DatabaseUrl) {
-    $DatabaseUrl = $DefaultDatabaseUrl
+if (-not $PortalTestDatabaseUrl) {
+    $PortalTestDatabaseUrl = $DefaultPortalTestDatabaseUrl
 }
 if (-not $RetentionTestDatabaseUrl) {
     $RetentionTestDatabaseUrl = $DefaultRetentionTestDatabaseUrl
 }
+if (-not $DevelopmentDatabaseUrl) {
+    $DevelopmentDatabaseUrl = $DefaultDevelopmentDatabaseUrl
+}
+if (-not $PortalTestBaseUrl) {
+    $PortalTestBaseUrl = "http://127.0.0.1:$Port"
+}
+
+try {
+    $portalTestBaseUri = [Uri]$PortalTestBaseUrl
+}
+catch {
+    throw "PORTAL_TEST_BASE_URL must be a valid absolute HTTP loopback origin."
+}
+if (-not $portalTestBaseUri.IsAbsoluteUri -or
+    $portalTestBaseUri.Scheme -ne "http" -or
+    $portalTestBaseUri.Host -notin @("localhost", "127.0.0.1", "::1", "[::1]") -or
+    -not [string]::IsNullOrEmpty($portalTestBaseUri.UserInfo) -or
+    -not [string]::IsNullOrEmpty($portalTestBaseUri.Query) -or
+    -not [string]::IsNullOrEmpty($portalTestBaseUri.Fragment) -or
+    $portalTestBaseUri.AbsolutePath -ne "/") {
+    throw "PORTAL_TEST_BASE_URL must be an HTTP loopback origin without credentials, path, query, or fragment."
+}
+$PortalTestBaseUrl = $PortalTestBaseUrl.TrimEnd("/")
+$Port = [string]$portalTestBaseUri.Port
+$PortalTestRocketDatabases = "{postgres={url=`"$PortalTestDatabaseUrl`"}}"
+$FastValidationRocketDatabases = "{postgres={url=`"$FastValidationDatabaseUrl`"}}"
 
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 
@@ -76,23 +109,208 @@ function Invoke-CommandStep {
     }
 }
 
-function Assert-SafeRetentionTestDatabaseUrl {
+function Get-LocalComposeDatabaseDescriptor {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Url,
+
+        [Parameter(Mandatory = $true)]
+        [string]$VariableName,
+
+        [switch]$RequireTestSegment
+    )
+
     try {
-        $uri = [Uri]$RetentionTestDatabaseUrl
+        $uri = [Uri]$Url
     }
     catch {
-        throw "RETENTION_TEST_DATABASE_URL must be a valid PostgreSQL URL."
+        throw "$VariableName must be a valid PostgreSQL URL."
     }
 
     if (-not $uri.IsAbsoluteUri -or $uri.Scheme -notin @("postgres", "postgresql")) {
-        throw "RETENTION_TEST_DATABASE_URL must be an absolute postgres:// or postgresql:// URL."
+        throw "$VariableName must be an absolute postgres:// or postgresql:// URL."
+    }
+    if ($uri.Host -notin @("localhost", "127.0.0.1", "::1", "[::1]") -or $uri.Port -ne 5432) {
+        throw "$VariableName must point to the local Compose PostgreSQL service on loopback port 5432."
+    }
+    if ([Uri]::UnescapeDataString($uri.UserInfo) -ne "postgres:postgres") {
+        throw "$VariableName must use the local Compose postgres credentials."
+    }
+    if (-not [string]::IsNullOrEmpty($uri.Query) -or -not [string]::IsNullOrEmpty($uri.Fragment)) {
+        throw "$VariableName must not contain a query or fragment."
     }
 
     $databaseName = [Uri]::UnescapeDataString($uri.AbsolutePath.Trim("/"))
-    $nameSegments = @($databaseName.ToLowerInvariant() -split "[^a-z0-9]+" | Where-Object { $_ })
-    if ($nameSegments -notcontains "test") {
-        throw "Refusing Full validation: retention database '$databaseName' must contain a standalone 'test' segment."
+    if ($databaseName -notmatch '^[A-Za-z0-9_-]+$') {
+        throw "$VariableName must contain exactly one simple database name."
     }
+    $nameSegments = @($databaseName.ToLowerInvariant() -split "[^a-z0-9]+" | Where-Object { $_ })
+    if ($RequireTestSegment -and $nameSegments -notcontains "test") {
+        throw "Refusing Full validation: $VariableName database '$databaseName' must contain a standalone 'test' segment."
+    }
+
+    return [pscustomobject]@{
+        Url = $Url
+        DatabaseName = $databaseName
+        ContainerUrl = "postgres://postgres:postgres@postgres:5432/$databaseName"
+    }
+}
+
+function Get-LatestMigrationVersion {
+    $latest = Get-ChildItem (Join-Path $RepoRoot "migrations") -Directory |
+        Sort-Object Name |
+        Select-Object -Last 1
+    if ($null -eq $latest) {
+        throw "No Diesel migrations were found."
+    }
+
+    $version = $latest.Name -replace '[^0-9]', ''
+    if ($version -notmatch '^\d{14}$') {
+        throw "Latest migration directory '$($latest.Name)' does not contain a 14-digit Diesel version."
+    }
+    return $version
+}
+
+function Invoke-ComposeChecked {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string[]]$Arguments,
+
+        [Parameter(Mandatory = $true)]
+        [string]$FailureMessage
+    )
+
+    & docker compose @Arguments
+    if ($LASTEXITCODE -ne 0) {
+        throw $FailureMessage
+    }
+}
+
+function Ensure-TestDatabase {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Descriptor,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ExpectedMigrationVersion
+    )
+
+    $databaseName = [string]$Descriptor.DatabaseName
+    Invoke-ComposeChecked `
+        -Arguments @(
+            "exec",
+            "-T",
+            "postgres",
+            "dropdb",
+            "-U",
+            "postgres",
+            "--if-exists",
+            "--force",
+            $databaseName
+        ) `
+        -FailureMessage "Could not reset isolated test database '$databaseName'."
+    Invoke-ComposeChecked `
+        -Arguments @("exec", "-T", "postgres", "createdb", "-U", "postgres", $databaseName) `
+        -FailureMessage "Could not create isolated test database '$databaseName'."
+
+    Invoke-ComposeChecked `
+        -Arguments @(
+            "run",
+            "--rm",
+            "-e",
+            "DATABASE_URL=$($Descriptor.ContainerUrl)",
+            "migrate",
+            "diesel",
+            "migration",
+            "run"
+        ) `
+        -FailureMessage "Diesel migrations failed for isolated test database '$databaseName'."
+
+    $actualDatabase = (@(& docker compose exec -T postgres psql -U postgres -d $databaseName -Atc `
+        "SELECT current_database();") -join "").Trim()
+    if ($LASTEXITCODE -ne 0 -or $actualDatabase -ne $databaseName) {
+        throw "Database URL '$databaseName' resolved to unexpected database '$actualDatabase'."
+    }
+
+    $actualSegments = @($actualDatabase.ToLowerInvariant() -split "[^a-z0-9]+" | Where-Object { $_ })
+    if ($actualSegments -notcontains "test") {
+        throw "Refusing validation: actual database '$actualDatabase' lacks a standalone 'test' segment."
+    }
+
+    $latestMigration = (@(& docker compose exec -T postgres psql -U postgres -d $databaseName -Atc `
+        "SELECT version FROM __diesel_schema_migrations ORDER BY version DESC LIMIT 1;") -join "").Trim()
+    if ($LASTEXITCODE -ne 0 -or $latestMigration -ne $ExpectedMigrationVersion) {
+        throw "Database '$databaseName' latest migration is '$latestMigration'; expected '$ExpectedMigrationVersion'."
+    }
+
+    Write-Host "Verified isolated database '$databaseName' at migration $latestMigration."
+}
+
+function Get-DatabaseFingerprint {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Descriptor
+    )
+
+    $databaseName = [string]$Descriptor.DatabaseName
+    $actualDatabase = (@(& docker compose exec -T postgres psql -U postgres -d $databaseName -Atc `
+        "SELECT current_database();") -join "").Trim()
+    if ($LASTEXITCODE -ne 0 -or $actualDatabase -ne $databaseName) {
+        throw "Development database URL '$databaseName' resolved to unexpected database '$actualDatabase'."
+    }
+
+    $tableNames = @(& docker compose exec -T postgres psql -U postgres -d $databaseName -Atc `
+        "SELECT tablename FROM pg_tables WHERE schemaname = 'public' ORDER BY tablename;")
+    if ($LASTEXITCODE -ne 0) {
+        throw "Could not list public tables in development database '$databaseName'."
+    }
+
+    $entries = @()
+    foreach ($rawTableName in $tableNames) {
+        $tableName = ([string]$rawTableName).Trim()
+        if (-not $tableName) {
+            continue
+        }
+
+        $quotedTableName = '"' + $tableName.Replace('"', '""') + '"'
+        $rowCount = (@(& docker compose exec -T postgres psql -U postgres -d $databaseName -Atc `
+            "SELECT count(*) FROM public.$quotedTableName;") -join "").Trim()
+        if ($LASTEXITCODE -ne 0 -or $rowCount -notmatch '^\d+$') {
+            throw "Could not count development database table '$tableName'."
+        }
+        $entries += "$tableName=$rowCount"
+    }
+
+    return [pscustomobject]@{
+        DatabaseName = $databaseName
+        Signature = $entries -join "`n"
+        TableCount = $entries.Count
+    }
+}
+
+function Prepare-TestDatabases {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$IntegrationDescriptor,
+
+        [Parameter(Mandatory = $true)]
+        [object]$RetentionDescriptor
+    )
+
+    if ($IntegrationDescriptor.DatabaseName -eq $RetentionDescriptor.DatabaseName) {
+        throw "PORTAL_TEST_DATABASE_URL and RETENTION_TEST_DATABASE_URL must name different databases."
+    }
+
+    Invoke-ComposeChecked `
+        -Arguments @("up", "-d", "postgres") `
+        -FailureMessage "Could not start the local Compose PostgreSQL service."
+    Invoke-ComposeChecked `
+        -Arguments @("build", "migrate") `
+        -FailureMessage "Could not build the migration image for isolated test databases."
+
+    $expectedMigrationVersion = Get-LatestMigrationVersion
+    Ensure-TestDatabase -Descriptor $IntegrationDescriptor -ExpectedMigrationVersion $expectedMigrationVersion
+    Ensure-TestDatabase -Descriptor $RetentionDescriptor -ExpectedMigrationVersion $expectedMigrationVersion
 }
 
 function Get-PortalServiceProcesses {
@@ -133,13 +351,20 @@ function Get-RunningComposeServices {
 
     $runningServices = @()
     foreach ($service in @("app", "worker")) {
-        $containerId = (& docker compose ps -q $service 2>$null | Select-Object -First 1)
-        if ($LASTEXITCODE -ne 0 -or -not $containerId) {
+        # Do not pipe a native process directly into Select-Object -First.
+        # Windows PowerShell can report LASTEXITCODE=-1 when the downstream
+        # command closes the pipe, which would hide active database writers.
+        $containerIds = @(& docker compose ps -q $service 2>$null)
+        $composeExitCode = $LASTEXITCODE
+        $containerId = $containerIds | Select-Object -First 1
+        if ($composeExitCode -ne 0 -or -not $containerId) {
             continue
         }
 
-        $isRunning = (& docker inspect -f "{{.State.Running}}" $containerId 2>$null | Select-Object -First 1)
-        if ($isRunning -eq "true") {
+        $inspectOutput = @(& docker inspect -f "{{.State.Running}}" $containerId 2>$null)
+        $inspectExitCode = $LASTEXITCODE
+        $isRunning = $inspectOutput | Select-Object -First 1
+        if ($inspectExitCode -eq 0 -and $isRunning -eq "true") {
             $runningServices += $service
         }
     }
@@ -173,9 +398,9 @@ function Start-ComposeServices {
     }
 
     Write-Host "Starting Docker compose services: $($Services -join ', ')"
-    & docker compose start @Services
+    & docker compose up -d --no-deps @Services
     if ($LASTEXITCODE -ne 0) {
-        throw "docker compose start failed"
+        throw "docker compose up failed"
     }
 }
 
@@ -236,11 +461,13 @@ function Start-PortalProcess {
         [string]$FilePath,
         [string]$Stdout,
         [string]$Stderr,
-        [string]$AppEnvironment = "development"
+        [string]$AppEnvironment = "development",
+        [string]$ProcessDatabaseUrl = $PortalTestDatabaseUrl
     )
 
     $processEnvironment = @{
-        DATABASE_URL = $DatabaseUrl
+        DATABASE_URL = $ProcessDatabaseUrl
+        ROCKET_DATABASES = "{postgres={url=`"$ProcessDatabaseUrl`"}}"
         ROCKET_PORT = $Port
         CONNECTOR_SECRET_KEY = $ConnectorSecretKey
         APP_ENV = $AppEnvironment
@@ -252,6 +479,8 @@ function Start-PortalProcess {
         $processEnvironment.CONNECTOR_HEALTH_RETENTION_DAYS = "0"
         $processEnvironment.CONNECTOR_RUN_RETENTION_DAYS = "0"
         $processEnvironment.AUDIT_LOG_RETENTION_DAYS = "0"
+        $processEnvironment.PORTAL_TEST_DATABASE_URL = $PortalTestDatabaseUrl
+        $processEnvironment.PORTAL_TEST_BASE_URL = $PortalTestBaseUrl
     }
 
     $previousValues = @{}
@@ -280,7 +509,7 @@ function Start-PortalProcess {
 }
 
 function Wait-ForHealth {
-    $healthUrl = "http://127.0.0.1:$Port/health"
+    $healthUrl = "$PortalTestBaseUrl/health"
     for ($attempt = 1; $attempt -le 30; $attempt++) {
         try {
             $response = Invoke-WebRequest -Uri $healthUrl -UseBasicParsing -TimeoutSec 2
@@ -303,8 +532,12 @@ function Build-IsolatedServices {
         -FilePath "cargo" `
         -Arguments @("build", "--bin", "server", "--bin", "worker") `
         -Environment @{
+            APP_ENV = "test"
             CARGO_TARGET_DIR = $ServiceTargetDir
-            DATABASE_URL = $DatabaseUrl
+            DATABASE_URL = $PortalTestDatabaseUrl
+            ROCKET_DATABASES = $PortalTestRocketDatabases
+            PORTAL_TEST_DATABASE_URL = $PortalTestDatabaseUrl
+            PORTAL_TEST_BASE_URL = $PortalTestBaseUrl
             CONNECTOR_SECRET_KEY = $ConnectorSecretKey
         }
 }
@@ -359,7 +592,8 @@ function Restart-OriginalServices {
             -Name $service.ProcessName `
             -FilePath $service.Path `
             -Stdout $stdout `
-            -Stderr $stderr |
+            -Stderr $stderr `
+            -ProcessDatabaseUrl $DevelopmentDatabaseUrl |
             Out-Null
 
         if ($service.ProcessName -eq "server") {
@@ -383,17 +617,24 @@ try {
             -FilePath "cargo" `
             -Arguments @("clippy", "--all-targets", "--", "-D", "warnings") `
             -Environment @{
+                APP_ENV = "test"
                 CARGO_TARGET_DIR = $ClippyTargetDir
-                DATABASE_URL = $DatabaseUrl
+                DATABASE_URL = $PortalTestDatabaseUrl
+                ROCKET_DATABASES = $PortalTestRocketDatabases
+                PORTAL_TEST_DATABASE_URL = $PortalTestDatabaseUrl
+                PORTAL_TEST_BASE_URL = $PortalTestBaseUrl
                 CONNECTOR_SECRET_KEY = $ConnectorSecretKey
             }
         Invoke-CommandStep `
             -Name "Rust library tests (database-free)" `
             -FilePath "cargo" `
-            -Arguments @("test", "--lib") `
+            -Arguments @("test", "--lib", "--", "--skip", "repository_db_tests") `
             -Environment @{
                 APP_ENV = "test"
-                DATABASE_URL = "postgres://unused:unused@127.0.0.1:1/fast_validation_no_database"
+                DATABASE_URL = $FastValidationDatabaseUrl
+                ROCKET_DATABASES = $FastValidationRocketDatabases
+                PORTAL_TEST_DATABASE_URL = $PortalTestDatabaseUrl
+                PORTAL_TEST_BASE_URL = $PortalTestBaseUrl
                 CONNECTOR_SECRET_KEY = $ConnectorSecretKey
             }
         Write-Host ""
@@ -401,12 +642,30 @@ try {
         exit 0
     }
 
-    Assert-SafeRetentionTestDatabaseUrl
+    $integrationDescriptor = Get-LocalComposeDatabaseDescriptor `
+        -Url $PortalTestDatabaseUrl `
+        -VariableName "PORTAL_TEST_DATABASE_URL" `
+        -RequireTestSegment
+    $retentionDescriptor = Get-LocalComposeDatabaseDescriptor `
+        -Url $RetentionTestDatabaseUrl `
+        -VariableName "RETENTION_TEST_DATABASE_URL" `
+        -RequireTestSegment
+    $developmentDescriptor = Get-LocalComposeDatabaseDescriptor `
+        -Url $DevelopmentDatabaseUrl `
+        -VariableName "DATABASE_URL"
+
+    if ($developmentDescriptor.DatabaseName -in @(
+            $integrationDescriptor.DatabaseName,
+            $retentionDescriptor.DatabaseName
+        )) {
+        throw "DATABASE_URL must not name either disposable test database."
+    }
 
     $originalProcesses = @(Get-PortalServiceSnapshots)
     $composeServices = @(Get-RunningComposeServices)
     $hasOriginalServer = @($originalProcesses | Where-Object { $_.ProcessName -eq "server" }).Count -gt 0
     $isolatedProcesses = @()
+    $developmentFingerprint = $null
 
     try {
         if ($originalProcesses.Count -gt 0) {
@@ -416,6 +675,14 @@ try {
             Stop-ComposeServices -Services $composeServices
         }
         Wait-ForPortRelease
+        Invoke-ComposeChecked `
+            -Arguments @("up", "-d", "postgres") `
+            -FailureMessage "Could not start the local Compose PostgreSQL service."
+        $developmentFingerprint = Get-DatabaseFingerprint -Descriptor $developmentDescriptor
+        Write-Host "Captured exact row counts for $($developmentFingerprint.TableCount) development database tables."
+        Prepare-TestDatabases `
+            -IntegrationDescriptor $integrationDescriptor `
+            -RetentionDescriptor $retentionDescriptor
 
         Invoke-CommandStep -Name "Rust format check" -FilePath "cargo" -Arguments @("fmt", "--check")
         Invoke-CommandStep -Name "Frontend build" -FilePath "pnpm" -Arguments @("--dir", "frontend", "build")
@@ -425,8 +692,12 @@ try {
             -FilePath "cargo" `
             -Arguments @("clippy", "--all-targets", "--", "-D", "warnings") `
             -Environment @{
+                APP_ENV = "test"
                 CARGO_TARGET_DIR = $ClippyTargetDir
-                DATABASE_URL = $DatabaseUrl
+                DATABASE_URL = $PortalTestDatabaseUrl
+                ROCKET_DATABASES = $PortalTestRocketDatabases
+                PORTAL_TEST_DATABASE_URL = $PortalTestDatabaseUrl
+                PORTAL_TEST_BASE_URL = $PortalTestBaseUrl
                 CONNECTOR_SECRET_KEY = $ConnectorSecretKey
             }
         Build-IsolatedServices
@@ -437,7 +708,10 @@ try {
             -Arguments @("test") `
             -Environment @{
                 APP_ENV = "test"
-                DATABASE_URL = $DatabaseUrl
+                DATABASE_URL = $PortalTestDatabaseUrl
+                ROCKET_DATABASES = $PortalTestRocketDatabases
+                PORTAL_TEST_DATABASE_URL = $PortalTestDatabaseUrl
+                PORTAL_TEST_BASE_URL = $PortalTestBaseUrl
                 RETENTION_TEST_DATABASE_URL = $RetentionTestDatabaseUrl
                 CONNECTOR_SECRET_KEY = $ConnectorSecretKey
             }
@@ -446,16 +720,27 @@ try {
         Write-Host "Full validation passed." -ForegroundColor Green
     }
     finally {
-        if ($isolatedProcesses.Count -gt 0) {
-            Stop-PortalServiceProcesses -Processes $isolatedProcesses
-            Wait-ForPortRelease
+        try {
+            if ($isolatedProcesses.Count -gt 0) {
+                Stop-PortalServiceProcesses -Processes $isolatedProcesses
+                Wait-ForPortRelease
+            }
+            if ($null -ne $developmentFingerprint) {
+                $afterFingerprint = Get-DatabaseFingerprint -Descriptor $developmentDescriptor
+                if ($developmentFingerprint.Signature -cne $afterFingerprint.Signature) {
+                    throw "Full validation changed row counts in development database '$($developmentDescriptor.DatabaseName)'."
+                }
+                Write-Host "Verified development database '$($developmentDescriptor.DatabaseName)' row counts are unchanged."
+            }
         }
-        Restart-OriginalServices -OriginalProcesses $originalProcesses
-        if ($hasOriginalServer -and $composeServices.Count -gt 0 -and -not $NoRestart) {
-            Write-Host "Leaving Docker compose app/worker stopped because a local server was restored on port $Port."
-        }
-        elseif ($composeServices.Count -gt 0) {
-            Start-ComposeServices -Services $composeServices
+        finally {
+            Restart-OriginalServices -OriginalProcesses $originalProcesses
+            if ($hasOriginalServer -and $composeServices.Count -gt 0 -and -not $NoRestart) {
+                Write-Host "Leaving Docker compose app/worker stopped because a local server was restored on port $Port."
+            }
+            elseif ($composeServices.Count -gt 0) {
+                Start-ComposeServices -Services $composeServices
+            }
         }
     }
 }

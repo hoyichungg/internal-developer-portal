@@ -10,7 +10,7 @@ import {
   Tooltip
 } from "@mantine/core";
 import { useDisclosure } from "@mantine/hooks";
-import { IconLogout, IconRefresh } from "@tabler/icons-react";
+import { IconLogout, IconRefresh, IconShieldLock } from "@tabler/icons-react";
 import type { ReactNode } from "react";
 
 import { ThemeToggle } from "../components/ThemeToggle";
@@ -21,11 +21,13 @@ export function PortalShell({
   user,
   view,
   onLogout,
+  onRevokeAllSessions,
   children
 }: {
   user: MeResponse;
   view: string;
   onLogout: () => void | Promise<void>;
+  onRevokeAllSessions: () => void | Promise<void>;
   children: ReactNode;
 }) {
   const [opened, { close, toggle }] = useDisclosure(false);
@@ -71,6 +73,17 @@ export function PortalShell({
             >
               Sign out
             </Button>
+            <Tooltip label="Sign out on all devices">
+              <ActionIcon
+                variant="light"
+                color="red"
+                size="lg"
+                aria-label="Sign out on all devices"
+                onClick={onRevokeAllSessions}
+              >
+                <IconShieldLock size={18} />
+              </ActionIcon>
+            </Tooltip>
             <Tooltip label="Sign out">
               <ActionIcon
                 variant="default"

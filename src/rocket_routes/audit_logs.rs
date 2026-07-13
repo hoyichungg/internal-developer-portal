@@ -1,4 +1,4 @@
-use chrono::{NaiveDate, NaiveDateTime};
+use chrono::{DateTime, NaiveDate, Utc};
 use rocket::form::FromForm;
 use rocket::serde::Deserialize;
 use rocket_db_pools::Connection;
@@ -28,8 +28,8 @@ impl Validate for AuditLogQuery {
         crate::validation::max_optional_len(&mut errors, "resource_type", &self.resource_type, 64);
         crate::validation::max_optional_len(&mut errors, "resource_id", &self.resource_id, 128);
         crate::validation::max_optional_len(&mut errors, "action", &self.action, 64);
-        crate::validation::max_optional_len(&mut errors, "created_from", &self.created_from, 32);
-        crate::validation::max_optional_len(&mut errors, "created_to", &self.created_to, 32);
+        crate::validation::max_optional_len(&mut errors, "created_from", &self.created_from, 64);
+        crate::validation::max_optional_len(&mut errors, "created_to", &self.created_to, 64);
 
         errors
     }
@@ -37,8 +37,8 @@ impl Validate for AuditLogQuery {
 
 #[rocket::get("/audit-logs?<query..>")]
 pub async fn get_audit_logs(
-    mut db: Connection<DbConn>,
     auth: AuthenticatedUser,
+    mut db: Connection<DbConn>,
     query: AuditLogQuery,
 ) -> ApiResult<Vec<AuditLog>> {
     require_admin(&auth)?;
@@ -101,29 +101,29 @@ fn parse_date_bound(
     field: &'static str,
     value: Option<&str>,
     end_of_day: bool,
-) -> Result<Option<NaiveDateTime>, ApiError> {
+) -> Result<Option<DateTime<Utc>>, ApiError> {
     let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
         return Ok(None);
     };
 
     if let Ok(date) = NaiveDate::parse_from_str(value, "%Y-%m-%d") {
-        let time = if end_of_day {
-            chrono::NaiveTime::from_hms_opt(23, 59, 59)
+        let date_time = if end_of_day {
+            date.and_hms_micro_opt(23, 59, 59, 999_999)
         } else {
-            chrono::NaiveTime::from_hms_opt(0, 0, 0)
+            date.and_hms_opt(0, 0, 0)
         }
         .expect("valid static time");
 
-        return Ok(Some(NaiveDateTime::new(date, time)));
+        return Ok(Some(date_time.and_utc()));
     }
 
-    if let Ok(date_time) = NaiveDateTime::parse_from_str(value, "%Y-%m-%dT%H:%M") {
-        return Ok(Some(date_time));
+    if let Ok(date_time) = DateTime::parse_from_rfc3339(value) {
+        return Ok(Some(date_time.with_timezone(&Utc)));
     }
 
     Err(ApiError::Validation(vec![FieldViolation::new(
         field,
-        "must be YYYY-MM-DD or YYYY-MM-DDTHH:MM",
+        "must be YYYY-MM-DD (UTC) or RFC3339 with an explicit offset",
     )]))
 }
 
@@ -149,4 +149,38 @@ pub async fn record_system_audit_log(
     .await?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_date_bound;
+    use chrono::{TimeZone, Timelike, Utc};
+
+    #[test]
+    fn date_only_audit_bounds_are_the_full_utc_day() {
+        let start = parse_date_bound("created_from", Some("2026-07-12"), false)
+            .unwrap()
+            .unwrap();
+        let end = parse_date_bound("created_to", Some("2026-07-12"), true)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(start, Utc.with_ymd_and_hms(2026, 7, 12, 0, 0, 0).unwrap());
+        assert_eq!(end.date_naive(), start.date_naive());
+        assert_eq!((end.hour(), end.minute(), end.second()), (23, 59, 59));
+        assert_eq!(end.timestamp_subsec_micros(), 999_999);
+    }
+
+    #[test]
+    fn audit_rfc3339_offsets_are_normalized_and_naive_datetimes_are_rejected() {
+        let parsed = parse_date_bound("created_from", Some("2026-07-12T20:30:00+08:00"), false)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            parsed,
+            Utc.with_ymd_and_hms(2026, 7, 12, 12, 30, 0).unwrap()
+        );
+        assert!(parse_date_bound("created_from", Some("2026-07-12T20:30"), false,).is_err());
+    }
 }

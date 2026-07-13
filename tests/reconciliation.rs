@@ -2,6 +2,7 @@ use reqwest::{blocking::Client, StatusCode};
 use serde_json::{json, Value};
 
 pub mod common;
+use common::CookieAuthRequest;
 
 #[test]
 fn complete_snapshots_archive_missing_records_without_archiving_on_partial_or_bounded_runs() {
@@ -13,7 +14,7 @@ fn complete_snapshots_archive_missing_records_without_archiving_on_partial_or_bo
 
     let first_work = import_work_cards(
         &client,
-        &admin.token,
+        &admin.cookie,
         &work_source,
         Some(true),
         vec![
@@ -28,7 +29,7 @@ fn complete_snapshots_archive_missing_records_without_archiving_on_partial_or_bo
 
     let partial_work = import_work_cards(
         &client,
-        &admin.token,
+        &admin.cookie,
         &work_source,
         Some(true),
         vec![
@@ -39,11 +40,11 @@ fn complete_snapshots_archive_missing_records_without_archiving_on_partial_or_bo
     assert_eq!(partial_work["run"]["status"], "partial_success");
     assert_eq!(partial_work["run"]["snapshot_complete"], true);
     assert_eq!(partial_work["run"]["archived_count"], 0);
-    assert_list_contains(&client, &admin.token, "/work-cards", work_b_id, true);
+    assert_list_contains(&client, &admin.cookie, "/work-cards", work_b_id, true);
 
     let bounded_work = import_work_cards(
         &client,
-        &admin.token,
+        &admin.cookie,
         &work_source,
         Some(false),
         vec![work_item("work-a", "Work A bounded", "high")],
@@ -51,25 +52,25 @@ fn complete_snapshots_archive_missing_records_without_archiving_on_partial_or_bo
     assert_eq!(bounded_work["run"]["status"], "success");
     assert_eq!(bounded_work["run"]["snapshot_complete"], false);
     assert_eq!(bounded_work["run"]["archived_count"], 0);
-    assert_list_contains(&client, &admin.token, "/work-cards", work_b_id, true);
+    assert_list_contains(&client, &admin.cookie, "/work-cards", work_b_id, true);
 
     let final_work = import_work_cards(
         &client,
-        &admin.token,
+        &admin.cookie,
         &work_source,
         Some(true),
         vec![work_item("work-a", "Work A final", "high")],
     );
     assert_eq!(final_work["run"]["status"], "success");
     assert_eq!(final_work["run"]["archived_count"], 1);
-    assert_list_contains(&client, &admin.token, "/work-cards", work_b_id, false);
+    assert_list_contains(&client, &admin.cookie, "/work-cards", work_b_id, false);
 
-    let archived_work = get_data(&client, &admin.token, &format!("/work-cards/{work_b_id}"));
+    let archived_work = get_data(&client, &admin.cookie, &format!("/work-cards/{work_b_id}"));
     assert!(archived_work["archived_at"].is_string());
 
     let first_notifications = import_notifications(
         &client,
-        &admin.token,
+        &admin.cookie,
         &notification_source,
         Some(true),
         vec![
@@ -82,20 +83,26 @@ fn complete_snapshots_archive_missing_records_without_archiving_on_partial_or_bo
 
     let final_notifications = import_notifications(
         &client,
-        &admin.token,
+        &admin.cookie,
         &notification_source,
         Some(true),
         vec![notification("message-a", "Message A updated")],
     );
     assert_eq!(final_notifications["run"]["status"], "success");
     assert_eq!(final_notifications["run"]["archived_count"], 1);
-    assert_list_contains(&client, &admin.token, "/notifications", message_b_id, false);
+    assert_list_contains(
+        &client,
+        &admin.cookie,
+        "/notifications",
+        message_b_id,
+        false,
+    );
 
-    let starts_at = chrono::Utc::now().naive_utc() + chrono::Duration::hours(1);
+    let starts_at = chrono::Utc::now() + chrono::Duration::hours(1);
     let ends_at = starts_at + chrono::Duration::minutes(30);
     let first_calendar = post_import(
         &client,
-        &admin.token,
+        &admin.cookie,
         &format!("/connectors/{calendar_source}/calendar-events/import"),
         Some(true),
         vec![
@@ -107,7 +114,7 @@ fn complete_snapshots_archive_missing_records_without_archiving_on_partial_or_bo
     let event_b_id = first_calendar["data"][1]["id"].as_i64().unwrap();
     let final_calendar = post_import(
         &client,
-        &admin.token,
+        &admin.cookie,
         &format!("/connectors/{calendar_source}/calendar-events/import"),
         Some(true),
         vec![calendar_event(
@@ -121,13 +128,13 @@ fn complete_snapshots_archive_missing_records_without_archiving_on_partial_or_bo
     assert_eq!(final_calendar["run"]["archived_count"], 1);
     assert_detail_status(
         &client,
-        &admin.token,
+        &admin.cookie,
         &format!("/calendar-events/{event_a_id}"),
         StatusCode::OK,
     );
     assert_detail_status(
         &client,
-        &admin.token,
+        &admin.cookie,
         &format!("/calendar-events/{event_b_id}"),
         StatusCode::NOT_FOUND,
     );
@@ -174,7 +181,7 @@ fn post_import(
 ) -> Value {
     let response = client
         .post(format!("{}{}", common::APP_HOST, path))
-        .bearer_auth(token)
+        .cookie_auth(token)
         .json(&json!({
             "items": items,
             "snapshot_complete": snapshot_complete,
@@ -188,7 +195,7 @@ fn post_import(
 fn get_data(client: &Client, token: &str, path: &str) -> Value {
     let response = client
         .get(format!("{}{}", common::APP_HOST, path))
-        .bearer_auth(token)
+        .cookie_auth(token)
         .send()
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
@@ -211,7 +218,7 @@ fn assert_list_contains(client: &Client, token: &str, path: &str, id: i64, expec
 fn assert_detail_status(client: &Client, token: &str, path: &str, expected: StatusCode) {
     let response = client
         .get(format!("{}{}", common::APP_HOST, path))
-        .bearer_auth(token)
+        .cookie_auth(token)
         .send()
         .unwrap();
     assert_eq!(response.status(), expected, "unexpected GET {path} status");
@@ -243,8 +250,8 @@ fn notification(external_id: &str, title: &str) -> Value {
 fn calendar_event(
     external_id: &str,
     title: &str,
-    starts_at: chrono::NaiveDateTime,
-    ends_at: chrono::NaiveDateTime,
+    starts_at: chrono::DateTime<chrono::Utc>,
+    ends_at: chrono::DateTime<chrono::Utc>,
 ) -> Value {
     json!({
         "external_id": external_id,
@@ -252,8 +259,8 @@ fn calendar_event(
         "body": null,
         "organizer": "Portal team",
         "location": "Teams",
-        "starts_at": starts_at.format("%Y-%m-%dT%H:%M:%S").to_string(),
-        "ends_at": ends_at.format("%Y-%m-%dT%H:%M:%S").to_string(),
+        "starts_at": starts_at,
+        "ends_at": ends_at,
         "time_zone": "UTC",
         "is_all_day": false,
         "is_cancelled": false,

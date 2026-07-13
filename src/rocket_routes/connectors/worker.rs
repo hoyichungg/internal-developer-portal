@@ -1,5 +1,5 @@
-use chrono::{NaiveDateTime, Utc};
-use diesel::sql_types::Text;
+use chrono::{DateTime, Utc};
+use diesel::sql_types::{BigInt, Bool, Text};
 use diesel::{sql_query, QueryableByName};
 use diesel_async::{AsyncConnection, AsyncPgConnection, RunQueryDsl};
 use serde_json::json;
@@ -10,12 +10,14 @@ use tokio::sync::watch;
 
 use crate::api::ApiError;
 use crate::models::{
-    schedule_interval_seconds, ConnectorWorker, ConnectorWorkerHeartbeat, MaintenanceRun,
+    effective_schedule_interval_seconds, ConnectorWorker, ConnectorWorkerHeartbeat, MaintenanceRun,
     NewMaintenanceRun,
 };
 use crate::repositories::{
-    AuditLogRepository, ConnectorConfigRepository, ConnectorRepository, ConnectorRunRepository,
-    ConnectorWorkerRepository, MaintenanceRunRepository, ServiceHealthCheckRepository,
+    bounded_retry_backoff_seconds, AuditLogRepository, ConnectorConfigRepository,
+    ConnectorRepository, ConnectorRunRepository, ConnectorWorkerRepository,
+    LoginThrottleRepository, MaintenanceRunRepository, OidcLoginTransactionRepository,
+    ServiceHealthCheckRepository, SessionRepository,
 };
 use crate::rocket_routes::audit_logs::record_system_audit_log;
 use crate::rocket_routes::connectors::runtime::{
@@ -26,13 +28,31 @@ use crate::rocket_routes::connectors::shared::count_as_i32;
 const DEFAULT_HEALTH_RETENTION_DAYS: i64 = 30;
 const DEFAULT_RUN_RETENTION_DAYS: i64 = 90;
 const DEFAULT_AUDIT_LOG_RETENTION_DAYS: i64 = 365;
+const DEFAULT_LOGIN_THROTTLE_RETENTION_DAYS: i64 = 30;
 const DEFAULT_RETENTION_CLEANUP_INTERVAL_SECONDS: u64 = 60 * 60;
+const RETENTION_FAILURE_RETRY_BASE_SECONDS: i64 = 30;
+const RETENTION_FAILURE_RETRY_MAX_SECONDS: i64 = 5 * 60;
 const DEFAULT_WORKER_HEARTBEAT_INTERVAL_SECONDS: u64 = 15;
 const DEFAULT_RUN_LEASE_SECONDS: u64 = 60;
 const DEFAULT_RUN_LEASE_RENEW_INTERVAL_SECONDS: u64 = 15;
 const DEFAULT_RUN_RETRY_BASE_SECONDS: u64 = 5;
 const DEFAULT_RUN_RETRY_MAX_SECONDS: u64 = 300;
 pub(crate) const DEFAULT_WORKER_STALE_AFTER_SECONDS: i64 = 45;
+
+/// Stable PostgreSQL advisory-lock key for retention ownership across workers.
+///
+/// The value encodes `IDPRET` plus a version byte. Keep it stable so workers
+/// running adjacent application versions still serialize the same task.
+#[doc(hidden)]
+pub const RETENTION_CLEANUP_ADVISORY_LOCK_KEY: i64 = 0x4944_5052_4554_0001;
+
+#[doc(hidden)]
+#[derive(Debug, Eq, PartialEq)]
+pub enum GuardedRetentionCleanupResult {
+    Completed((usize, usize, usize, usize, usize, usize)),
+    SkippedLockBusy,
+    SkippedRecentlyCompleted,
+}
 
 #[derive(Clone, Copy)]
 struct ConnectorRetentionPolicy {
@@ -46,6 +66,41 @@ struct ConnectorRetentionCleanup {
     health_checks_deleted: usize,
     runs_deleted: usize,
     audit_logs_deleted: usize,
+    oidc_transactions_deleted: usize,
+    expired_sessions_deleted: usize,
+    login_throttle_buckets_deleted: usize,
+}
+
+enum ConnectorRetentionCleanupAttempt {
+    Completed(ConnectorRetentionCleanup),
+    SkippedLockBusy,
+    SkippedRecentlyCompleted,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RetentionAttemptOutcome {
+    Completed,
+    SkippedLockBusy,
+    SkippedRecentlyCompleted,
+    Failed,
+}
+
+struct RetentionAttemptSchedule {
+    next_attempt_at: Instant,
+    consecutive_failures: i32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WorkerCycleOperation {
+    LeaseRecovery,
+    RetentionCleanup,
+    Scheduler,
+    ConnectorQueue,
+}
+
+#[derive(Default)]
+struct WorkerCycleState {
+    reconnect_required: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -70,7 +125,7 @@ struct ConnectorWorkerLoopConfig {
     retention_policy: ConnectorRetentionPolicy,
     lease_policy: ConnectorRunLeasePolicy,
     worker_id: String,
-    worker_started_at: NaiveDateTime,
+    worker_started_at: DateTime<Utc>,
 }
 
 #[derive(QueryableByName)]
@@ -79,10 +134,16 @@ struct CurrentDatabaseName {
     database_name: String,
 }
 
+#[derive(QueryableByName)]
+struct AdvisoryLockAttempt {
+    #[diesel(sql_type = Bool)]
+    acquired: bool,
+}
+
 #[derive(Clone, Copy)]
 struct WorkerHeartbeatContext<'a> {
     worker_id: &'a str,
-    started_at: NaiveDateTime,
+    started_at: DateTime<Utc>,
     scheduler_enabled: bool,
     retention_enabled: bool,
 }
@@ -110,9 +171,70 @@ impl ConnectorRetentionPolicy {
     }
 
     fn enabled(&self) -> bool {
-        self.health_retention_days.is_some()
-            || self.run_retention_days.is_some()
-            || self.audit_log_retention_days.is_some()
+        // Authentication cleanup is intentionally non-optional. Setting every
+        // configurable history retention value to zero disables only those
+        // history paths; expired sessions and transient auth state must still
+        // remain bounded.
+        true
+    }
+}
+
+impl RetentionAttemptSchedule {
+    fn due_immediately(now: Instant) -> Self {
+        Self {
+            next_attempt_at: now,
+            consecutive_failures: 0,
+        }
+    }
+
+    fn is_due(&self, now: Instant) -> bool {
+        now >= self.next_attempt_at
+    }
+
+    fn record_outcome(
+        &mut self,
+        outcome: RetentionAttemptOutcome,
+        policy: &ConnectorRetentionPolicy,
+        now: Instant,
+    ) {
+        let delay = match outcome {
+            RetentionAttemptOutcome::Completed => {
+                self.consecutive_failures = 0;
+                policy.cleanup_interval
+            }
+            RetentionAttemptOutcome::SkippedLockBusy
+            | RetentionAttemptOutcome::SkippedRecentlyCompleted => {
+                // Another worker either owns or already completed this
+                // interval's pass. Advancing a full interval prevents every
+                // standby from taking turns running the same cleanup.
+                self.consecutive_failures = 0;
+                policy.cleanup_interval
+            }
+            RetentionAttemptOutcome::Failed => {
+                self.consecutive_failures = self.consecutive_failures.saturating_add(1);
+                StdDuration::from_secs(bounded_retry_backoff_seconds(
+                    self.consecutive_failures,
+                    RETENTION_FAILURE_RETRY_BASE_SECONDS,
+                    RETENTION_FAILURE_RETRY_MAX_SECONDS,
+                ) as u64)
+            }
+        };
+        self.next_attempt_at = now + delay;
+    }
+}
+
+impl WorkerCycleState {
+    fn record_failure(&mut self, operation: WorkerCycleOperation) {
+        // Retention is an isolated maintenance path. Its transaction has
+        // already rolled back, so let scheduler/queue operations prove whether
+        // the connection itself is unhealthy before reconnecting.
+        if operation != WorkerCycleOperation::RetentionCleanup {
+            self.reconnect_required = true;
+        }
+    }
+
+    fn can_continue_connector_work(&self) -> bool {
+        !self.reconnect_required
     }
 }
 
@@ -194,7 +316,7 @@ pub async fn run_connector_worker_forever() -> Result<(), String> {
     let retention_policy = ConnectorRetentionPolicy::from_env();
     let lease_policy = ConnectorRunLeasePolicy::from_env()?;
     let worker_id = format!("connector-worker-{}", uuid::Uuid::new_v4());
-    let worker_started_at = Utc::now().naive_utc();
+    let worker_started_at = Utc::now();
 
     rocket::info!("connector background worker started: {}", worker_id);
     rocket::info!(
@@ -242,7 +364,7 @@ async fn run_connector_worker_loop(config: ConnectorWorkerLoopConfig) {
     } = config;
     let poll = StdDuration::from_millis(poll_ms);
     let heartbeat_interval = StdDuration::from_secs(heartbeat_interval_seconds);
-    let mut last_retention_cleanup_at: Option<Instant> = None;
+    let mut retention_schedule = RetentionAttemptSchedule::due_immediately(Instant::now());
 
     loop {
         match AsyncPgConnection::establish(&database_url).await {
@@ -264,7 +386,7 @@ async fn run_connector_worker_loop(config: ConnectorWorkerLoopConfig) {
                     };
 
                 loop {
-                    let mut reconnect = false;
+                    let mut cycle = WorkerCycleState::default();
 
                     match ConnectorRunRepository::recover_expired_leases(
                         &mut db,
@@ -287,14 +409,14 @@ async fn run_connector_worker_loop(config: ConnectorWorkerLoopConfig) {
                         Ok(_) => {}
                         Err(error) => {
                             rocket::error!("connector lease recovery failed: {:?}", error);
-                            reconnect = true;
+                            cycle.record_failure(WorkerCycleOperation::LeaseRecovery);
                         }
                     }
 
-                    if !reconnect
-                        && retention_cleanup_due(&retention_policy, last_retention_cleanup_at)
+                    if cycle.can_continue_connector_work()
+                        && retention_schedule.is_due(Instant::now())
                     {
-                        let cleanup_started_at = Utc::now().naive_utc();
+                        let cleanup_started_at = Utc::now();
                         if let Err(error) = record_worker_heartbeat(
                             &mut db,
                             heartbeat,
@@ -317,8 +439,12 @@ async fn run_connector_worker_loop(config: ConnectorWorkerLoopConfig) {
                         )
                         .await
                         {
-                            Ok(cleanup) => {
-                                last_retention_cleanup_at = Some(Instant::now());
+                            Ok(ConnectorRetentionCleanupAttempt::Completed(cleanup)) => {
+                                retention_schedule.record_outcome(
+                                    RetentionAttemptOutcome::Completed,
+                                    &retention_policy,
+                                    Instant::now(),
+                                );
                                 match record_worker_heartbeat(
                                     &mut db, heartbeat, "idle", None, None,
                                 )
@@ -337,16 +463,77 @@ async fn run_connector_worker_loop(config: ConnectorWorkerLoopConfig) {
                                 if cleanup.health_checks_deleted > 0
                                     || cleanup.runs_deleted > 0
                                     || cleanup.audit_logs_deleted > 0
+                                    || cleanup.oidc_transactions_deleted > 0
+                                    || cleanup.expired_sessions_deleted > 0
+                                    || cleanup.login_throttle_buckets_deleted > 0
                                 {
                                     rocket::info!(
-                                        "connector retention cleanup removed {} health checks, {} runs, and {} audit logs",
+                                        "connector retention cleanup removed {} health checks, {} runs, {} audit logs, {} expired OIDC transactions, {} expired sessions, and {} stale login-throttle buckets",
                                         cleanup.health_checks_deleted,
                                         cleanup.runs_deleted,
-                                        cleanup.audit_logs_deleted
+                                        cleanup.audit_logs_deleted,
+                                        cleanup.oidc_transactions_deleted,
+                                        cleanup.expired_sessions_deleted,
+                                        cleanup.login_throttle_buckets_deleted,
                                     );
                                 }
                             }
+                            Ok(ConnectorRetentionCleanupAttempt::SkippedLockBusy) => {
+                                retention_schedule.record_outcome(
+                                    RetentionAttemptOutcome::SkippedLockBusy,
+                                    &retention_policy,
+                                    Instant::now(),
+                                );
+                                rocket::debug!(
+                                    "connector retention cleanup skipped: another worker owns the shared advisory lock"
+                                );
+                                match record_worker_heartbeat(
+                                    &mut db, heartbeat, "idle", None, None,
+                                )
+                                .await
+                                {
+                                    Ok(_) => {
+                                        last_heartbeat_at = Some(Instant::now());
+                                    }
+                                    Err(error) => {
+                                        rocket::warn!(
+                                            "connector worker heartbeat after retention skip failed: {:?}",
+                                            error
+                                        );
+                                    }
+                                }
+                            }
+                            Ok(ConnectorRetentionCleanupAttempt::SkippedRecentlyCompleted) => {
+                                retention_schedule.record_outcome(
+                                    RetentionAttemptOutcome::SkippedRecentlyCompleted,
+                                    &retention_policy,
+                                    Instant::now(),
+                                );
+                                rocket::debug!(
+                                    "connector retention cleanup skipped: the shared interval was already completed"
+                                );
+                                match record_worker_heartbeat(
+                                    &mut db, heartbeat, "idle", None, None,
+                                )
+                                .await
+                                {
+                                    Ok(_) => {
+                                        last_heartbeat_at = Some(Instant::now());
+                                    }
+                                    Err(error) => {
+                                        rocket::warn!(
+                                            "connector worker heartbeat after retention skip failed: {:?}",
+                                            error
+                                        );
+                                    }
+                                }
+                            }
                             Err(error) => {
+                                retention_schedule.record_outcome(
+                                    RetentionAttemptOutcome::Failed,
+                                    &retention_policy,
+                                    Instant::now(),
+                                );
                                 rocket::error!("connector retention cleanup failed: {:?}", error);
                                 if let Err(record_error) = record_retention_cleanup_failure(
                                     &mut db,
@@ -361,7 +548,7 @@ async fn run_connector_worker_loop(config: ConnectorWorkerLoopConfig) {
                                         record_error
                                     );
                                 }
-                                if let Err(heartbeat_error) = record_worker_heartbeat(
+                                match record_worker_heartbeat(
                                     &mut db,
                                     heartbeat,
                                     "error",
@@ -370,24 +557,29 @@ async fn run_connector_worker_loop(config: ConnectorWorkerLoopConfig) {
                                 )
                                 .await
                                 {
-                                    rocket::warn!(
-                                        "connector worker heartbeat after retention failure failed: {:?}",
-                                        heartbeat_error
-                                    );
+                                    Ok(_) => {
+                                        last_heartbeat_at = Some(Instant::now());
+                                    }
+                                    Err(heartbeat_error) => {
+                                        rocket::warn!(
+                                            "connector worker heartbeat after retention failure failed: {:?}",
+                                            heartbeat_error
+                                        );
+                                    }
                                 }
-                                reconnect = true;
+                                cycle.record_failure(WorkerCycleOperation::RetentionCleanup);
                             }
                         }
                     }
 
-                    if !reconnect && scheduler_enabled {
+                    if cycle.can_continue_connector_work() && scheduler_enabled {
                         if let Err(error) = enqueue_due_scheduled_runs(&mut db).await {
                             rocket::error!("connector scheduler failed: {:?}", error);
-                            break;
+                            cycle.record_failure(WorkerCycleOperation::Scheduler);
                         }
                     }
 
-                    if !reconnect {
+                    if cycle.can_continue_connector_work() {
                         for _ in 0..5 {
                             match process_one_queued_run(
                                 &mut db,
@@ -403,14 +595,14 @@ async fn run_connector_worker_loop(config: ConnectorWorkerLoopConfig) {
                                 Ok(false) => break,
                                 Err(error) => {
                                     rocket::error!("connector worker failed: {:?}", error);
-                                    reconnect = true;
+                                    cycle.record_failure(WorkerCycleOperation::ConnectorQueue);
                                     break;
                                 }
                             }
                         }
                     }
 
-                    if reconnect {
+                    if !cycle.can_continue_connector_work() {
                         break;
                     }
 
@@ -631,28 +823,47 @@ async fn record_worker_heartbeat(
     .map_err(ApiError::from)
 }
 
-fn retention_cleanup_due(
-    policy: &ConnectorRetentionPolicy,
-    last_cleanup_at: Option<Instant>,
-) -> bool {
-    policy.enabled()
-        && last_cleanup_at
-            .map(|last_cleanup_at| last_cleanup_at.elapsed() >= policy.cleanup_interval)
-            .unwrap_or(true)
-}
-
 async fn cleanup_connector_retention(
     db: &mut AsyncPgConnection,
     policy: &ConnectorRetentionPolicy,
     worker_id: &str,
-    started_at: NaiveDateTime,
-) -> Result<ConnectorRetentionCleanup, ApiError> {
+    started_at: DateTime<Utc>,
+) -> Result<ConnectorRetentionCleanupAttempt, ApiError> {
     let policy = *policy;
     let worker_id = worker_id.to_owned();
 
-    db.transaction::<ConnectorRetentionCleanup, ApiError, _>(|conn| {
+    db.transaction::<ConnectorRetentionCleanupAttempt, ApiError, _>(|conn| {
         Box::pin(async move {
-            let now = Utc::now().naive_utc();
+            // This must be the first statement in the cleanup transaction.
+            // PostgreSQL advisory locks coordinate every worker session on the
+            // portal database, while the xact form guarantees ownership is
+            // released on both commit and rollback.
+            let lock = sql_query("SELECT pg_try_advisory_xact_lock($1) AS acquired")
+                .bind::<BigInt, _>(RETENTION_CLEANUP_ADVISORY_LOCK_KEY)
+                .get_result::<AdvisoryLockAttempt>(conn)
+                .await?;
+            if !lock.acquired {
+                // A skip is expected multi-worker contention, not maintenance.
+                // Do not add a maintenance_runs row: only the owning worker
+                // records success/failure, keeping operator history meaningful.
+                return Ok(ConnectorRetentionCleanupAttempt::SkippedLockBusy);
+            }
+
+            let now = Utc::now();
+            let cleanup_interval_seconds =
+                i64::try_from(policy.cleanup_interval.as_secs()).unwrap_or(i64::MAX);
+            let latest_success =
+                MaintenanceRunRepository::find_latest_success(conn, "retention_cleanup").await?;
+            if latest_success.is_some_and(|latest| {
+                now.signed_duration_since(latest.finished_at).num_seconds()
+                    < cleanup_interval_seconds
+            }) {
+                // The lock prevents concurrent work; this shared success check
+                // prevents sequential duplicate passes from workers whose local
+                // timers drift by a few milliseconds.
+                return Ok(ConnectorRetentionCleanupAttempt::SkippedRecentlyCompleted);
+            }
+
             let health_checks_deleted = match policy.health_retention_days {
                 Some(days) => {
                     let cutoff = now - chrono::Duration::days(days);
@@ -674,7 +885,15 @@ async fn cleanup_connector_retention(
                 }
                 None => 0,
             };
-            let finished_at = Utc::now().naive_utc();
+            let oidc_transactions_deleted =
+                OidcLoginTransactionRepository::delete_expired(conn, now).await?;
+            let expired_sessions_deleted = SessionRepository::delete_expired(conn, now).await?;
+            let login_throttle_buckets_deleted = LoginThrottleRepository::prune_before(
+                conn,
+                now - chrono::Duration::days(DEFAULT_LOGIN_THROTTLE_RETENTION_DAYS),
+            )
+            .await?;
+            let finished_at = Utc::now();
             let duration_ms = (finished_at - started_at).num_milliseconds().max(0);
 
             MaintenanceRunRepository::create(
@@ -694,11 +913,16 @@ async fn cleanup_connector_retention(
             )
             .await?;
 
-            Ok(ConnectorRetentionCleanup {
-                health_checks_deleted,
-                runs_deleted,
-                audit_logs_deleted,
-            })
+            Ok(ConnectorRetentionCleanupAttempt::Completed(
+                ConnectorRetentionCleanup {
+                    health_checks_deleted,
+                    runs_deleted,
+                    audit_logs_deleted,
+                    oidc_transactions_deleted,
+                    expired_sessions_deleted,
+                    login_throttle_buckets_deleted,
+                },
+            ))
         })
     })
     .await
@@ -717,7 +941,7 @@ pub async fn run_guarded_retention_cleanup_for_test(
     run_retention_days: Option<i64>,
     audit_log_retention_days: Option<i64>,
     worker_id: &str,
-) -> Result<(usize, usize, usize), String> {
+) -> Result<GuardedRetentionCleanupResult, String> {
     ensure_safe_test_database(db, "retention test cleanup").await?;
 
     let policy = ConnectorRetentionPolicy {
@@ -726,15 +950,28 @@ pub async fn run_guarded_retention_cleanup_for_test(
         audit_log_retention_days,
         cleanup_interval: StdDuration::from_secs(DEFAULT_RETENTION_CLEANUP_INTERVAL_SECONDS),
     };
-    let cleanup = cleanup_connector_retention(db, &policy, worker_id, Utc::now().naive_utc())
+    let attempt = cleanup_connector_retention(db, &policy, worker_id, Utc::now())
         .await
         .map_err(|error| format!("retention test cleanup failed: {error:?}"))?;
 
-    Ok((
-        cleanup.health_checks_deleted,
-        cleanup.runs_deleted,
-        cleanup.audit_logs_deleted,
-    ))
+    Ok(match attempt {
+        ConnectorRetentionCleanupAttempt::Completed(cleanup) => {
+            GuardedRetentionCleanupResult::Completed((
+                cleanup.health_checks_deleted,
+                cleanup.runs_deleted,
+                cleanup.audit_logs_deleted,
+                cleanup.oidc_transactions_deleted,
+                cleanup.expired_sessions_deleted,
+                cleanup.login_throttle_buckets_deleted,
+            ))
+        }
+        ConnectorRetentionCleanupAttempt::SkippedLockBusy => {
+            GuardedRetentionCleanupResult::SkippedLockBusy
+        }
+        ConnectorRetentionCleanupAttempt::SkippedRecentlyCompleted => {
+            GuardedRetentionCleanupResult::SkippedRecentlyCompleted
+        }
+    })
 }
 
 /// Claims one queued run using the production repository semantics.
@@ -820,10 +1057,10 @@ fn is_safe_test_database_name(database_name: &str) -> bool {
 async fn record_retention_cleanup_failure(
     db: &mut AsyncPgConnection,
     worker_id: &str,
-    started_at: NaiveDateTime,
+    started_at: DateTime<Utc>,
     error: &ApiError,
 ) -> Result<MaintenanceRun, ApiError> {
-    let finished_at = Utc::now().naive_utc();
+    let finished_at = Utc::now();
     let duration_ms = (finished_at - started_at).num_milliseconds().max(0);
 
     MaintenanceRunRepository::create(
@@ -853,7 +1090,7 @@ async fn enqueue_due_scheduled_runs(db: &mut AsyncPgConnection) -> Result<usize,
 }
 
 async fn enqueue_due_scheduled_runs_locked(db: &mut AsyncPgConnection) -> Result<usize, ApiError> {
-    let now = Utc::now().naive_utc();
+    let now = Utc::now();
     let configs = ConnectorConfigRepository::find_due_for_schedule(db, now, 10).await?;
     let mut enqueued = 0;
 
@@ -861,9 +1098,12 @@ async fn enqueue_due_scheduled_runs_locked(db: &mut AsyncPgConnection) -> Result
         let Some(schedule_cron) = config.schedule_cron.as_deref() else {
             continue;
         };
-        let Some(interval_seconds) = schedule_interval_seconds(schedule_cron) else {
+        let Some(interval_seconds) = effective_schedule_interval_seconds(schedule_cron) else {
             continue;
         };
+        // Older databases may contain sub-minute schedules created before the
+        // API enforced a safe minimum. Clamp them here so an old config cannot
+        // flood run history and audit logs while an operator updates it.
 
         match ConnectorRepository::find_by_source(db, &config.source).await {
             Ok(connector) if connector.status == "paused" || !config.enabled => {
@@ -973,8 +1213,21 @@ fn strict_env_flag(name: &str, default: bool) -> Result<bool, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::is_safe_test_database_name;
+    use super::{
+        is_safe_test_database_name, ConnectorRetentionPolicy, RetentionAttemptOutcome,
+        RetentionAttemptSchedule, WorkerCycleOperation, WorkerCycleState,
+    };
     use crate::repositories::bounded_retry_backoff_seconds;
+    use std::time::{Duration as StdDuration, Instant};
+
+    fn retention_policy() -> ConnectorRetentionPolicy {
+        ConnectorRetentionPolicy {
+            health_retention_days: Some(30),
+            run_retention_days: Some(90),
+            audit_log_retention_days: Some(365),
+            cleanup_interval: StdDuration::from_secs(60 * 60),
+        }
+    }
 
     #[test]
     fn retention_test_database_name_requires_standalone_test_segment() {
@@ -993,5 +1246,76 @@ mod tests {
         assert_eq!(bounded_retry_backoff_seconds(3, 5, 300), 20);
         assert_eq!(bounded_retry_backoff_seconds(20, 5, 300), 300);
         assert_eq!(bounded_retry_backoff_seconds(0, 0, 0), 1);
+    }
+
+    #[test]
+    fn retention_schedule_delays_lock_contention_without_marking_failure() {
+        let policy = retention_policy();
+        let now = Instant::now();
+        let mut schedule = RetentionAttemptSchedule::due_immediately(now);
+
+        assert!(schedule.is_due(now));
+        schedule.record_outcome(RetentionAttemptOutcome::SkippedLockBusy, &policy, now);
+
+        assert_eq!(schedule.consecutive_failures, 0);
+        assert_eq!(
+            schedule.next_attempt_at.duration_since(now),
+            policy.cleanup_interval
+        );
+        assert!(!schedule.is_due(now + StdDuration::from_secs(1)));
+        assert!(schedule.is_due(schedule.next_attempt_at));
+
+        let next_attempt = schedule.next_attempt_at;
+        schedule.record_outcome(
+            RetentionAttemptOutcome::SkippedRecentlyCompleted,
+            &policy,
+            next_attempt,
+        );
+        assert_eq!(schedule.consecutive_failures, 0);
+        assert_eq!(
+            schedule.next_attempt_at.duration_since(next_attempt),
+            policy.cleanup_interval
+        );
+    }
+
+    #[test]
+    fn retention_failure_retry_is_exponential_bounded_and_resets_on_success() {
+        let policy = retention_policy();
+        let mut now = Instant::now();
+        let mut schedule = RetentionAttemptSchedule::due_immediately(now);
+        let expected_delays = [30, 60, 120, 240, 300, 300];
+
+        for expected_delay in expected_delays {
+            schedule.record_outcome(RetentionAttemptOutcome::Failed, &policy, now);
+            assert_eq!(
+                schedule.next_attempt_at.duration_since(now),
+                StdDuration::from_secs(expected_delay)
+            );
+            assert!(!schedule.is_due(now + StdDuration::from_secs(1)));
+            now = schedule.next_attempt_at;
+        }
+        schedule.record_outcome(RetentionAttemptOutcome::Completed, &policy, now);
+        assert_eq!(schedule.consecutive_failures, 0);
+        assert_eq!(
+            schedule.next_attempt_at.duration_since(now),
+            policy.cleanup_interval
+        );
+    }
+
+    #[test]
+    fn retention_failure_does_not_block_scheduler_or_connector_queue() {
+        let mut cycle = WorkerCycleState::default();
+        cycle.record_failure(WorkerCycleOperation::RetentionCleanup);
+        assert!(cycle.can_continue_connector_work());
+
+        for operation in [
+            WorkerCycleOperation::LeaseRecovery,
+            WorkerCycleOperation::Scheduler,
+            WorkerCycleOperation::ConnectorQueue,
+        ] {
+            let mut cycle = WorkerCycleState::default();
+            cycle.record_failure(operation);
+            assert!(!cycle.can_continue_connector_work());
+        }
     }
 }

@@ -10,7 +10,7 @@ RUN pnpm install --frozen-lockfile
 COPY frontend ./
 RUN pnpm build
 
-FROM rust:1.81-bookworm
+FROM rust:1.85.0-bookworm
 
 WORKDIR /app
 
@@ -20,6 +20,10 @@ RUN apt-get update \
 
 RUN cargo install diesel_cli --version 2.1.1 --locked --no-default-features --features postgres \
     && cargo install cargo-watch --version 8.5.3 --locked
+
+# rust-toolchain.toml requests these components. Bake them into the development
+# image so every container recreation does not download them again.
+RUN rustup component add clippy rustfmt
 
 COPY . .
 COPY --from=frontend-build /app/frontend/dist /app/frontend/dist

@@ -5,6 +5,7 @@ use reqwest::{blocking::Client, StatusCode};
 use serde_json::{json, Value};
 
 pub mod common;
+use common::CookieAuthRequest;
 
 #[test]
 fn connector_scope_updates_move_existing_imported_records_atomically() {
@@ -16,7 +17,7 @@ fn connector_scope_updates_move_existing_imported_records_atomically() {
 
     let maintainer = post_data(
         &client,
-        &admin.token,
+        &admin.cookie,
         "/maintainers",
         json!({
             "display_name": common::unique_name("Scope move team"),
@@ -26,13 +27,13 @@ fn connector_scope_updates_move_existing_imported_records_atomically() {
     let maintainer_id = maintainer["id"].as_i64().unwrap();
     post_data(
         &client,
-        &admin.token,
+        &admin.cookie,
         &format!("/maintainers/{maintainer_id}/members"),
         json!({ "user_id": team_member.user_id, "role": "viewer" }),
     );
     post_data(
         &client,
-        &admin.token,
+        &admin.cookie,
         "/connectors",
         json!({
             "source": source,
@@ -47,7 +48,7 @@ fn connector_scope_updates_move_existing_imported_records_atomically() {
 
     let work = post_data(
         &client,
-        &admin.token,
+        &admin.cookie,
         &format!("/connectors/{source}/work-cards/import"),
         json!({
             "items": [{
@@ -64,7 +65,7 @@ fn connector_scope_updates_move_existing_imported_records_atomically() {
         .clone();
     let notification = post_data(
         &client,
-        &admin.token,
+        &admin.cookie,
         &format!("/connectors/{source}/notifications/import"),
         json!({
             "items": [{
@@ -78,11 +79,11 @@ fn connector_scope_updates_move_existing_imported_records_atomically() {
         }),
     )["data"][0]
         .clone();
-    let starts_at = chrono::Utc::now().naive_utc() + chrono::Duration::hours(1);
+    let starts_at = chrono::Utc::now() + chrono::Duration::hours(1);
     let ends_at = starts_at + chrono::Duration::minutes(30);
     let calendar_event = post_data(
         &client,
-        &admin.token,
+        &admin.cookie,
         &format!("/connectors/{source}/calendar-events/import"),
         json!({
             "items": [{
@@ -91,8 +92,8 @@ fn connector_scope_updates_move_existing_imported_records_atomically() {
                 "body": null,
                 "organizer": "Portal team",
                 "location": "Teams",
-                "starts_at": starts_at.format("%Y-%m-%dT%H:%M:%S").to_string(),
-                "ends_at": ends_at.format("%Y-%m-%dT%H:%M:%S").to_string(),
+                "starts_at": starts_at,
+                "ends_at": ends_at,
                 "time_zone": "UTC",
                 "is_all_day": false,
                 "is_cancelled": false,
@@ -105,7 +106,7 @@ fn connector_scope_updates_move_existing_imported_records_atomically() {
 
     let moved = put_data(
         &client,
-        &admin.token,
+        &admin.cookie,
         &format!("/connectors/{source}/scope"),
         json!({
             "scope_type": "maintainer",
@@ -121,18 +122,18 @@ fn connector_scope_updates_move_existing_imported_records_atomically() {
         ("calendar-events", &calendar_event),
     ] {
         let record_id = record["id"].as_i64().unwrap();
-        let updated = get_data(&client, &admin.token, &format!("/{path}/{record_id}"));
+        let updated = get_data(&client, &admin.cookie, &format!("/{path}/{record_id}"));
         assert_eq!(updated["maintainer_id"], maintainer_id);
         assert_eq!(updated["owner_user_id"], Value::Null);
         assert_detail_status(
             &client,
-            &team_member.token,
+            &team_member.cookie,
             &format!("/{path}/{record_id}"),
             StatusCode::OK,
         );
         assert_detail_status(
             &client,
-            &outsider.token,
+            &outsider.cookie,
             &format!("/{path}/{record_id}"),
             StatusCode::NOT_FOUND,
         );
@@ -142,7 +143,7 @@ fn connector_scope_updates_move_existing_imported_records_atomically() {
 fn post_data(client: &Client, token: &str, path: &str, body: Value) -> Value {
     let response = client
         .post(format!("{}{}", common::APP_HOST, path))
-        .bearer_auth(token)
+        .cookie_auth(token)
         .json(&body)
         .send()
         .unwrap();
@@ -157,7 +158,7 @@ fn post_data(client: &Client, token: &str, path: &str, body: Value) -> Value {
 fn put_data(client: &Client, token: &str, path: &str, body: Value) -> Value {
     let response = client
         .put(format!("{}{}", common::APP_HOST, path))
-        .bearer_auth(token)
+        .cookie_auth(token)
         .json(&body)
         .send()
         .unwrap();
@@ -168,7 +169,7 @@ fn put_data(client: &Client, token: &str, path: &str, body: Value) -> Value {
 fn get_data(client: &Client, token: &str, path: &str) -> Value {
     let response = client
         .get(format!("{}{}", common::APP_HOST, path))
-        .bearer_auth(token)
+        .cookie_auth(token)
         .send()
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
@@ -178,7 +179,7 @@ fn get_data(client: &Client, token: &str, path: &str) -> Value {
 fn assert_detail_status(client: &Client, token: &str, path: &str, expected: StatusCode) {
     let response = client
         .get(format!("{}{}", common::APP_HOST, path))
-        .bearer_auth(token)
+        .cookie_auth(token)
         .send()
         .unwrap();
     assert_eq!(response.status(), expected, "unexpected GET {path} status");
